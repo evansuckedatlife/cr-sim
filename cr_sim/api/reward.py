@@ -126,6 +126,11 @@ class RewardTracker:
         "_kite_ticks", "_previous", "_terms",
     )
 
+    #: Not a pure potential. ``_observe`` accumulates path-dependent state --
+    #: how long a unit spent kiting, which deaths have been counted -- so
+    #: skipping intermediate steps would lose it. Every state must be seen.
+    telescopes = False
+
     def __init__(
         self,
         team: Team,
@@ -320,6 +325,15 @@ class ProjectedReward:
     """
 
     __slots__ = ("team", "weights", "_previous", "_terms")
+
+    #: This reward is a pure potential, so a run of consecutive steps sums to
+    #: the difference between its first and last score -- every intermediate
+    #: term cancels. A caller advancing through several states at once can
+    #: therefore score only the endpoints. That is not an approximation, and
+    #: it matters: each score costs a projection, and 89% of decisions in a
+    #: match are forced, so the intermediate ones were most of the run's
+    #: compute.
+    telescopes = True
 
     def __init__(self, team: Team, weights: ProjectionWeights | None = None) -> None:
         self.team = team

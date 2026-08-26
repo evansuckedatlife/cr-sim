@@ -34,7 +34,10 @@ import numpy as np
 from ..api.env import CRSimEnv
 from .nets import ActorCritic
 
-__all__ = ["FrozenOpponent", "evaluation_probe"]
+__all__ = [
+    "FrozenOpponent", "OpponentPool", "PooledOpponent",
+    "evaluation_probe", "ancestor_probe",
+]
 
 
 class FrozenOpponent:
@@ -90,6 +93,87 @@ class FrozenOpponent:
         return (min(slot, slots - 1), gx, gy)
 
 
+class OpponentPool:
+    """Past versions of the policy, kept rather than replaced.
+
+    A single frozen opponent lets the learner cycle: it beats last week's
+    strategy, forgets the one before, and goes round in circles looking busy
+    the whole time. Nothing in the return says that is happening, because
+    against its immediate past self a cycling policy wins about half the time
+    forever.
+
+    Keeping a spread of ancestors closes that off -- to do well the policy has
+    to beat versions of itself from several stages back at once, and a
+    counter-strategy that loses to a great-grandparent shows up immediately.
+
+    The pool also supplies the measurement that matters. Progress against a
+    *fixed* old self is far more readable than lift against a random control,
+    whose per-episode spread is wide enough that a +0.23 reading on this
+    project turned out to be noise.
+    """
+
+    __slots__ = ("_members", "_capacity", "_rng", "generations")
+
+    def __init__(self, capacity: int = 8, seed: int = 0) -> None:
+        self._members: list[ActorCritic] = []
+        self._capacity = max(1, capacity)
+        self._rng = np.random.default_rng(seed)
+        #: How many snapshots have ever been added, which is the age scale the
+        #: oldest surviving member is measured against.
+        self.generations = 0
+
+    def __len__(self) -> int:
+        return len(self._members)
+
+    def add(self, net: ActorCritic) -> None:
+        """Take a snapshot of the current policy."""
+        import copy
+
+        clone = copy.deepcopy(net)
+        clone.eval()
+        for parameter in clone.parameters():
+            parameter.requires_grad_(False)
+        self._members.append(clone)
+        self.generations += 1
+        while len(self._members) > self._capacity:
+            # Drop from the middle, never the ends. The oldest member is the
+            # benchmark the ladder is measured against and the newest is the
+            # only one near the learner's own strength; evicting oldest-first
+            # would turn the pool back into a sliding window of recent selves,
+            # which is the thing it exists to avoid.
+            self._members.pop(len(self._members) // 2)
+
+    def sample(self) -> "ActorCritic | None":
+        if not self._members:
+            return None
+        return self._members[int(self._rng.integers(len(self._members)))]
+
+    def oldest(self) -> "ActorCritic | None":
+        return self._members[0] if self._members else None
+
+
+class PooledOpponent(FrozenOpponent):
+    """A frozen opponent that draws a new ancestor from the pool on refresh."""
+
+    __slots__ = ("_pool",)
+
+    def __init__(self, pool: OpponentPool, net: ActorCritic, nvec, seed: int = 0) -> None:
+        super().__init__(net, nvec, seed=seed)
+        self._pool = pool
+
+    def refresh(self, net: ActorCritic) -> None:
+        """Adopt a random ancestor, not necessarily the newest one.
+
+        ``net`` is ignored beyond keeping the signature the trainer expects --
+        the pool is filled by the caller, so that adding a generation and
+        choosing who plays stay separate decisions.
+        """
+        drawn = self._pool.sample()
+        if drawn is not None:
+            self._net = drawn
+        self.refreshes += 1
+
+
 def evaluation_probe(
     make_env: Callable[[], CRSimEnv],
     episodes: int = 40,
@@ -122,6 +206,49 @@ def evaluation_probe(
             # In control standard deviations, because the raw gap means
             # nothing without knowing how noisy the control is.
             "eval_lift_sd": (float(np.mean(result["returns"])) - control_return) / spread,
+        }
+
+    return probe
+
+
+def ancestor_probe(
+    make_env,
+    pool: OpponentPool,
+    nvec,
+    episodes: int = 30,
+    seed: int = 999,
+):
+    """Score the current policy against the oldest version of itself.
+
+    The most readable progress signal available here. The random control the
+    other probe uses has a per-episode spread several times larger than any
+    effect worth seeing, which is how six evaluations averaging +0.04 produced
+    an individual reading of +0.23. An ancestor is fixed, deterministic to
+    play against on fixed seeds, and roughly the right difficulty, so the same
+    number of episodes says much more.
+
+    Read it for what it is: beating your past self is evidence of movement,
+    not of skill. Two policies can trade wins while both stay hopeless, which
+    is why the random control stays as an anchor alongside this.
+    """
+    from .evaluate import evaluate
+
+    seeds = [int(s) for s in np.random.default_rng(seed).integers(0, 2**31 - 1, episodes)]
+
+    def probe(net: ActorCritic) -> dict:
+        ancestor = pool.oldest()
+        if ancestor is None:
+            return {}
+        env = make_env(FrozenOpponent(ancestor, nvec, seed=seed))
+        result = evaluate(env, net, episodes=episodes, seeds=seeds, greedy=False)
+        crowns = result["crowns"]
+        return {
+            "ancestor_win": float(np.mean([c > 0 for c in crowns])),
+            "ancestor_loss": float(np.mean([c < 0 for c in crowns])),
+            "ancestor_return": float(np.mean(result["returns"])),
+            # How far back the benchmark sits, so a rising win rate can be
+            # read against a benchmark that is itself getting older.
+            "ancestor_age": pool.generations - len(pool) + 1,
         }
 
     return probe

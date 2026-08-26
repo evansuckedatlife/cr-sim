@@ -32,7 +32,10 @@ from ..api.encoding import NOOP_SLOT
 from ..api.env import CRSimEnv
 from ..api.reward import ProjectionWeights, RewardWeights
 from .ppo import PPOConfig, train
-from .selfplay import FrozenOpponent, evaluation_probe
+from .selfplay import (
+    FrozenOpponent, OpponentPool, PooledOpponent,
+    ancestor_probe, evaluation_probe,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BUILD = ROOT / "data_cache" / "csv_logic"
@@ -115,7 +118,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--refresh-every", type=int, default=20,
-        help="updates between refreshing the self-play opponent",
+        help="updates between drawing a new self-play opponent from the pool",
+    )
+    parser.add_argument(
+        "--pool-size", type=int, default=8,
+        help="how many past versions of the policy to keep as opponents. One "
+             "lets the learner cycle -- beat last week's strategy, forget the "
+             "one before, and go round in circles while the return says "
+             "nothing is wrong. A spread of ancestors has to be beaten at "
+             "once. Set 1 for the old single-snapshot behaviour.",
+    )
+    parser.add_argument(
+        "--ancestor-episodes", type=int, default=30,
+        help="battles per ladder measurement against the oldest kept version",
     )
     parser.add_argument(
         "--opponent", choices=("idle", "random", "self"), default="self",
@@ -286,15 +301,23 @@ def main(argv: list[str] | None = None) -> int:
         # exist until the trainer has one. It hands it back here, which is what
         # lets this checkpoint mid-run instead of only at the end.
         snapshots: list = []
+        pool = OpponentPool(capacity=args.pool_size, seed=args.seed)
 
         def _on_net(built) -> None:
             net_holder["net"] = built
             if args.opponent == "self":
                 nvec = (5, config_nvec[0], config_nvec[1])
+                # The starting policy is the pool's first member, so the ladder
+                # has a benchmark from the very first update rather than only
+                # once a refresh has happened.
+                pool.add(built)
                 for holder in opponents:
-                    snapshot = FrozenOpponent(built, nvec, seed=args.seed)
+                    snapshot = PooledOpponent(pool, built, nvec, seed=args.seed)
                     holder.append(snapshot)
                     snapshots.append(snapshot)
+                probe_holder["ancestor"] = ancestor_probe(
+                    _env, pool, nvec, episodes=args.ancestor_episodes
+                )
             probe_holder["probe"] = evaluation_probe(
                 lambda: _env(None), episodes=args.eval_episodes
             )

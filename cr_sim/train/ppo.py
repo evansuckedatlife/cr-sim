@@ -59,6 +59,13 @@ class PPOConfig:
     epochs: int = 4
     minibatches: int = 4
     learning_rate: float = 3e-4
+    #: Learning rate for the value side. ``None`` uses ``learning_rate``.
+    #:
+    #: Worth raising above the actor's: the critic is solving a plain
+    #: regression with a stationary-ish target, while the actor is walking a
+    #: trust region and is the reason the rate is small in the first place.
+    #: Tying them holds the critic back for the actor's benefit.
+    value_learning_rate: "float | None" = 1e-3
     gamma: float = 0.997
     gae_lambda: float = 0.95
     clip_coefficient: float = 0.2
@@ -199,7 +206,22 @@ def train(
             num_actions=num_actions,
         )
     ).to(device)
-    optimiser = torch.optim.Adam(net.parameters(), lr=config.learning_rate, eps=1e-5)
+    if config.value_learning_rate is None:
+        optimiser = torch.optim.Adam(net.parameters(), lr=config.learning_rate, eps=1e-5)
+    else:
+        # Two groups by identity, not by name: with a separate critic the two
+        # sets are genuinely disjoint, and with a shared trunk this correctly
+        # leaves only the value head on the faster rate.
+        critic = net.critic_parameters()
+        critic_ids = {id(p) for p in critic}
+        actor = [p for p in net.parameters() if id(p) not in critic_ids]
+        optimiser = torch.optim.Adam(
+            [
+                {"params": actor, "lr": config.learning_rate},
+                {"params": critic, "lr": config.value_learning_rate},
+            ],
+            eps=1e-5,
+        )
 
     resumed_steps = resumed_updates = 0
     if resume is not None:

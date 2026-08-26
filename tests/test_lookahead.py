@@ -293,3 +293,49 @@ def test_the_terms_are_reported_separately(world):
     tracker = ProjectedReward(Team.BLUE, ProjectionWeights(horizon_seconds=2.0))
     tracker.score(_with_knight(world))
     assert set(tracker.terms) == {"crowns", "towers", "elixir", "projected_ticks"}
+
+
+# ------------------------------------------- skipping the intermediate scores
+
+
+def test_skipping_intermediate_scores_pays_exactly_the_same_reward(world):
+    """The optimisation that makes a projected-reward run affordable.
+
+    Most states in a match are forced -- one legal action -- and the
+    environment runs through them without consulting the policy. It used to
+    score the reward at every one of them, which meant a board projection
+    each, and those were about two thirds of the run's compute.
+
+    A potential telescopes: the intermediate terms cancel, so scoring only the
+    endpoints is arithmetically identical rather than an approximation. This
+    proves that on a real episode instead of asserting it, because "identical"
+    is exactly the kind of claim that is true right up until someone adds a
+    path-dependent term to the potential.
+    """
+    from cr_sim.api.env import CRSimEnv
+    from cr_sim.api.reward import ProjectedReward, ProjectionWeights
+
+    data, levels, registry = world
+    weights = ProjectionWeights(horizon_seconds=2.0)
+
+    def total(telescoping: bool) -> float:
+        env = CRSimEnv(data, levels, registry, DECK, DECK,
+                       ticks_per_second=20, frame_skip=30, max_ticks=20 * 60,
+                       reward_shaping_weight=0.01, reward_weights=weights)
+        # Same class either way; only the shortcut is toggled, so any
+        # difference is the shortcut's fault and nothing else's.
+        env._reward = ProjectedReward(env.team, weights)
+        # The flag is read off the class, so that is where it is set.
+        ProjectedReward.telescopes = telescoping
+        env.reset(seed=11)
+        return sum(_play_out(env, seed=11))
+
+    try:
+        with_skip = total(True)
+        without = total(False)
+    finally:
+        ProjectedReward.telescopes = True
+
+    assert with_skip == pytest.approx(without, abs=1e-9), (
+        "skipping intermediate scores changed the reward, so the potential "
+        "is not telescoping the way the shortcut assumes")

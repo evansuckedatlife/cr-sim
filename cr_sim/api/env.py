@@ -436,12 +436,19 @@ class CRSimEnv(_EnvBase):
         a choice.
         """
         gained = 0.0
+        # A reward that is a pure potential sums to the difference between the
+        # first and last state, so it is scored once at the end rather than at
+        # every state passed through. Each score costs a board projection and
+        # this loop runs about nine times per real decision, so the
+        # intermediate ones were roughly two thirds of the run's compute --
+        # for a number that cancels.
+        telescoping = getattr(self._reward, "telescopes", False)
         # Bounded so a pathological state cannot spin here forever. A whole
         # match at the default cadence is a few hundred decisions.
         for _ in range(_MAX_FORCED_RUN_OUT):
             mask = self.legal_action_mask()
             if int(mask.sum()) > 1:
-                return gained
+                break
             only = tuple(int(v) for v in np.argwhere(mask)[0])
 
             _apply_action(self.battle, self.team, only, self._config)
@@ -449,7 +456,8 @@ class CRSimEnv(_EnvBase):
             _advance(self.battle, self.frame_skip)
 
             if self._reward is not None:
-                gained += self._reward.step(self.battle, self.frame_skip)
+                if not telescoping:
+                    gained += self._reward.step(self.battle, self.frame_skip)
             else:
                 value = _shaped_value(self.battle, self.team, self.reward_shaping_weight)
                 gained += value - self._prev_value
@@ -458,7 +466,12 @@ class CRSimEnv(_EnvBase):
             if self.battle.finished or (
                 self.max_ticks is not None and self.battle.tick >= self.max_ticks
             ):
-                return gained
+                break
+        # One settle point for every way out of the loop. A telescoping reward
+        # is scored here and only here, so whichever exit was taken, the caller
+        # is paid the change across the whole run-out.
+        if telescoping and self._reward is not None:
+            gained += self._reward.step(self.battle, self.frame_skip)
         return gained
 
     def legal_action_mask(self) -> np.ndarray:

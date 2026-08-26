@@ -52,6 +52,19 @@ class NetConfig:
     #: rollout speed is what a CPU-bound self-play run is short of.
     channels: int = 64
     hidden: int = 256
+    #: Give the critic its own encoder rather than sharing the actor's.
+    #:
+    #: A shared trunk makes both losses compete for the same parameters, and
+    #: the policy gradient wins: the features end up chosen for acting, and
+    #: the critic predicts returns from a representation built for someone
+    #: else's job. Measured here, explained variance sat under 0.1 while
+    #: sharing -- close enough to zero that PPO's advantages were mostly
+    #: noise, which is the whole reason the previous run committed to a
+    #: strategy that never got stronger.
+    #:
+    #: Costs roughly twice the forward pass. Nearly free in wall-clock, since
+    #: this environment is bound by simulating battles, not by the network.
+    separate_critic: bool = True
 
 
 def _orthogonal(module: nn.Module, gain: float) -> nn.Module:
@@ -77,25 +90,30 @@ class ActorCritic(nn.Module):
         super().__init__()
         self.config = config
 
-        self.conv = nn.Sequential(
-            _orthogonal(nn.Conv2d(config.grid_channels, config.channels, 3, padding=1), 2**0.5),
-            nn.ReLU(),
-            _orthogonal(nn.Conv2d(config.channels, config.channels, 3, stride=2, padding=1), 2**0.5),
-            nn.ReLU(),
-            _orthogonal(nn.Conv2d(config.channels, config.channels, 3, stride=2, padding=1), 2**0.5),
-            nn.ReLU(),
-            nn.Flatten(),
-        )
-        conv_out = config.channels * ((config.grid_height + 3) // 4) * ((config.grid_width + 3) // 4)
+        def _encoder():
+            conv = nn.Sequential(
+                _orthogonal(nn.Conv2d(config.grid_channels, config.channels, 3, padding=1), 2**0.5),
+                nn.ReLU(),
+                _orthogonal(nn.Conv2d(config.channels, config.channels, 3, stride=2, padding=1), 2**0.5),
+                nn.ReLU(),
+                _orthogonal(nn.Conv2d(config.channels, config.channels, 3, stride=2, padding=1), 2**0.5),
+                nn.ReLU(),
+                nn.Flatten(),
+            )
+            vector = nn.Sequential(
+                _orthogonal(nn.Linear(config.vector_size, config.hidden), 2**0.5),
+                nn.ReLU(),
+            )
+            trunk = nn.Sequential(
+                _orthogonal(nn.Linear(conv_out + config.hidden, config.hidden), 2**0.5),
+                nn.ReLU(),
+            )
+            return conv, vector, trunk
 
-        self.vector = nn.Sequential(
-            _orthogonal(nn.Linear(config.vector_size, config.hidden), 2**0.5),
-            nn.ReLU(),
-        )
-        self.trunk = nn.Sequential(
-            _orthogonal(nn.Linear(conv_out + config.hidden, config.hidden), 2**0.5),
-            nn.ReLU(),
-        )
+        conv_out = config.channels * ((config.grid_height + 3) // 4) * ((config.grid_width + 3) // 4)
+        self.conv, self.vector, self.trunk = _encoder()
+        if config.separate_critic:
+            self.critic_conv, self.critic_vector, self.critic_trunk = _encoder()
         # Near-zero gain on the policy head keeps the opening distribution flat
         # across all 720 actions; gain 1 on the value head because its output is
         # a return estimate, not a logit.
@@ -105,13 +123,32 @@ class ActorCritic(nn.Module):
     def encode(self, grid: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
         return self.trunk(torch.cat([self.conv(grid), self.vector(vector)], dim=-1))
 
+    def encode_value(self, grid: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
+        """Features for the critic, which are its own when it has its own."""
+        if not self.config.separate_critic:
+            return self.encode(grid, vector)
+        return self.critic_trunk(
+            torch.cat([self.critic_conv(grid), self.critic_vector(vector)], dim=-1)
+        )
+
+    def critic_parameters(self):
+        """Just the value side, so it can be given its own learning rate."""
+        if not self.config.separate_critic:
+            return list(self.value_head.parameters())
+        return (
+            list(self.critic_conv.parameters())
+            + list(self.critic_vector.parameters())
+            + list(self.critic_trunk.parameters())
+            + list(self.value_head.parameters())
+        )
+
     def forward(
         self, grid: torch.Tensor, vector: torch.Tensor, mask: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return masked logits and the value estimate."""
-        features = self.encode(grid, vector)
-        logits = self.policy_head(features)
-        return _apply_mask(logits, mask), self.value_head(features).squeeze(-1)
+        logits = self.policy_head(self.encode(grid, vector))
+        value = self.value_head(self.encode_value(grid, vector)).squeeze(-1)
+        return _apply_mask(logits, mask), value
 
     @torch.no_grad()
     def act(
