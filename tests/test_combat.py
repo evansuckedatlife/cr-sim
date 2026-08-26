@@ -515,3 +515,139 @@ def test_wall_breakers_detonate_on_a_tower(world):
     for _ in range(120):  # the bomb is still travelling
         battle.step()
     assert tower.hitpoints < before, "did not damage the tower it blew up on"
+
+
+# ------------------------------------------------------- first-hit timing
+
+
+def _first_two_hits(world, battle, name, rarity, *, gap=0.9, limit=900):
+    """Spawn a unit against an indestructible wall and time its first two hits."""
+    from cr_sim.engine.projectiles import build_projectile_spec
+    from cr_sim.engine.fixed import distance
+
+    data, levels, _registry = world
+    spec = build_unit_spec(
+        data, levels, name,
+        level=levels.get(rarity).internal_level(11), rarity=rarity, clock=battle.clock,
+    )
+    attacker = Entity(
+        kind=spec.kind, team=Team.BLUE, x=tiles(9), y=tiles(10),
+        hitpoints=spec.hitpoints, spec=spec,
+        collision_radius=spec.collision_radius, mass=spec.mass, flying=spec.flying,
+    )
+    battle._register(attacker)
+
+    wall_spec = build_unit_spec(data, levels, "Golem", level=6, rarity="Epic", clock=battle.clock)
+    wall = Entity(
+        kind=EntityKind.TROOP, team=Team.RED, x=tiles(9), y=tiles(10 + gap),
+        hitpoints=999_999, spec=wall_spec,
+        collision_radius=wall_spec.collision_radius, mass=10**9,
+    )
+    wall.max_hitpoints = 999_999
+    battle._register(wall)
+
+    hits: list[int] = []
+    for _ in range(limit):
+        battle.step()
+        hits = [e.tick for e in battle.damage_log if e.attacker_id == attacker.id]
+        if len(hits) >= 2:
+            break
+
+    # Ranged units log damage on IMPACT, so the shot's travel time sits between
+    # the swing and the recorded hit.
+    flight = 0
+    if spec.projectile:
+        pspec = build_projectile_spec(
+            data, spec.projectile, levels.get(spec.rarity), level=spec.level, clock=battle.clock
+        )
+        if pspec and pspec.speed_per_tick > 0:
+            reach = distance(tiles(9), tiles(10), tiles(9), tiles(10 + gap))
+            flight = max(1, reach // pspec.speed_per_tick)
+    return spec, hits, flight
+
+
+@pytest.mark.parametrize(
+    "name,rarity",
+    [
+        ("Knight", "Common"),        # melee, ordinary
+        ("Musketeer", "Rare"),       # ranged, ordinary
+        ("Pekka", "Epic"),           # slow melee, long windup
+        ("InfernoTower", "Rare"),    # LoadTime 1200 > HitSpeed 400
+        ("InfernoDragon", "Legendary"),
+        ("MightyMiner", "Champion"), # LoadTime 700 > HitSpeed 400
+        ("Bomber", "Common"),
+        ("Archer", "Common"),
+        ("Valkyrie", "Rare"),
+        ("Wizard", "Rare"),
+        ("MiniPekka", "Rare"),
+        # Giant and the other TargetOnlyBuildings troops are deliberately absent:
+        # they cannot attack the troop used as a wall here at all, which the
+        # building-targeting tests above already cover.
+    ],
+)
+def test_first_hit_uses_load_time_and_later_hits_use_hit_speed(world, name, rarity):
+    """Every unit waits its own windup for the first swing, then its hit speed.
+
+    These are two independent timers, not one derived from the other. Inferno
+    Tower proves it: a 1200ms windup followed by 400ms ticks. Treating the
+    first hit as just another hit-speed interval would make slow-winding units
+    dramatically stronger, and treating later hits as windups would make fast
+    ones useless.
+    """
+    battle = _empty_battle(world)
+    spec, hits, flight = _first_two_hits(world, battle, name, rarity)
+    assert len(hits) >= 2, f"{name} never landed two hits"
+
+    expected_first = max(1, spec.load_time_ticks) - 1 + flight
+    assert abs(hits[0] - expected_first) <= 3, (
+        f"{name} first hit at {hits[0]}, expected about {expected_first} "
+        f"(load {spec.load_time_ticks} + flight {flight})"
+    )
+    assert abs((hits[1] - hits[0]) - spec.hit_speed_ticks) <= 2, (
+        f"{name} hit interval {hits[1] - hits[0]}, expected {spec.hit_speed_ticks}"
+    )
+
+
+def test_windup_is_independent_of_hit_speed(world):
+    """Three units in the build wind up for longer than their firing interval.
+
+    If the engine derived one from the other these could not exist, so they are
+    the case that proves the two timers are separate.
+    """
+    data, levels, _registry = world
+    battle = _empty_battle(world)
+    for name, rarity in (("InfernoTower", "Rare"), ("InfernoDragon", "Legendary"),
+                         ("MightyMiner", "Champion")):
+        spec = build_unit_spec(
+            data, levels, name,
+            level=levels.get(rarity).internal_level(11), rarity=rarity, clock=battle.clock,
+        )
+        assert spec.load_time_ticks > spec.hit_speed_ticks, name
+
+
+def test_switching_target_makes_a_unit_pay_the_windup_again(world):
+    """Distraction works because re-engaging costs the first-hit delay again.
+
+    Without this a unit pulled onto a new target would continue on its old
+    rhythm, and chip-blocking a Prince or a Sparky would do nothing.
+    """
+    battle = _empty_battle(world)
+    knight = _spawn(battle, world, "Knight", Team.BLUE, 9, 10.0)
+    first = _spawn(battle, world, "Skeleton", Team.RED, 9, 10.8)
+
+    for _ in range(200):
+        battle.step()
+        if first.dead:
+            break
+    assert first.dead
+
+    second = _spawn(battle, world, "Skeleton", Team.RED, 9, 10.8)
+    switched_at = battle.tick
+    for _ in range(200):
+        battle.step()
+        if second.hitpoints < second.max_hitpoints:
+            break
+    delay = battle.tick - switched_at
+    assert delay >= knight.spec.load_time_ticks - 4, (
+        f"hit the new target after {delay} ticks, windup is {knight.spec.load_time_ticks}"
+    )

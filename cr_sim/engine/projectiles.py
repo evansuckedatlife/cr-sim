@@ -57,6 +57,8 @@ class ProjectileSpec:
     buff_ticks: int
     spawn_character: str | None
     spawn_count: int
+    #: An area effect this shot leaves where it lands, if any.
+    area_effect: str | None = None
 
     @property
     def is_splash(self) -> bool:
@@ -118,6 +120,11 @@ def build_projectile_spec(
             raw.get("SpawnCharacter") if isinstance(raw.get("SpawnCharacter"), str) else None
         ),
         spawn_count=_int(raw.get("SpawnCharacterCount"), 1),
+        area_effect=(
+            raw.get("SpawnAreaEffectObject")
+            if isinstance(raw.get("SpawnAreaEffectObject"), str)
+            else None
+        ),
     )
 
 

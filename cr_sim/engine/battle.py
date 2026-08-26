@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
 
-from ..data.cards import Card, CardRegistry
+from ..data.cards import Card, CardKind, CardRegistry
 from ..data.leveling import LevelTable, build_tower_scales, tower_class_for
 from ..data.source import LogicData
 from ..replay import Command, state_hash
@@ -41,7 +41,9 @@ from .combat import (
     apply_hit,
 )
 from .pathing import Route, crosses_river, route_to, step_towards
+from .areaeffects import AreaEffect, AreaEffectSpec, build_area_effect_spec
 from .projectiles import Projectile, ProjectileSpec, build_projectile_spec
+from .spells import SpellPlan, plan_spell
 from .targeting import acquire_target, in_attack_range, should_keep_target
 from .movement import resolve_collisions
 from .rng import Rng
@@ -116,6 +118,7 @@ class Battle:
     PHASES: tuple[str, ...] = (
         "regenerate_elixir",
         "apply_commands",
+        "fire_pending_waves",
         "advance_deploy_timers",
         "advance_lifetimes",
         "update_buffs",
@@ -164,6 +167,9 @@ class Battle:
         "graveyard",
         "_projectile_specs",
         "_pre_tick_crowns",
+        "_area_specs",
+        "_spell_plans",
+        "_pending_waves",
     )
 
     def __init__(
@@ -209,6 +215,11 @@ class Battle:
         #: for them. A three-minute match kills hundreds.
         self.graveyard: list[Entity] = []
         self._projectile_specs: dict[str, ProjectileSpec | None] = {}
+        self._area_specs: dict[str, AreaEffectSpec | None] = {}
+        self._spell_plans: dict[str, SpellPlan] = {}
+        #: Volleys still to fire, as (tick, card, team, x, y). Arrows is the
+        #: only card that uses this, and it is why its damage looks uneven.
+        self._pending_waves: list[tuple[int, str, Team, int, int]] = []
         _globals = self.data.globals_map()
         # Grace band that stops a unit flickering between two equidistant enemies.
         _ext = _globals.get('LOGIC_RANGE_EXTENSION_TO_KEEP_TARGET', 0)
@@ -346,7 +357,10 @@ class Battle:
 
         player.elixir.spend(card.mana_cost)
         player.play(card_name)
-        self._deploy(team, card, x, y)
+        if card.kind is CardKind.SPELL:
+            self._cast(team, card, x, y)
+        else:
+            self._deploy(team, card, x, y)
         return True
 
     def _deploy(self, team: Team, card: Card, x: int, y: int) -> None:
@@ -507,6 +521,22 @@ class Battle:
         for command in due:
             self.play_card(Team(command.team), command.card, command.x, command.y)
 
+    def _phase_fire_pending_waves(self) -> None:
+        """Fire the volleys queued by a waved spell."""
+        if not self._pending_waves:
+            return
+        due = [w for w in self._pending_waves if w[0] <= self.tick]
+        if not due:
+            return
+        self._pending_waves = [w for w in self._pending_waves if w[0] > self.tick]
+        for _tick, card_name, team, x, y in due:
+            card = self.registry.get(card_name)
+            if card is None:
+                continue
+            plan = self._plan(card)
+            level = self.levels.get(card.rarity).internal_level(self.config.level)
+            self._fire_at_point(team, card, plan, x, y, level)
+
     def _phase_advance_deploy_timers(self) -> None:
         for entity in self.entities:
             if entity.deploy_ticks_left > 0:
@@ -624,6 +654,86 @@ class Battle:
                     )
                 )
 
+    def _plan(self, card: Card) -> SpellPlan:
+        plan = self._spell_plans.get(card.name)
+        if plan is None:
+            plan = self._spell_plans[card.name] = plan_spell(card, self.clock)
+        return plan
+
+    def _area_spec(self, name: str, rarity: str, level: int) -> AreaEffectSpec | None:
+        key = f"{name}@{rarity}@{level}"
+        if key not in self._area_specs:
+            self._area_specs[key] = build_area_effect_spec(
+                self.data, name, self.levels.get(rarity), level=level, clock=self.clock
+            )
+        return self._area_specs[key]
+
+    def _cast(self, team: Team, card: Card, x: int, y: int) -> None:
+        """Put a spell's payload on the board.
+
+        A spell is cast at a *point*, never at a unit: nothing about it is bound
+        to whoever happened to be standing there. That is the whole reason a
+        spell can be dodged, and the reason placing one is a prediction.
+        """
+        plan = self._plan(card)
+        level = self.levels.get(card.rarity).internal_level(self.config.level)
+
+        if plan.summon_character:
+            self._deploy(team, card, x, y)
+
+        if plan.projectile:
+            self._fire_at_point(team, card, plan, x, y, level)
+            for wave in range(1, plan.waves):
+                # Later volleys are queued rather than fired now, which is what
+                # lets a unit leave the area between them and take less.
+                self._pending_waves.append(
+                    (self.tick + wave * max(1, plan.wave_interval_ticks), card.name, team, x, y)
+                )
+        elif plan.area_effect:
+            self._place_area(team, plan.area_effect, card.rarity, level, x, y, owner_id=0)
+
+    def _fire_at_point(
+        self, team: Team, card: Card, plan: SpellPlan, x: int, y: int, level: int
+    ) -> None:
+        """Launch a spell's projectile toward a ground position.
+
+        Spell projectiles are aimed at a spot, so a stationary marker stands in
+        for the target. It is deliberately not any real unit: giving the shot a
+        living target would make it home, and a homing Rocket is a different
+        card.
+        """
+        pspec = self._projectile_spec(plan.projectile, card.rarity, level)
+        if pspec is None:
+            return
+        marker = Entity(
+            kind=EntityKind.AREA_EFFECT, team=team, x=x, y=y, hitpoints=1, spawn_tick=self.tick
+        )
+        marker.dead = True  # never simulated; it only carries the aim point
+        shot = Projectile(
+            pspec=pspec, team=team, x=x, y=self._cast_origin(team),
+            target=marker, owner_id=0, spawn_tick=self.tick,
+        )
+        shot.target_x, shot.target_y = x, y
+        self.entities.append(shot)
+        self._by_id_map[shot.id] = shot
+
+    def _cast_origin(self, team: Team) -> int:
+        """Where a cast spell appears to come from -- its caster's back line."""
+        return 0 if team is Team.BLUE else self.arena.height
+
+    def _place_area(
+        self, team: Team, name: str, rarity: str, level: int, x: int, y: int, *, owner_id: int
+    ) -> AreaEffect | None:
+        aspec = self._area_spec(name, rarity, level)
+        if aspec is None:
+            return None
+        effect = AreaEffect(
+            aspec=aspec, team=team, x=x, y=y, owner_id=owner_id, spawn_tick=self.tick
+        )
+        self.entities.append(effect)
+        self._by_id_map[effect.id] = effect
+        return effect
+
     def _projectile_spec(self, name: str, rarity: str, level: int) -> ProjectileSpec | None:
         key = f"{name}@{rarity}@{level}"
         if key not in self._projectile_specs:
@@ -682,6 +792,13 @@ class Battle:
     def _impact(self, shot: Projectile) -> None:
         """Deliver a projectile's payload where it landed."""
         pspec = shot.pspec
+        if pspec.area_effect:
+            # Lightning and friends: the shot is only the delivery, and what it
+            # leaves behind is the actual spell.
+            self._place_area(
+                shot.team, pspec.area_effect, "Common", 11, shot.x, shot.y,
+                owner_id=shot.owner_id,
+            )
         attacker = self._entity(shot.owner_id)
         if pspec.is_splash:
             # Splash cares about where the shot *landed*, not who it was aimed
@@ -721,7 +838,40 @@ class Battle:
             )
 
     def _phase_tick_area_effects(self) -> None:
-        """M5: area-effect damage ticks and buff application."""
+        """Apply every live area effect to whatever is inside it right now.
+
+        Membership is re-evaluated every application rather than captured when
+        the effect was cast: a unit that walks out of a Poison cloud stops
+        taking it, and one that walks in starts. Binding the victims at cast
+        time would turn every lingering spell into a delayed burst.
+        """
+        for entity in self.entities:
+            if entity.kind is not EntityKind.AREA_EFFECT or entity.dead:
+                continue
+            if not isinstance(entity, AreaEffect):
+                continue
+            if not entity.tick():
+                continue
+            aspec = entity.aspec
+            for victim in list(self._index.near(entity.x, entity.y, aspec.radius)):
+                if not entity.affects(victim):
+                    continue
+                if distance(entity.x, entity.y, victim.x, victim.y) > aspec.radius + victim.collision_radius:
+                    continue
+                if aspec.damage:
+                    dealt = victim.apply_damage(
+                        aspec.damage_to(victim.kind is EntityKind.TOWER)
+                    )
+                    if dealt:
+                        self.damage_log.append(
+                            DamageEvent(
+                                tick=self.tick,
+                                attacker_id=entity.owner_id,
+                                target_id=victim.id,
+                                amount=dealt,
+                                lethal=victim.hitpoints <= 0,
+                            )
+                        )
 
     def _phase_move_units(self) -> None:
         for entity in self.entities:

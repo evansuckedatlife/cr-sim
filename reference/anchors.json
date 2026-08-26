@@ -218,6 +218,16 @@
       "status": "open",
       "priority": "high",
       "blocks": "M3"
+    },
+    {
+      "id": "sparky-load-first-hit",
+      "question": "Sparky (ZapMachine) sets LoadFirstHit=true, which cr-sim does not implement.",
+      "why_it_matters": "For every other unit LoadTime is a one-time windup before the first hit. LoadFirstHit makes the unit pay that charge before EVERY shot, and three globals govern it: LOGIC_LOAD_FIRST_HIT_RESET_TIMER_AFTER_ATTACK, ..._RESET_TIMER_WHEN_ZAPPED and ..._KEEP_LOADED_AFTER_DISCARD (all true). The middle one is the famous 'a stun resets Sparky's charge' interaction, which is most of how the card is countered.",
+      "evidence": "Exactly one entity in the build sets it: ZapMachine, LoadTime=3000, HitSpeed=4000. Because HitSpeed exceeds LoadTime the firing rhythm happens to look similar without it - what is missing is the reset-on-stun, not the cadence. LoadAfterRetarget is a schema column no entity uses.",
+      "how_to_resolve": "Implement alongside stun buffs: a LoadFirstHit unit re-pays LoadTime before each shot, keeps its progress when it loses a target, and loses all of it when stunned.",
+      "status": "open",
+      "priority": "low",
+      "blocks": "M6"
     }
   ]
 }

@@ -10,7 +10,7 @@ Full plan: `../.claude/plans/i-want-to-build-purrfect-kernighan.md`.
 
 ## Status
 
-**222 tests.** Battles run end to end: units deploy, route, fight, die, towers
+**235 tests.** Battles run end to end: units deploy, route, fight, die, towers
 fall, and matches resolve on crowns, sudden death or a tiebreaker.
 
 | Milestone | State | What landed |
@@ -39,6 +39,10 @@ than one that names them.
   game ships (`DEFAULT=8`, `ROAD=5`, `WATER=7`, `BLOCKED=50`, `BUILDING=50`)
   are not used, so units do not flow around a building the way they should.
 - **No buffs.** Rage, freeze, slow, stun, shields beyond the flat hitpoint pool.
+  Poison and Tornado therefore deal no damage at all: theirs lives entirely in
+  the buff they apply.
+- **Sparky's `LoadFirstHit` is not implemented.** One entity in the build sets
+  it, and it is why a stun resets her charge.
 - **Area-effect objects are inert.** The `AEO` layer (Poison's cloud, Tornado's
   pull, Graveyard's spawner) is loaded but nothing ticks it.
 - **Performance is the constraint on M8.** ~5.7× real-time at 60 TPS, ~12-15×
@@ -235,7 +239,7 @@ python -m cr_sim.cli card Knight         # full resolved stats for one card
 python -m cr_sim.cli validate            # the stat gate + open questions
 python -m cr_sim.cli arena --map         # terrain, towers, deploy zones
 python -m cr_sim.cli battle --html r.html   # run a match, write a replay
-python -m pytest                         # 222 tests
+python -m pytest                         # 235 tests
 ```
 
 `freeze` re-cuts the regression baseline (`reference/card_stats.json`). Note the
