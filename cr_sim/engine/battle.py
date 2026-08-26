@@ -1180,6 +1180,18 @@ class Battle:
                 finished = entity.advance()
                 self._sweep_roll(entity)
                 if finished:
+                    if entity.pspec.spawn_character:
+                        # Barbarian Barrel leaves its Barbarian where the roll
+                        # stops, not where it was thrown.
+                        self._spawn_units(
+                            team=entity.team,
+                            character=entity.pspec.spawn_character,
+                            count=max(1, entity.pspec.spawn_count),
+                            x=entity.x,
+                            y=entity.y,
+                            deploy_ticks=entity.pspec.spawn_deploy_ticks,
+                            rarity="Common",
+                        )
                     entity.kill()
                 continue
             if entity.advance(self._entity(entity.target_id)):
@@ -1281,6 +1293,19 @@ class Battle:
             and v.id not in effect.struck
         ]
         if not candidates:
+            # A shot that carries units is a delivery, not an attack: Royal
+            # Delivery drops its Recruit on an empty tile exactly as it does on
+            # an occupied one. Only payload-carrying shots fall through here --
+            # Lightning with nothing to strike should still strike nothing.
+            pspec = self._projectile_spec(aspec.projectile, "Common", 11)
+            if pspec is not None and pspec.spawn_character and not effect.struck:
+                effect.struck.add(effect.id)
+                self._register(
+                    Projectile(
+                        pspec=pspec, team=effect.team, x=effect.x, y=effect.y,
+                        target=effect, owner_id=effect.owner_id, spawn_tick=self.tick,
+                    )
+                )
             return
         if aspec.hit_biggest:
             # Largest by maximum hitpoints, with the id as a stable tiebreak.
@@ -1319,6 +1344,21 @@ class Battle:
                 )
             )
             return
+        if pspec.spawn_character:
+            # Sixteen projectiles in the build carry units rather than damage.
+            # Goblin Barrel is three Goblins and nothing else -- the shot has
+            # no damage of its own -- so a projectile layer that ignored this
+            # made the card a 3-elixir no-op, and did it silently.
+            self._spawn_units(
+                team=shot.team,
+                character=pspec.spawn_character,
+                count=max(1, pspec.spawn_count),
+                x=shot.x,
+                y=shot.y,
+                radius=pspec.radius,
+                deploy_ticks=pspec.spawn_deploy_ticks,
+                rarity="Common",
+            )
         if pspec.area_effect:
             # Lightning and friends: the shot is only the delivery, and what it
             # leaves behind is the actual spell.

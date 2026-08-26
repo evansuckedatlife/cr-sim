@@ -63,6 +63,10 @@ class ProjectileSpec:
     buff_ticks: int
     spawn_character: str | None
     spawn_count: int
+    #: How long the delivered units take to land. Goblin Barrel's 1100ms is the
+    #: window a defender has between seeing the barrel arrive and the Goblins
+    #: being able to act, which is most of what makes the card answerable.
+    spawn_deploy_ticks: int = 0
     #: An area effect this shot leaves where it lands, if any.
     area_effect: str | None = None
 
@@ -168,6 +172,7 @@ def build_projectile_spec(
             raw.get("SpawnCharacter") if isinstance(raw.get("SpawnCharacter"), str) else None
         ),
         spawn_count=_int(raw.get("SpawnCharacterCount"), 1),
+        spawn_deploy_ticks=clock.ticks(raw.get("SpawnCharacterDeployTime")),
         roll_range=milli_tiles(_int(roll.get("ProjectileRange"))),
         roll_radius_x=milli_tiles(_int(roll.get("ProjectileRadius"))),
         roll_radius_y=milli_tiles(_int(roll.get("ProjectileRadiusY"))),

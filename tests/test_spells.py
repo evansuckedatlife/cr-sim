@@ -358,3 +358,74 @@ def test_lightning_fires_exactly_three_bolts(world):
 def test_capping_the_bolts_does_not_change_poison(world):
     """The count applies to the cloud; Poison's damage comes from its buff."""
     assert _cast_and_measure(world, "Poison") == 736
+
+
+# ------------------------------------------------------- delivered payloads
+
+
+def _living_named(battle, needle):
+    return [
+        e for e in battle.entities
+        if not e.dead and e.spec is not None and needle in e.spec.name
+    ]
+
+
+def test_goblin_barrel_delivers_three_goblins(world):
+    """The barrel has no damage of its own. The Goblins are the entire card.
+
+    Sixteen projectiles in the build carry units rather than damage, and the
+    impact path ignored all of them -- which made this a 3-elixir no-op, and
+    made it silently.
+    """
+    battle = _battle(world, "GoblinBarrel")
+    assert battle.play_card(Team.BLUE, "GoblinBarrel", tiles(9), tiles(20))
+    for _ in range(400):
+        battle.step()
+    assert len(_living_named(battle, "Goblin")) == 3
+
+
+def test_a_delivered_unit_has_to_land_before_it_acts(world):
+    """Goblin Barrel's 1100ms is the window a defender gets."""
+    battle = _battle(world, "GoblinBarrel")
+    battle.play_card(Team.BLUE, "GoblinBarrel", tiles(9), tiles(20))
+    seen = False
+    for _ in range(400):
+        battle.step()
+        goblins = _living_named(battle, "Goblin")
+        if goblins and any(g.is_deploying for g in goblins):
+            seen = True
+            break
+    assert seen, "the Goblins arrived able to act immediately"
+
+
+def test_barbarian_barrel_leaves_its_barbarian_where_the_roll_stops(world):
+    """Not where it was thrown. The roll is most of the card's reach."""
+    battle = _battle(world, "BarbLog")
+    assert battle.play_card(Team.BLUE, "BarbLog", tiles(9), tiles(12))
+    for _ in range(500):
+        battle.step()
+    barbarians = _living_named(battle, "Barbarian")
+    assert len(barbarians) == 1
+    assert to_tiles(barbarians[0].y) > 12.5, "the Barbarian was left at the throw point"
+
+
+def test_royal_delivery_drops_its_recruit_on_an_empty_tile(world):
+    """A shot that carries units is a delivery, not an attack.
+
+    Its area effect fires a projectile, and firing only at a *target* meant an
+    empty tile got nothing -- while the real card drops the crate regardless.
+    """
+    battle = _battle(world, "RoyalDelivery")
+    assert battle.play_card(Team.BLUE, "RoyalDelivery", tiles(9), tiles(12))
+    for _ in range(500):
+        battle.step()
+    assert _living_named(battle, "Recruit"), "nothing was delivered"
+
+
+def test_a_shot_with_no_payload_still_needs_a_target(world):
+    """Lightning with nothing to strike should strike nothing."""
+    battle = _battle(world, "Lightning")
+    assert battle.play_card(Team.BLUE, "Lightning", tiles(9), tiles(12))
+    for _ in range(400):
+        battle.step()
+    assert not battle.damage_log, "Lightning fired at an empty tile"
