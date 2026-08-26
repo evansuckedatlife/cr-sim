@@ -337,7 +337,7 @@ def decode_action(
 def _can_deploy_cached(
     arena: Arena, team: Team, x: int, y: int, anywhere: bool, on_water: bool
 ) -> bool:
-    """Memoised ``Arena.can_deploy``.
+    """Memoised ``Arena.can_deploy``, for callers outside the mask builder.
 
     ``can_deploy`` calls ``own_half``, which calls ``river_band`` /
     ``river_rows``, which rescans the whole 36x64 tilemap for the river band
@@ -398,16 +398,45 @@ def legal_action_mask(
         card = registry.get(card_name)
         if card is None or not player.elixir.can_afford(card.mana_cost):
             continue
-        for gy in range(height):
-            for gx in range(width):
-                x, y = cell_to_world(gx, gy, team, arena, span=PLACEMENT_TILE_SPAN)
-                if _can_deploy_cached(
-                    arena, team, x, y,
-                    card.can_deploy_on_enemy_side,
-                    card.can_place_on_water,
-                ):
-                    mask[slot, gx, gy] = True
+        mask[slot] = _placement_grid(
+            arena, team,
+            card.can_deploy_on_enemy_side, card.can_place_on_water,
+            width, height,
+        )
     return mask
+
+
+@lru_cache(maxsize=32)
+def _placement_grid(
+    arena: Arena,
+    team: Team,
+    anywhere: bool,
+    on_water: bool,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """Which cells a card with these placement flags may be put on.
+
+    Where a card *may* go depends only on the terrain and on the card's own two
+    flags -- never on elixir, the hand, or anything that changes during a
+    match. So it is computed once per combination and looked up thereafter, and
+    there are only eight combinations: two flags, two teams.
+
+    Building it per mask instead meant 576 ``can_deploy`` calls every time the
+    mask was asked for, which profiling put at a third of a training step. The
+    grid it produced was identical every time.
+
+    Returned read-only, because a cached array handed out by reference is one
+    careless ``mask[slot] |= ...`` away from corrupting every future lookup.
+    """
+    grid = np.zeros((width, height), dtype=bool)
+    for gy in range(height):
+        for gx in range(width):
+            x, y = cell_to_world(gx, gy, team, arena, span=PLACEMENT_TILE_SPAN)
+            if arena.can_deploy(team, x, y, anywhere=anywhere, on_water=on_water):
+                grid[gx, gy] = True
+    grid.flags.writeable = False
+    return grid
 
 
 # ----------------------------------------------------------- observation side
