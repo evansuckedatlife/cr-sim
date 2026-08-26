@@ -25,3 +25,14 @@ update   24  steps     49152     169/s  return  +0.3527  entropy  0.424  pass  9
 update   25  steps     51200     169/s  return  +0.3026  entropy  0.396  pass  89%  loss -0.0064/0.0071
 update   26  steps     53248     167/s  return  +0.4528  entropy  0.487  pass  89%  loss -0.0032/0.0108
 update   27  steps     55296     167/s  return  +0.5031  entropy  0.467  pass  90%  loss -0.0030/0.0094
+update   28  steps     57344     166/s  return  +0.4531  entropy  0.538  pass  89%  loss -0.0028/0.0074
+update   29  steps     59392     165/s  return  +0.3528  entropy  0.526  pass  89%  loss -0.0108/0.0009
+update   30  steps     61440     164/s  return  +0.2524  entropy  0.464  pass  89%  loss -0.0049/0.0121
+update   31  steps     63488     163/s  return  +0.2025  entropy  0.523  pass  88%  loss -0.0136/0.0009
+update   32  steps     65536     163/s  return  +0.2525  entropy  0.434  pass  89%  loss -0.0046/0.0125
+update   33  steps     67584     163/s  return  +0.3527  entropy  0.485  pass  89%  loss -0.0049/0.0124
+update   34  steps     69632     163/s  return  +0.4530  entropy  0.428  pass  89%  loss -0.0034/0.0037
+update   35  steps     71680     162/s  return  +0.3528  entropy  0.422  pass  89%  loss -0.0048/0.0064
+update   36  steps     73728     162/s  return  +0.2528  entropy  0.456  pass  90%  loss -0.0035/0.0073
+update   37  steps     75776     161/s  return  +0.3530  entropy  0.382  pass  89%  loss -0.0090/0.0040
+update   38  steps     77824     161/s  return  +0.3527  entropy  0.436  pass  89%  loss -0.0062/0.0083

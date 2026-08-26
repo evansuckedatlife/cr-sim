@@ -205,3 +205,75 @@ def test_a_short_run_completes_and_produces_finite_weights(world):
         for key in ("policy_loss", "value_loss", "entropy"):
             assert np.isfinite(record[key]), f"{key} was {record[key]}"
         assert 0.0 <= record["noop_fraction"] <= 1.0
+
+
+# ------------------------------------------------------- forced decisions
+
+
+def test_skipping_forced_decisions_removes_them_entirely(world):
+    """A state with one legal action is not a decision.
+
+    For most of a match the only thing available is to pass -- elixir is spent
+    about as fast as it accrues. Handing those states to the policy costs a
+    network evaluation each and produces a transition whose gradient is
+    identically zero, because a one-action softmax cannot be wrong. It also
+    dilutes every batch nine to one.
+    """
+    env = _env(world, skip_forced=True)
+    env.reset(seed=1)
+    rng = np.random.default_rng(0)
+
+    steps = 0
+    while True:
+        mask = env.legal_action_mask()
+        assert int(mask.sum()) > 1, "a forced decision reached the policy"
+        legal = np.argwhere(mask)
+        action = tuple(int(v) for v in legal[rng.integers(len(legal))])
+        _, _, terminated, truncated, _ = env.step(action)
+        steps += 1
+        if terminated or truncated:
+            break
+    assert steps > 0
+
+
+def test_skipping_does_not_shorten_the_battle(world):
+    """The same match is simulated either way; only the sampling changes.
+
+    This is what makes it the same MDP rather than a different, easier game:
+    the ticks all still happen, and taking the only available move cannot have
+    gone differently.
+    """
+    rng = np.random.default_rng(0)
+    ticks = {}
+    for skip in (False, True):
+        env = _env(world, skip_forced=skip)
+        env.reset(seed=7)
+        while True:
+            legal = np.argwhere(env.legal_action_mask())
+            action = tuple(int(v) for v in legal[rng.integers(len(legal))])
+            _, _, terminated, truncated, info = env.step(action)
+            if terminated or truncated:
+                break
+        ticks[skip] = info["tick"]
+    assert ticks[True] == ticks[False], f"{ticks} -- the match length changed"
+
+
+def test_reward_during_a_run_out_is_not_lost(world):
+    """What happens while running out still counts, it just is not a choice.
+
+    Dropping it would make the agent blind to everything that happened between
+    its decisions, which on a 500ms cadence is most of the match.
+    """
+    env = _env(world, skip_forced=True)
+    env.reset(seed=2)
+    rng = np.random.default_rng(1)
+    total = 0.0
+    while True:
+        legal = np.argwhere(env.legal_action_mask())
+        action = tuple(int(v) for v in legal[rng.integers(len(legal))])
+        _, reward, terminated, truncated, _ = env.step(action)
+        total += reward
+        assert np.isfinite(reward)
+        if terminated or truncated:
+            break
+    assert total != 0.0, "a whole match produced exactly zero reward"
