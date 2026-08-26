@@ -386,3 +386,58 @@ def test_no_standard_card_is_completely_unresolved(data, levels, registry):
             blank.append(card.name)
     # Mirror has no payload of its own by definition -- it replays the last card.
     assert set(blank) <= {"Mirror", "MergeMaiden"}, blank
+
+
+# ------------------------------------------------------------ tower scaling
+
+
+def test_towers_do_not_use_the_card_ladder(data):
+    """Crown Towers have their own progression, and it is not the cards'.
+
+    Applying the card multiplier to a tower inflates a level-11 Princess Tower
+    from 2576 to 3584 hitpoints -- a 39% error in the number every damage race
+    in the game is measured against.
+    """
+    from cr_sim.data.leveling import build_tower_scales
+
+    scales = build_tower_scales(data.globals_map())
+    princess_base = data.resolve("PrincessTower")["Hitpoints"]
+    king_base = data.resolve("KingTower")["Hitpoints"]
+
+    assert scales["princess"].hitpoints(princess_base, 1) == 1400
+    assert scales["princess"].hitpoints(princess_base, 11) == 2576
+    assert scales["king"].hitpoints(king_base, 11) == 4224
+    # The King gains 7% a level where a Princess gains 8%.
+    assert scales["king"].hitpoint_percent == 7
+    assert scales["princess"].hitpoint_percent == 8
+
+
+def test_tower_scaling_switches_rate_at_level_nine(data):
+    """8% a level up to 9, then 10% -- TOWER_SCALING_START_EXP_LEVEL."""
+    from cr_sim.data.leveling import build_tower_scales
+
+    scales = build_tower_scales(data.globals_map())
+    princess = scales["princess"]
+    base = 1400
+    # Levels 1..9 climb by 8% of base each: 112 hitpoints a level.
+    for level in range(1, 9):
+        step = princess.hitpoints(base, level + 1) - princess.hitpoints(base, level)
+        assert step == 112, f"level {level}->{level + 1} moved {step}"
+    # Past 9 they climb by 10% of base: 140 a level.
+    for level in range(9, 15):
+        step = princess.hitpoints(base, level + 1) - princess.hitpoints(base, level)
+        assert step == 140, f"level {level}->{level + 1} moved {step}"
+
+
+def test_tower_hitpoints_stay_divisible_by_fourteen(data):
+    """A published quirk that this formula reproduces and the card ladder does not.
+
+    It is a consequence of the shape: a flat integer percentage of a 1400 base
+    is always a multiple of 14. That it holds for every level is independent
+    evidence the progression is percentage-of-base rather than compounding.
+    """
+    from cr_sim.data.leveling import build_tower_scales
+
+    princess = build_tower_scales(data.globals_map())["princess"]
+    for level in range(1, 16):
+        assert princess.hitpoints(1400, level) % 14 == 0, level

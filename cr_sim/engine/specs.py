@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from ..data.cards import Card
-from ..data.leveling import LevelTable
+from ..data.leveling import LevelTable, TowerScale
 from ..data.source import LogicData
 from .constants import TickClock
 from .entity import EntityKind
@@ -170,6 +170,60 @@ def build_unit_spec(
         retarget_each_tick=_bool(raw.get("RetargetEachTick")),
         crown_tower_damage_percent=_int(raw.get("CrownTowerDamagePercent")),
         source_ref=ref,
+        level=level,
+    )
+
+
+def build_tower_spec(
+    data: LogicData,
+    name: str,
+    scale: TowerScale,
+    *,
+    level: int,
+    clock: TickClock | None = None,
+) -> UnitSpec:
+    """Build a Crown Tower spec using the tower progression, not the card ladder.
+
+    Towers accumulate a flat percentage of their level-1 base (8%/level for a
+    Princess, 7% for the King, 10% past level 9) rather than compounding on the
+    card multiplier table. Using the card ladder here inflates a level-11
+    Princess Tower from 2576 to 3584 hitpoints, which would skew every damage
+    race in the simulator.
+    """
+    clock = clock or TickClock()
+    raw = data.resolve(name)
+    hitpoints = _int(raw.get("Hitpoints"))
+    if hitpoints <= 0:
+        raise SpecError(f"{name!r} has no hitpoints; not a tower")
+    damage, _source = _resolve_damage(data, raw)
+
+    return UnitSpec(
+        name=str(raw.get("Name", name)),
+        kind=EntityKind.TOWER,
+        hitpoints=scale.hitpoints(hitpoints, level),
+        damage=scale.damage(damage, level) if damage else 0,
+        shield_hitpoints=0,
+        hit_speed_ticks=clock.ticks(raw.get("HitSpeed")),
+        load_time_ticks=clock.ticks(raw.get("LoadTime")),
+        deploy_ticks=0,
+        deploy_delay_ticks=0,
+        lifetime_ticks=0,
+        attack_range=milli_tiles(_int(raw.get("Range"))),
+        minimum_range=milli_tiles(_int(raw.get("MinimumRange"))),
+        sight_range=milli_tiles(_int(raw.get("SightRange"))),
+        collision_radius=milli_tiles(_int(raw.get("CollisionRadius"))),
+        area_damage_radius=milli_tiles(_int(raw.get("AreaDamageRadius"))),
+        speed=0,
+        speed_per_tick=0,
+        mass=_int(raw.get("Mass"), 1000),
+        ignore_pushback=True,
+        attacks_ground=_bool(raw.get("AttacksGround")),
+        attacks_air=_bool(raw.get("AttacksAir")),
+        flying=False,
+        target_only_buildings=False,
+        retarget_each_tick=_bool(raw.get("RetargetEachTick")),
+        crown_tower_damage_percent=_int(raw.get("CrownTowerDamagePercent")),
+        source_ref=str(raw.get("__ref__", name)),
         level=level,
     )
 

@@ -24,16 +24,26 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
 
 from ..data.cards import Card, CardRegistry
-from ..data.leveling import LevelTable
+from ..data.leveling import LevelTable, build_tower_scales, tower_class_for
 from ..data.source import LogicData
 from ..replay import Command, state_hash
 from .arena import Arena, load_arena
 from .constants import TickClock
 from .elixir import BattleTimeline, ElixirBar, build_timeline
 from .entity import Entity, EntityKind, EntityState, Team, reset_entity_ids
+from .fixed import milli_tiles
+from .combat import (
+    AttackState,
+    DamageEvent,
+    PendingHit,
+    advance_attack,
+    apply_area_damage,
+    apply_hit,
+)
 from .pathing import Route, route_to
+from .targeting import acquire_target, in_attack_range, should_keep_target
 from .rng import Rng
-from .specs import UnitSpec, build_unit_spec
+from .specs import UnitSpec, build_tower_spec, build_unit_spec
 
 __all__ = ["Battle", "BattleConfig", "Player", "BattleResult"]
 
@@ -74,6 +84,8 @@ class BattleConfig:
     blue_deck: tuple[str, ...] = ()
     red_deck: tuple[str, ...] = ()
     level: int = 11
+    #: Crown Towers level independently of cards, on their own progression.
+    tower_level: int = 11
     record_frames: bool = False
     #: Record one viewer frame every N ticks. Viewing does not need 60fps, and
     #: a full match at every tick is several megabytes of JSON.
@@ -130,6 +142,11 @@ class Battle:
         "frames",
         "_towers",
         "_last_hands",
+        "_attacks",
+        "_range_extension",
+        "_tower_sight_bonus",
+        "damage_log",
+        "_king_active",
     )
 
     def __init__(
@@ -158,6 +175,16 @@ class Battle:
         #: moving unit needs them each tick, so scanning the whole entity list
         #: for them turns movement into an O(entities^2) phase.
         self._towers: dict[Team, list[Entity]] = {Team.BLUE: [], Team.RED: []}
+        self._attacks: dict[int, AttackState] = {}
+        self.damage_log: list[DamageEvent] = []
+        #: A King Tower is inert until provoked; see _phase_check_tower_activation.
+        self._king_active: dict[Team, bool] = {Team.BLUE: False, Team.RED: False}
+        _globals = self.data.globals_map()
+        # Grace band that stops a unit flickering between two equidistant enemies.
+        _ext = _globals.get('LOGIC_RANGE_EXTENSION_TO_KEEP_TARGET', 0)
+        self._range_extension = milli_tiles(_ext if isinstance(_ext, int) else 0)
+        _bonus = _globals.get('EXTRA_SIGHT_RANGE_TO_CROWN_TOWERS', 0)
+        self._tower_sight_bonus = milli_tiles(_bonus if isinstance(_bonus, int) else 0)
         self._pending: list[Command] = []
         self.frames: list[dict] = []
         self._last_hands = None
@@ -191,17 +218,19 @@ class Battle:
     def _spawn_towers(self) -> None:
         """Place both sides' structures.
 
-        NOTE (open question ``tower-hp-scaling``): towers are currently scaled on
-        the card ladder, which is probably wrong. ``globals.csv`` carries a
-        separate tower progression the cards do not use --
-        ``HITPOINT_INCREASE_PERCENT_PER_TOWER_LEVEL=8``,
-        ``..._PER_KING_LEVEL=7``, ``..._AFTER_TOURNAMENTCAP=10`` and
-        ``TOWER_SCALING_START_EXP_LEVEL=9``. This must be resolved in M2, when
-        towers begin fighting and their hitpoints start deciding outcomes.
+        Towers use their own progression (:class:`TowerScale`), not the card
+        ladder, and the King and Princess towers scale at different rates.
         """
+        scales = build_tower_scales(self.data.globals_map())
         for placement in self.arena.towers:
             try:
-                spec = self._spec(placement.name, rarity="Common")
+                spec = build_tower_spec(
+                    self.data,
+                    placement.name,
+                    scales[tower_class_for(placement.name)],
+                    level=self.config.tower_level,
+                    clock=self.clock,
+                )
             except Exception:
                 continue
             tower = Entity(
@@ -401,10 +430,83 @@ class Battle:
         """M5: tick rage/slow/freeze/stun durations and expire them."""
 
     def _phase_acquire_targets(self) -> None:
-        """M2: sight checks, target filters, priority and retarget rules."""
+        """Choose each unit's target, keeping the current one where possible.
+
+        Targets are sticky. Re-choosing every tick would make units flicker
+        between equidistant enemies and would erase the cost of being
+        distracted, which is a real tactical currency in this game.
+        """
+        for entity in self.entities:
+            spec = entity.spec
+            if entity.dead or entity.is_deploying or spec is None:
+                continue
+            if entity.kind is EntityKind.TOWER and not self._can_tower_fight(entity):
+                entity.target_id = 0
+                continue
+            if spec.hit_speed_ticks <= 0 and spec.damage <= 0:
+                continue
+
+            current = self._entity(entity.target_id)
+            if should_keep_target(
+                spec, entity, current, range_extension=self._range_extension
+            ):
+                continue
+
+            found = acquire_target(
+                spec,
+                entity,
+                self.entities,
+                sight_bonus_for_towers=self._tower_sight_bonus,
+            )
+            if found is None:
+                if entity.target_id and entity.id in self._attacks:
+                    self._attacks[entity.id].disengage()
+                entity.target_id = 0
+                continue
+            entity.target_id = found.id
 
     def _phase_resolve_attacks(self) -> None:
-        """M2: load/first-hit/hit-speed state machine and damage application."""
+        """Run each engaged unit's attack cycle, then apply the tick's hits."""
+        pending: list[PendingHit] = []
+        for entity in self.entities:
+            spec = entity.spec
+            if entity.dead or entity.is_deploying or spec is None or not entity.target_id:
+                continue
+            if entity.hitpoints <= 0:
+                continue  # fatally hit earlier this tick; it does not get to swing
+            target = self._entity(entity.target_id)
+            if target is None or target.dead:
+                continue
+            if not in_attack_range(spec, entity, target):
+                # Out of reach the windup does not run at all, which is why
+                # kiting a melee unit prevents its damage rather than delaying it.
+                continue
+            state = self._attacks.get(entity.id)
+            if state is None:
+                state = self._attacks[entity.id] = AttackState()
+            hit = advance_attack(state, spec, entity, target)
+            if hit is not None:
+                pending.append(hit)
+
+        # Apply every hit decided this tick together. Doing it inline above
+        # would let entity list order decide fights: the unit iterated first
+        # would land the killing blow and its victim, already at zero, would be
+        # skipped before swinging back. Mirrors must trade evenly.
+        for hit in pending:
+            event = apply_hit(hit, self.tick)
+            if event is not None:
+                self.damage_log.append(event)
+            if hit.spec.area_damage_radius > 0:
+                self.damage_log.extend(
+                    apply_area_damage(
+                        hit.spec,
+                        (hit.target.x, hit.target.y),
+                        hit.spec.area_damage_radius,
+                        [e for e in self.entities if e.id != hit.target.id],
+                        hit.attacker,
+                        self.tick,
+                    )
+                )
 
     def _phase_advance_projectiles(self) -> None:
         """M2: fly projectiles and resolve impacts."""
@@ -416,9 +518,36 @@ class Battle:
         for entity in self.entities:
             if entity.dead or entity.is_deploying or entity.kind is not EntityKind.TROOP:
                 continue
+            if entity.hitpoints <= 0:
+                continue
             spec = entity.spec
             if spec is None or spec.speed_per_tick <= 0:
                 continue
+
+            state = self._attacks.get(entity.id)
+            if state is not None and not state.can_move:
+                continue
+
+            target = self._entity(entity.target_id)
+            if target is not None and not target.dead:
+                if in_attack_range(spec, entity, target):
+                    # In reach: stop and fight. Units standing still to attack is
+                    # what makes a push advance at its tank's pace.
+                    self._routes.pop(entity.id, None)
+                    continue
+                goal = (target.x, target.y)
+                route = self._routes.get(entity.id)
+                if route is None or route.waypoints[-1:] != [goal]:
+                    route = route_to(
+                        self.arena, (entity.x, entity.y), goal, flying=entity.flying
+                    )
+                    self._routes[entity.id] = route
+                entity.x, entity.y = route.advance(
+                    (entity.x, entity.y), spec.speed_per_tick
+                )
+                entity.set_state(EntityState.MOVING)
+                continue
+
             route = self._routes.get(entity.id)
             if route is not None and route.finished:
                 # Arrived. Hold position rather than re-planning every tick --
@@ -447,11 +576,34 @@ class Battle:
                 entity.dead = True
                 entity.state = EntityState.DEAD
                 self._routes.pop(entity.id, None)
+                self._attacks.pop(entity.id, None)
                 if entity.kind is EntityKind.TOWER:
                     self.players[entity.team.opponent].crowns += 1
 
     def _phase_check_tower_activation(self) -> None:
-        """M2: wake the King Tower when a Princess falls or it takes damage."""
+        """Wake a King Tower once it is provoked.
+
+        A King Tower sits inert at the start of a match. It joins in only when
+        it takes damage directly or when one of its Princess Towers falls --
+        which is why chip damage onto the King is a real commitment, and why
+        losing a tower changes the whole defensive geometry of that side.
+        """
+        for team in (Team.BLUE, Team.RED):
+            if self._king_active[team]:
+                continue
+            king = self._king(team)
+            if king is None or king.dead:
+                continue
+            provoked = king.hitpoints < king.max_hitpoints or any(
+                t.dead for t in self._towers[team] if t is not king
+            )
+            if provoked:
+                self._king_active[team] = True
+
+    def _can_tower_fight(self, tower: Entity) -> bool:
+        if "King" not in getattr(tower.spec, "name", ""):
+            return True
+        return self._king_active[tower.team]
 
     def _phase_check_victory(self) -> None:
         for team in (Team.BLUE, Team.RED):
@@ -466,6 +618,15 @@ class Battle:
                 return
 
     # ------------------------------------------------------------- helpers
+
+    def _entity(self, entity_id: int) -> Entity | None:
+        """Look up any entity by id."""
+        if not entity_id:
+            return None
+        for entity in self.entities:
+            if entity.id == entity_id:
+                return entity
+        return None
 
     def _by_id(self, entity_id: int) -> Entity | None:
         if not entity_id:

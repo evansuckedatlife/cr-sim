@@ -163,7 +163,14 @@
       3.0,
       3.0
     ],
-    "_footprint_source": "BLOCKED region in tilemap.csv at cells x15-20,y3-8; PrincessTower has no blocked footprint and uses CollisionRadius=1000 (1 tile)"
+    "_footprint_source": "BLOCKED region in tilemap.csv at cells x15-20,y3-8; PrincessTower has no blocked footprint and uses CollisionRadius=1000 (1 tile)",
+    "princess_tower_hitpoints_level_11": 2576,
+    "king_tower_hitpoints_level_11": 4224,
+    "tower_hp_percent_per_level": {
+      "princess": 8,
+      "king": 7,
+      "after_level_9": 10
+    }
   },
   "open_questions": [
     {
@@ -186,8 +193,9 @@
       "why_it_matters": "Tower hitpoints set every damage race in the game. cr-sim currently applies the card ladder, giving Princess 3584 / King 6144 at level 11, which is very likely too high.",
       "evidence": "globals.csv carries a separate tower progression the cards do not use: HITPOINT_INCREASE_PERCENT_PER_TOWER_LEVEL=8, HITPOINT_INCREASE_PERCENT_PER_KING_LEVEL=7, *_AFTER_TOURNAMENTCAP=10, *_AT_TOURNAMENTCAP=10, TOWER_SCALING_START_EXP_LEVEL=9. A flat +8%/level on the level-1 base gives Princess 2520 at level 11 instead of 3584.",
       "how_to_resolve": "Read Princess and King Tower hitpoints off the in-game tower card at a known King level, then fit which of the candidate formulas reproduces it. Must be settled in M2, when towers start fighting.",
-      "status": "open",
-      "priority": "high"
+      "status": "resolved",
+      "priority": "high",
+      "resolution": "Towers are NOT on the card ladder. They accumulate a flat percentage of their level-1 base: 8%/level for a Princess Tower, 7% for the King, switching to 10%/level past TOWER_SCALING_START_EXP_LEVEL=9. Two independent supports: the globals themselves, and published descriptions of tower progression stating '+8% per level from 1 to 9, +10% from 9 to 13'. A third check falls out for free - published tower hitpoints are all divisible by 14, which this formula reproduces automatically for every level (1400 x integer%/100), and the card ladder does not. Level 11: Princess 2576, King 4224. The card ladder gave 3584, a 39% error."
     },
     {
       "id": "bridge-width",

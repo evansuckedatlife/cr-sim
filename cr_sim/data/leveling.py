@@ -173,3 +173,89 @@ def build_level_table(data: LogicData) -> LevelTable:
             multipliers=(100,) + extended,
         )
     return LevelTable(rarities=rarities)
+
+
+@dataclass(frozen=True, slots=True)
+class TowerScale:
+    """Crown Tower scaling, which is *not* the card ladder.
+
+    Cards compound roughly 10% per level off a shared multiplier table. Towers
+    instead accumulate a flat percentage of their level-1 base, and the rate
+    changes partway up:
+
+    ``HITPOINT_INCREASE_PERCENT_PER_TOWER_LEVEL``      8
+    ``HITPOINT_INCREASE_PERCENT_PER_KING_LEVEL``       7
+    ``..._AFTER_TOURNAMENTCAP``                       10
+    ``TOWER_SCALING_START_EXP_LEVEL``                  9
+
+    So a Princess Tower gains 8% of its base per level up to level 9, then 10%
+    per level beyond. Published descriptions of tower progression state exactly
+    that ("roughly +8% per level from 1 to 9 and roughly +10% from 9 to 13"),
+    which is independent confirmation of the mechanism.
+
+    Applying the card ladder instead would give a level-11 Princess Tower 3584
+    hitpoints against 2576 here -- a 39% error in the number every damage race
+    in the game is measured against.
+    """
+
+    hitpoint_percent: int
+    damage_percent: int
+    hitpoint_percent_after: int
+    damage_percent_after: int
+    switch_level: int
+
+    def _percent(self, level: int, base_rate: int, after_rate: int) -> int:
+        if level <= 1:
+            return 100
+        steps_before = min(level - 1, self.switch_level - 1)
+        steps_after = max(0, level - self.switch_level)
+        return 100 + base_rate * steps_before + after_rate * steps_after
+
+    def hitpoints(self, base: int, level: int) -> int:
+        return base * self._percent(level, self.hitpoint_percent, self.hitpoint_percent_after) // 100
+
+    def damage(self, base: int, level: int) -> int:
+        return base * self._percent(level, self.damage_percent, self.damage_percent_after) // 100
+
+
+def build_tower_scales(globals_map: Mapping[str, object]) -> dict[str, TowerScale]:
+    """Read the tower progressions out of ``globals.csv``.
+
+    Returns one entry per tower class: the King Tower gains 7% per level while
+    Princess Towers gain 8%, so they cannot share a scale.
+    """
+
+    def value(name: str, default: int) -> int:
+        raw = globals_map.get(name, default)
+        return raw if isinstance(raw, int) else default
+
+    switch = value("TOWER_SCALING_START_EXP_LEVEL", 9)
+    return {
+        "princess": TowerScale(
+            hitpoint_percent=value("HITPOINT_INCREASE_PERCENT_PER_TOWER_LEVEL", 8),
+            damage_percent=value("DAMAGE_INCREASE_PERCENT_PER_TOWER_LEVEL", 8),
+            hitpoint_percent_after=value(
+                "HITPOINT_INCREASE_PERCENT_PER_TOWER_LEVEL_AFTER_TOURNAMENTCAP", 10
+            ),
+            damage_percent_after=value(
+                "DAMAGE_INCREASE_PERCENT_PER_TOWER_LEVEL_AFTER_TOURNAMENTCAP", 10
+            ),
+            switch_level=switch,
+        ),
+        "king": TowerScale(
+            hitpoint_percent=value("HITPOINT_INCREASE_PERCENT_PER_KING_LEVEL", 7),
+            damage_percent=value("DAMAGE_INCREASE_PERCENT_PER_KING_LEVEL", 8),
+            hitpoint_percent_after=value(
+                "HITPOINT_INCREASE_PERCENT_PER_KING_LEVEL_AFTER_TOURNAMENTCAP", 10
+            ),
+            damage_percent_after=value(
+                "DAMAGE_INCREASE_PERCENT_PER_KING_LEVEL_AFTER_TOURNAMENTCAP", 10
+            ),
+            switch_level=switch,
+        ),
+    }
+
+
+def tower_class_for(name: str) -> str:
+    """Which scaling a structure uses, from its name."""
+    return "king" if "King" in name else "princess"

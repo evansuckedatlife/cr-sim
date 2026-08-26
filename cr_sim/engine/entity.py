@@ -187,6 +187,17 @@ class Entity:
         return False
 
     def set_state(self, state: EntityState) -> None:
+        """Move to a new state, unless this entity is already dying.
+
+        Death is terminal and must survive the rest of the tick. Without this
+        guard a unit that takes a fatal hit early in a tick can overwrite its
+        own DYING state when it acts later in the same tick -- the death sweep
+        then never sees it and it fights on forever at zero hitpoints. Ordering
+        hazards like that are why deaths are swept at a fixed point rather than
+        applied immediately.
+        """
+        if self.state in (EntityState.DYING, EntityState.DEAD):
+            return
         if self.state is not state:
             self.state = state
             self.state_ticks = 0
