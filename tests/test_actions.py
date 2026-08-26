@@ -230,6 +230,183 @@ def test_a_destroyed_spawner_stops_producing(world):
     assert after == before, "a dead hut kept spawning"
 
 
+# ------------------------------------------------------ run action at health
+
+
+def _placed_knight(battle, hitpoints=1000):
+    """A plain Knight dropped straight on the board, for exercising a
+    synthetic ``ActionRunActionAtHealth`` node against a known hitpoints
+    total rather than whatever a levelled real card happens to have."""
+    from cr_sim.engine.entity import Entity
+    from cr_sim.engine.specs import build_unit_spec
+
+    spec = build_unit_spec(
+        battle.data, battle.levels, "Knight", level=11, rarity="Common", clock=battle.clock
+    )
+    unit = Entity(
+        kind=spec.kind, team=Team.BLUE, x=tiles(9), y=tiles(12), hitpoints=hitpoints,
+        spec=spec, collision_radius=spec.collision_radius, mass=spec.mass, flying=spec.flying,
+    )
+    unit.max_hitpoints = hitpoints
+    unit.deploy_ticks_left = 0
+    battle._register(unit)
+    return unit
+
+
+def test_action_run_action_at_health_does_not_fire_above_its_threshold(world):
+    """The primitive behind GoblinGiant's evolution, MovingCannon and Goblin
+    Demolisher, driven directly rather than through any one card's chain.
+
+    A full-health unit must not trigger a 50%-health action, and the watch
+    itself must not report the node as unsupported -- both the graph node and
+    the polling it does are load-bearing, not decorative.
+    """
+    battle = _battle(world, "Knight")
+    unit = _placed_knight(battle)
+    inline = {
+        "ClassType": "ActionRunActionAtHealth",
+        "Actions": [{"ClassType": "ActionKill"}],
+        "HealthPercentages": [50],
+    }
+    ctx = ActionContext(team=Team.BLUE, x=unit.x, y=unit.y, source=unit)
+    battle.actions.run(inline, ctx, battle.tick)
+    for _ in range(60):
+        battle.step()
+    assert not unit.dead, "fired without the hitpoints ever crossing the threshold"
+    assert dict(battle.actions.unsupported) == {}
+
+
+def test_action_run_action_at_health_fires_a_threshold_at_most_once(world):
+    """Crossing the same threshold repeatedly must not refire it.
+
+    Real combat does not hold hitpoints still at exactly the cutoff -- a unit
+    takes a series of separate hits that can nick it below 50% more than
+    once. ``ActionRunActionAtHealth`` has to treat the threshold as "has this
+    ever been true", not "is this true on this particular tick", or a unit
+    that takes several hits around the line would run its transformation
+    several times over.
+    """
+    battle = _battle(world, "Knight")
+    unit = _placed_knight(battle)
+    inline = {
+        "ClassType": "ActionRunActionAtHealth",
+        "Actions": [{"ClassType": "ActionSpawn", "SpawnType": "CharacterType",
+                     "SpawnData": "Skeleton"}],
+        "HealthPercentages": [50],
+    }
+    ctx = ActionContext(team=Team.BLUE, x=unit.x, y=unit.y, source=unit)
+    battle.actions.run(inline, ctx, battle.tick)
+
+    for _ in range(4):
+        unit.hitpoints = 400  # 40%: below the line
+        for _ in range(5):
+            battle.step()
+        unit.hitpoints = 900  # 90%: back above it
+        for _ in range(5):
+            battle.step()
+
+    skeletons = [e for e in battle.entities if e.spec is not None and e.spec.name == "Skeleton"]
+    assert len(skeletons) == 1, f"{len(skeletons)} skeletons for one threshold, crossed four times"
+
+
+def test_action_run_action_at_health_fires_each_listed_threshold_independently(world):
+    """``Actions`` and ``HealthPercentages`` are parallel arrays, not a single
+    pair -- MovingCannon and the Goblin Giant evolution both list several
+    actions that should fire at their own percentage, not all together.
+    """
+    battle = _battle(world, "Knight")
+    unit = _placed_knight(battle)
+    inline = {
+        "ClassType": "ActionRunActionAtHealth",
+        "Actions": [
+            {"ClassType": "ActionSetVariable", "Variable": "crossed_high", "Value": 1},
+            {"ClassType": "ActionSetVariable", "Variable": "crossed_low", "Value": 1},
+        ],
+        "HealthPercentages": [75, 10],
+    }
+    ctx = ActionContext(team=Team.BLUE, x=unit.x, y=unit.y, source=unit)
+    battle.actions.run(inline, ctx, battle.tick)
+
+    unit.hitpoints = 500  # 50%: past the 75% line, nowhere near the 10% one
+    for _ in range(10):
+        battle.step()
+    assert ctx.variables.get("crossed_high") == 1
+    assert "crossed_low" not in ctx.variables
+
+    unit.hitpoints = 50  # 5%: past both now
+    for _ in range(10):
+        battle.step()
+    assert ctx.variables.get("crossed_low") == 1
+
+
+def test_goblin_giant_evolution_drops_no_goblins_above_half_health(world):
+    """The evolution's whole spawn cycle is gated on the health watcher.
+
+    ``GoblinGiant_EV1``'s two ``SpearGoblinGiant`` riders come from its
+    ordinary ``SpawnCharacter``/``SpawnNumber`` fields and arrive on deploy
+    regardless; the free Goblin trickle is the evolution's actual new
+    behaviour, and it must not start before the giant is hurt.
+    """
+    battle = _battle(world, "GoblinGiant_EV1")
+    assert battle.play_card(Team.BLUE, "GoblinGiant_EV1", tiles(9), tiles(12))
+    for _ in range(300):
+        battle.step()
+    assert not [
+        e for e in battle.entities if e.spec is not None and e.spec.name == "Goblin"
+    ], "goblins dropped before the giant crossed 50% health"
+    assert dict(battle.actions.unsupported) == {}
+
+
+def test_goblin_giant_evolution_drops_goblins_once_it_crosses_half_health(world):
+    """Its ``OnStartingAction`` is ``GoblinGiant_EV1_trigger_at_health``: at
+    50% hitpoints it starts an ``ActionInterval`` that spawns a Goblin every
+    2200ms for the rest of the fight. There is no other path in this build
+    that puts Goblins on the board for this evolution.
+    """
+    battle = _battle(world, "GoblinGiant_EV1")
+    assert battle.play_card(Team.BLUE, "GoblinGiant_EV1", tiles(9), tiles(12))
+    for _ in range(60):
+        battle.step()
+    giant = next(
+        e for e in battle.entities if e.spec is not None and e.spec.name == "GoblinGiant"
+    )
+    giant.hitpoints = giant.max_hitpoints // 4
+
+    goblins = _arrivals(battle, "Goblin", 700)
+    assert len(goblins) >= 2, f"only {len(goblins)} goblins from the evolution's trickle"
+    assert dict(battle.actions.unsupported) == {}
+
+
+# ---------------------------------------------------------------- furnace
+
+
+def test_firespirit_hut_launches_its_spirits_ahead_of_itself_not_on_top_of_it(world):
+    """``Furnace_rework_spawn_forward`` carries ``MirroredY = 3``: three whole
+    tiles, not three milli-tiles.
+
+    ``RelativeX``/``RelativeY`` and ``Mirrored X``/``Y`` are plain integers
+    rather than an expression, and unlike ``XPositionExpression`` they are not
+    written in the file's usual milli-tile unit -- Fire Spirits visibly launch
+    a few tiles clear of the building, not overlapping its own footprint. Read
+    as milli-tiles the offset rounds away to nothing and every spirit spawns
+    stacked on the Furnace instead.
+    """
+    battle = _battle(world, "FirespiritHut")
+    assert battle.play_card(Team.BLUE, "FirespiritHut", tiles(9), tiles(12))
+    for _ in range(180):
+        battle.step()
+
+    hut = next(
+        e for e in battle.entities if e.spec is not None and e.spec.name == "Furnace_rework"
+    )
+    spirits = [e for e in battle.entities if e.spec is not None and e.spec.name == "FireSpirits"]
+    assert spirits, "the Furnace never launched a Fire Spirit"
+    for spirit in spirits:
+        gap = math.hypot(to_tiles(spirit.x) - to_tiles(hut.x), to_tiles(spirit.y) - to_tiles(hut.y))
+        assert gap > 1.5, f"a Fire Spirit landed {gap:.2f} tiles from the Furnace"
+    assert dict(battle.actions.unsupported) == {}
+
+
 # --------------------------------------------------------------- coverage
 
 
@@ -248,10 +425,18 @@ def test_no_playable_card_hits_an_unsupported_action_node(world):
     known = {
         "ActionCounter",                             # Ronin's parry
         "ActionGiantBufferCollectFriends",           # Giant Buffer, an event card
-        "ActionRunActionAtHealth",                   # fires below a health threshold
         "ActionRunActionListOnObjectsInShapeWithPrio",  # needs the Shape definitions
         "ActionSkeletonBarrelPopBalloon",            # the Skeleton Balloon evolution
         "ActionTargetIndicatorAttack",               # Goblin Machine's second attack
+        # GoblinDemolisher and MovingCannon both trigger a full character
+        # transformation at 50% health (ActionRunActionAtHealth, implemented)
+        # into a different CHARACTER definition entirely -- new stats, new
+        # targeting rules, in MovingCannon's case a different EntityKind. This
+        # scenario deals no damage, so it never reaches that threshold; see
+        # test_goblin_demolisher_attempts_its_transformation_at_half_health for
+        # where it is exercised and what remains unimplemented.
+        "ActionChangeGameObjectData",
+        "ActionTaunt",                               # nested under the same transformation
     }
 
     seen: set[str] = set()

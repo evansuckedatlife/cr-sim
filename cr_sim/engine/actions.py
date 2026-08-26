@@ -54,6 +54,7 @@ from typing import Any, Callable, Mapping
 from ..data.source import LogicData, UnknownEntity
 from .constants import TickClock
 from .entity import Entity, EntityKind, Team
+from .fixed import SUBTILES_PER_TILE
 
 __all__ = [
     "ActionContext",
@@ -474,12 +475,27 @@ class ActionInterpreter:
                 x = value
             else:
                 y = value
-        # Fixed relative offsets, for the nodes that use them instead.
-        rel_x, rel_y = row.get("RelativeX"), row.get("RelativeY")
-        if isinstance(rel_x, int):
-            x += rel_x * 18
-        if isinstance(rel_y, int):
-            y += rel_y * 18 * _team_y_direction(int(context.team))
+        # Fixed relative offsets, for the nodes that use them instead of an
+        # expression. Two field names carry the identical shape -- a
+        # *whole-tile* offset from the cast point, mirrored on the Y axis by
+        # team facing -- and every row in the build uses one or the other,
+        # never both: Furnace's forward-spawn is ``MirroredY``, Goblin
+        # Drill's four corner spawns are ``RelativeX``/``RelativeY``.
+        # "Mirrored" does not mean the engine mirrors it at runtime; paired
+        # actions like ``SpawnGoblin1``/``_2`` already carry opposite
+        # literal signs, authored once per side.
+        #
+        # Whole tiles, not milli-tiles: Furnace's ``MirroredY`` is 3, and the
+        # card visibly launches Fire Spirits a few tiles ahead of itself, not
+        # a hundredth of a tile away. That is a different unit from the
+        # ``XPositionExpression``/``YPositionExpression`` pair above, which
+        # *is* milli-tiles because the expression scope's ``x``/``y`` are.
+        for x_key, y_key in (("RelativeX", "RelativeY"), ("MirroredX", "MirroredY")):
+            rel_x, rel_y = row.get(x_key), row.get(y_key)
+            if isinstance(rel_x, int):
+                x += rel_x * SUBTILES_PER_TILE
+            if isinstance(rel_y, int):
+                y += rel_y * SUBTILES_PER_TILE * _team_y_direction(int(context.team))
         return x, y
 
 
@@ -702,6 +718,67 @@ def _handle_kill(
         ctx.source.kill()
 
 
+def _handle_run_action_at_health(
+    interp: ActionInterpreter, row: Mapping[str, Any], ctx: ActionContext, tick: int
+) -> None:
+    """``ActionRunActionAtHealth``: fire actions as the instigator's hitpoints
+    cross listed thresholds.
+
+    ``Actions`` and ``HealthPercentages`` are parallel arrays. GoblinGiant's
+    evolution lists 50% three times over because three unrelated actions -- a
+    spawner and two cosmetic effects -- all trigger together at that one
+    threshold; MovingCannon and GoblinDemolisher each list a single pair.
+
+    There is no "hitpoints changed" event in this engine, so this polls once a
+    tick rather than waiting on one. That is bounded rather than expensive: the
+    moment every threshold has fired, or the instigator has died, it stops
+    rescheduling itself instead of polling for the rest of the match.
+
+    Each threshold fires at most once, tracked in ``ctx.variables`` under a key
+    scoped to this node's own name -- necessary because the context is shared
+    with whatever else is running on the same instigator, and two different
+    ``ActionRunActionAtHealth`` nodes on one unit must not share state.
+    """
+    source = ctx.source
+    if source is None or source.dead:
+        return
+    stop_if = row.get("ForceStopIfTrue")
+    if isinstance(stop_if, str) and stop_if.strip():
+        try:
+            if evaluate_expression(stop_if, ctx.expression_scope()):
+                return
+        except ExpressionError:
+            interp.unsupported[f"<condition:{stop_if}>"] += 1
+
+    actions = row.get("Actions") or ()
+    if isinstance(actions, str):
+        actions = [actions]
+    percentages = row.get("HealthPercentages") or ()
+
+    node_id = row.get("Name") if isinstance(row.get("Name"), str) else str(id(row))
+    fired: set[int] = ctx.variables.setdefault(f"<health-fired:{node_id}>", set())
+
+    max_hp = source.max_hitpoints or 1
+    hp_percent = source.hitpoints * 100 // max_hp
+    pending = False
+    for index, sub_action in enumerate(actions):
+        if index in fired or not isinstance(sub_action, (str, Mapping)) or not sub_action:
+            continue
+        threshold = percentages[index] if index < len(percentages) else None
+        if not isinstance(threshold, int):
+            continue
+        if hp_percent <= threshold:
+            fired.add(index)
+            interp.run(sub_action, ctx, tick)
+        else:
+            pending = True
+
+    if pending:
+        # Re-resolved by the row itself rather than by name, so an inline
+        # node (one with no ``Name`` of its own) keeps polling correctly too.
+        interp.schedule(row, ctx, tick, 0)
+
+
 _HANDLERS: dict[str, Handler] = {
     "ActionGroup": _handle_group,
     "ActionSpawn": _handle_spawn,
@@ -717,4 +794,5 @@ _HANDLERS: dict[str, Handler] = {
     "ActionClone": _handle_clone,
     "ActionRunIfGameObjectExists": _handle_run_if_exists,
     "ActionGoblinHutLifeState": _handle_hut_life_state,
+    "ActionRunActionAtHealth": _handle_run_action_at_health,
 }
