@@ -910,7 +910,9 @@ class Battle:
         for entity in self.entities:
             if entity.buffs is None or entity.dead:
                 continue
-            owed = entity.buffs.tick(entity.kind is EntityKind.TOWER)
+            owed = entity.buffs.tick(
+                entity.kind is EntityKind.TOWER, entity.kind is EntityKind.BUILDING
+            )
             if owed.damage:
                 dealt = entity.apply_damage(owed.damage)
                 if dealt:
@@ -1374,9 +1376,17 @@ class Battle:
                         lethal=victim.hitpoints <= 0,
                     )
                 )
-            if pspec.pushback and victim.kind is EntityKind.TROOP:
+            if (
+                pspec.pushback
+                and victim.kind is EntityKind.TROOP
+                and not self._pushback_immune(victim)
+            ):
                 # Knockback is along the roll, so a Log pushes a push back down
-                # the lane rather than scattering it sideways.
+                # the lane rather than scattering it sideways. Giant, Golem,
+                # P.E.K.K.A., Prince and Mega Knight carry IgnorePushback and
+                # are exempted -- the Log rolling under a Golem and not
+                # budging it is exactly the interaction the card is known for
+                # *not* having against tanks.
                 victim.y += pspec.pushback * roll.direction
 
     def _spawn_from_area(self, effect: AreaEffect) -> None:
@@ -1521,12 +1531,42 @@ class Battle:
                 if distance(shot.x, shot.y, victim.x, victim.y) > pspec.radius + victim.collision_radius:
                     continue
                 self._deal(pspec, attacker, victim)
+                if pspec.pushback and victim.kind is EntityKind.TROOP and not self._pushback_immune(victim):
+                    # Fireball, Rocket and Snowball all carry a Pushback field
+                    # that shoved nothing until this line existed -- the splash
+                    # dealt its damage and stopped there. Radial from where the
+                    # shot actually landed, the same derivation push_away uses
+                    # for a death blast, so a unit caught on the rim of the
+                    # blast is shoved less than one standing at its centre.
+                    victim.x, victim.y = push_away(
+                        (shot.x, shot.y), (victim.x, victim.y), pspec.pushback
+                    )
             return
 
         target = self._entity(shot.target_id)
         if target is None or target.dead or target.team is shot.team:
             return  # the shot arrived at a corpse; it is simply spent
         self._deal(pspec, attacker, target)
+
+    def _pushback_immune(self, victim: Entity) -> bool:
+        """Giant, Golem, P.E.K.K.A., Prince, Mega Knight and the rest of the
+        tank ladder: never displaced, by a Log, a Fireball or a boulder alike.
+
+        ``IgnorePushback`` is the exact same flag :mod:`movement` already reads
+        to keep these thirty units from being jostled by a crowd; it is not
+        scoped to that one mechanism, and Bowler -- who carries it too -- is
+        immune to his own boulder for the same reason a Golem is immune to a
+        Log. Checking it here is what stops a Log knocking a P.E.K.K.A. off her
+        line, which never happens in the real game.
+
+        A buff can grant the same immunity temporarily (``BuffState.
+        ignores_pushback``), which is why this is a method rather than a plain
+        attribute read.
+        """
+        spec = victim.spec
+        if spec is not None and spec.ignore_pushback:
+            return True
+        return victim.buffs is not None and victim.buffs.ignores_pushback()
 
     def _deal(self, pspec: ProjectileSpec, attacker: Entity | None, victim: Entity) -> None:
         amount = pspec.damage_to(victim.kind is EntityKind.TOWER)
@@ -1541,6 +1581,19 @@ class Battle:
                     lethal=victim.hitpoints <= 0,
                 )
             )
+        if pspec.target_buff and not victim.dead:
+            # Ice Spirit's whole card is this field: TargetBuff = Freeze on its
+            # own attack projectile, and nothing ever read it, so the freeze
+            # a real Ice Spirit leaves behind was silently missing -- only the
+            # 43 damage landed. The same field carries Lightning's stun,
+            # Snowball's slow and Ice Wizard's, so this is one fix for all of
+            # them rather than one per card.
+            bspec = self._buff_spec(pspec.target_buff, "Common", 11)
+            if bspec is not None:
+                self._apply_buff(
+                    victim, bspec, pspec.buff_ticks,
+                    source=attacker.id if attacker is not None else 0,
+                )
 
     def _phase_tick_area_effects(self) -> None:
         """Apply every live area effect to whatever is inside it right now.

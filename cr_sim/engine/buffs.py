@@ -245,6 +245,13 @@ class BuffSpec:
     #: existing one's timer instead. See the module docstring.
     stacks: bool
     crown_tower_damage_percent: int
+    #: Multiplier on damage dealt to a *building* (not a crown tower), read
+    #: the same ``>= 100 is a whole multiplier`` way as every other field in
+    #: this column family. Earthquake is the card built on it -- 350, a flat
+    #: 3.5x -- and BuildingDamagePercent is not a stat display quirk, it is
+    #: the entire reason to play the card against a Cannon or an X-Bow rather
+    #: than a Poison of the same cost.
+    building_damage_percent: int = 0
     #: Healing per application, converted from ``HealPerSecond`` exactly the way
     #: damage is. The mirror image of the field above and the same mechanism:
     #: Heal Spirit, Battle Healer and the Witch evolution all regenerate on an
@@ -282,15 +289,22 @@ class BuffSpec:
     #: The spawn belongs to whoever applied the buff, not to whoever died.
     death_spawn_is_enemy: bool = False
 
-    def damage_to(self, is_crown_tower: bool) -> int:
-        """Per-application damage, reduced against a crown tower where applicable.
+    def damage_to(self, is_crown_tower: bool, is_building: bool = False) -> int:
+        """Per-application damage, adjusted for what is being hit.
 
-        Mirrors ``UnitSpec.damage_to`` / ``ProjectileSpec.damage_to`` /
-        ``AreaEffectSpec.damage_to`` exactly, via :func:`apply_multiplier`.
+        Reduced against a crown tower where ``CrownTowerDamagePercent``
+        applies, mirroring ``UnitSpec.damage_to`` / ``ProjectileSpec.
+        damage_to`` / ``AreaEffectSpec.damage_to`` exactly. Boosted against an
+        ordinary building (Cannon, Tesla, X-Bow -- anything that is not a
+        crown tower) where ``BuildingDamagePercent`` applies; a tower is never
+        also "a building" here; the two multipliers are mutually exclusive by
+        construction, not by a check against each other.
         """
-        if not is_crown_tower or not self.crown_tower_damage_percent:
-            return self.damage_per_second
-        return apply_multiplier(self.damage_per_second, self.crown_tower_damage_percent)
+        if is_crown_tower and self.crown_tower_damage_percent:
+            return apply_multiplier(self.damage_per_second, self.crown_tower_damage_percent)
+        if is_building and self.building_damage_percent:
+            return apply_multiplier(self.damage_per_second, self.building_damage_percent)
+        return self.damage_per_second
 
 
 def build_buff_spec(
@@ -348,6 +362,7 @@ def build_buff_spec(
         hit_frequency_ticks=hit_frequency_ticks,
         stacks=_bool(raw.get("EnableStacking")),
         crown_tower_damage_percent=_int(raw.get("CrownTowerDamagePercent")),
+        building_damage_percent=_int(raw.get("BuildingDamagePercent")),
         heal_per_second=heal_per_application,
         allowed_over_heal_percent=_int(raw.get("AllowedOverHealPerc")),
         damage_reduction=_int(raw.get("DamageReduction")),
@@ -470,7 +485,7 @@ class BuffState:
             )
         )
 
-    def tick(self, is_crown_tower: bool = False) -> "BuffTick":
+    def tick(self, is_crown_tower: bool = False, is_building: bool = False) -> "BuffTick":
         """Advance every active buff by one tick.
 
         Expired buffs (``ticks_left`` reaching zero on this call) are dropped
@@ -480,12 +495,15 @@ class BuffState:
         tick, summed across every active buff (including independent stacks of
         the same buff, each on its own countdown).
 
-        Crown tower reduction is applied per buff *here*, because it differs
-        per buff and only this loop knows which contributed what. Leaving it to
-        the caller -- which is what this used to do -- meant nobody applied it:
-        Poison is ``CrownTowerDamagePercent: -77``, so a tower should take 23%
-        of it, and instead took a Poison's full 736. Every damage-over-time
-        spell was hitting towers between three and four times too hard.
+        Crown tower reduction and the building bonus are applied per buff
+        *here*, because they differ per buff and only this loop knows which
+        contributed what. Leaving it to the caller -- which is what this used
+        to do -- meant nobody applied it: Poison is ``CrownTowerDamagePercent:
+        -77``, so a tower should take 23% of it, and instead took a Poison's
+        full 736. Every damage-over-time spell was hitting towers between
+        three and four times too hard, and Earthquake's ``BuildingDamagePercent:
+        350`` -- its whole reason to exist -- was doing ordinary troop damage
+        against the Cannons and X-Bows it is actually played for.
 
         Healing rides the same countdown and is reported separately rather than
         netted off. A unit under a Poison cloud and a Battle Healer is being
@@ -505,7 +523,7 @@ class BuffState:
                 # over an 8-second cloud.
                 active.ticks_to_next_damage -= 1
                 if active.ticks_to_next_damage <= 0:
-                    damage += active.spec.damage_to(is_crown_tower)
+                    damage += active.spec.damage_to(is_crown_tower, is_building)
                     heal += active.spec.heal_per_second
                     active.ticks_to_next_damage = active.spec.hit_frequency_ticks
             active.ticks_left -= 1

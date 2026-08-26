@@ -20,7 +20,7 @@ from cr_sim.data.leveling import build_level_table
 from cr_sim.data.source import LogicData
 from cr_sim.engine.battle import Battle, BattleConfig
 from cr_sim.engine.entity import Entity, EntityKind, Team
-from cr_sim.engine.fixed import tiles, to_tiles
+from cr_sim.engine.fixed import distance, tiles, to_tiles
 from cr_sim.engine.specs import build_unit_spec
 
 from .test_data_pipeline import BUILD
@@ -246,6 +246,27 @@ def test_lightning_strikes_the_biggest_targets_and_not_the_same_one_twice(world)
     assert small.hitpoints < small.max_hitpoints
 
 
+def test_lightning_stuns_what_it_strikes(world):
+    """LighningSpell carries TargetBuff = ZapFreeze for 500ms, same as Zap's.
+
+    That field lives on the *projectile* Lightning's bolt spawns, and nothing
+    read it -- only its damage landed, silently dropping the stun that is the
+    other half of using Lightning to reset an Inferno Tower's ramp. Ice
+    Spirit's freeze is the same field on a different projectile; this is the
+    other spell that depended on the same fix.
+    """
+    battle = _battle(world, "Lightning")
+    victim = _victim(battle, world, 9, 12, hitpoints=9_999)
+    battle.play_card(Team.BLUE, "Lightning", tiles(9), tiles(12))
+    stunned = False
+    for _ in range(400):
+        battle.step()
+        if victim.buffs is not None and victim.buffs.is_frozen():
+            stunned = True
+    assert victim.hitpoints < victim.max_hitpoints
+    assert stunned, "Lightning's bolt never stunned what it struck"
+
+
 # ------------------------------------------------------------------ the roll
 
 
@@ -314,6 +335,32 @@ def test_the_roll_shoves_what_it_passes_over_back_down_the_lane(world):
     for _ in range(400):
         battle.step()
     assert victim.y > start, "the roll did not push its victim back"
+
+
+def test_the_log_does_not_shove_pushback_immune_tanks(world):
+    """Giant, Golem, P.E.K.K.A., Prince and Mega Knight carry IgnorePushback.
+
+    It is the same flag tests/test_collision.py checks for crowd jostling, and
+    it is not scoped to that one mechanism -- a Log rolling under a Golem does
+    not budge it either, which is exactly why these cards answer the Log
+    rather than being swept along by it. Walking under its own power would
+    also displace the Giant over 400 ticks, so what is checked is the biggest
+    single-tick jump rather than net movement: ordinary walking moves it a few
+    hundred subtiles a tick, and the roll's own pushback (0.7 tiles, 12600
+    subtiles) would show up as one unmistakable jump if the immunity check
+    were skipped.
+    """
+    battle = _battle(world, "Log")
+    giant = _victim(battle, world, 9, 15, unit="Giant")
+    assert giant.spec.ignore_pushback
+    positions = [(giant.x, giant.y)]
+    battle.play_card(Team.BLUE, "Log", tiles(9), tiles(12))
+    for _ in range(400):
+        battle.step()
+        positions.append((giant.x, giant.y))
+    assert giant.hitpoints < giant.max_hitpoints, "the roll should still have damaged it"
+    biggest_jump = max(distance(*a, *b) for a, b in zip(positions, positions[1:]))
+    assert biggest_jump < tiles(0.3), f"a {to_tiles(biggest_jump):.3f}-tile jump in one tick"
 
 
 def test_a_red_log_rolls_the_other_way(world):
@@ -429,3 +476,50 @@ def test_a_shot_with_no_payload_still_needs_a_target(world):
     for _ in range(400):
         battle.step()
     assert not battle.damage_log, "Lightning fired at an empty tile"
+
+
+# ---------------------------------------------------------------- knockback
+
+
+def test_fireball_knocks_its_victim_back(world):
+    """FireballSpell carries Pushback = 1000 (1.0 tile) and nothing read it.
+
+    The splash loop dealt the blast's damage and stopped there, dropping the
+    other half of the card -- the knockback that resets a charge or scatters a
+    clump off a tower's firing line. Checked as the biggest single-tick jump
+    rather than net displacement, since the victim also walks on its own: an
+    ordinary step is a few hundred subtiles, and a real knockback is 18000 in
+    the one tick the blast lands.
+    """
+    battle = _battle(world, "Fireball")
+    victim = _victim(battle, world, 9, 16, unit="Knight")
+    positions = [(victim.x, victim.y)]
+    # Cast a little short of the victim rather than exactly on it: landing
+    # precisely on its centre gives push_away nothing to take a direction
+    # from, which would mask the very bug this test exists to catch.
+    battle.play_card(Team.BLUE, "Fireball", tiles(9), tiles(15.7))
+    for _ in range(200):
+        battle.step()
+        positions.append((victim.x, victim.y))
+    assert victim.hitpoints < victim.max_hitpoints
+    biggest_jump = max(distance(*a, *b) for a, b in zip(positions, positions[1:]))
+    assert biggest_jump > tiles(0.5), "no single tick moved the victim as far as a knockback should"
+
+
+def test_fireball_does_not_shove_pushback_immune_tanks(world):
+    """The same IgnorePushback tanks the Log cannot move are immune to a
+    Fireball's blast too -- it is one flag, read the same way in both places.
+    """
+    battle = _battle(world, "Fireball")
+    golem = _victim(battle, world, 9, 16, unit="Golem")
+    assert golem.spec.ignore_pushback
+    positions = [(golem.x, golem.y)]
+    # Off-centre, as above: on-centre would pass even without the immunity
+    # check, since push_away has no direction to move a coincident point in.
+    battle.play_card(Team.BLUE, "Fireball", tiles(9), tiles(15.7))
+    for _ in range(200):
+        battle.step()
+        positions.append((golem.x, golem.y))
+    assert golem.hitpoints < golem.max_hitpoints
+    biggest_jump = max(distance(*a, *b) for a, b in zip(positions, positions[1:]))
+    assert biggest_jump < tiles(0.3), f"a {to_tiles(biggest_jump):.3f}-tile jump in one tick"

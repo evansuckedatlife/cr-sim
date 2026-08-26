@@ -222,6 +222,63 @@ def test_electro_wizard_stuns_what_he_hits(world):
     assert "ZapFreeze" in (victim.buffs.active_names() if victim.buffs else ())
 
 
+def test_ice_spirit_freezes_what_it_hits(world):
+    """Its attack projectile carries TargetBuff = Freeze for 1100ms.
+
+    Unlike Electro Wizard's stun -- a UnitSpec field applied when the hit is
+    decided -- this one lives on the *projectile* (``PROJECTILE.
+    IceSpiritsProjectile``), and nothing in the impact path read it, so an Ice
+    Spirit landed its damage and nothing else: the freeze that is the entire
+    reason to play the card against a counter-push was silently missing.
+    """
+    battle = _battle(world, "Knight")
+    spirit = _spawn(battle, world, "IceSpirits", Team.BLUE, 9, 12)
+    victim = _spawn(battle, world, "Knight", Team.RED, 9, 14, hitpoints=99_999)
+    assert spirit.spec.kamikaze
+
+    frozen = 0
+    saw_freeze_buff = False
+    for _ in range(200):
+        battle.step()
+        if victim.buffs is not None and victim.buffs.is_frozen():
+            frozen += 1
+        if victim.buffs is not None and "Freeze" in victim.buffs.active_names():
+            saw_freeze_buff = True
+    assert frozen > 0, "the Ice Spirit's hit never froze its target"
+    # Checked while the buff is still live, not after the loop -- BuffTime is
+    # only 1100ms (66 ticks), so it has long since expired and been swept from
+    # the list by the time all 200 ticks have run.
+    assert saw_freeze_buff, "the freeze buff applied was never named Freeze"
+
+
+# ---------------------------------------------------------------- earthquake
+
+
+def test_earthquake_hits_buildings_three_and_a_half_times_harder(world):
+    """BuildingDamagePercent = 350 on BUFF.Earthquake was parsed and never used.
+
+    Earthquake's entire niche is chipping down Cannons, Teslas and X-Bows far
+    faster than the same spell would hurt a troop -- that is the whole reason
+    to bring it instead of a Poison of the same cost. Without this fix a
+    Cannon and a Knight caught in the same cloud took identical damage, three
+    ticks of 81 apiece rather than 81 against the Knight and 283 against the
+    Cannon (81 scaled to level 11, then apply_multiplier(81, 350) = 283).
+    """
+    battle = _battle(world, "Earthquake")
+    troop = _spawn(battle, world, "Knight", Team.RED, 9, 12, hitpoints=99_999)
+    cannon = _spawn(battle, world, "Cannon", Team.RED, 11, 12, hitpoints=99_999)
+    assert cannon.kind is EntityKind.BUILDING
+
+    assert battle.play_card(Team.BLUE, "Earthquake", tiles(10), tiles(12))
+    for _ in range(300):
+        battle.step()
+
+    troop_dealt = troop.max_hitpoints - troop.hitpoints
+    cannon_dealt = cannon.max_hitpoints - cannon.hitpoints
+    assert troop_dealt == 243, f"troop took {troop_dealt}, expected 3 ticks of 81"
+    assert cannon_dealt == 849, f"building took {cannon_dealt}, expected 3 ticks of 283"
+
+
 # ------------------------------------------------------- the delta convention
 
 

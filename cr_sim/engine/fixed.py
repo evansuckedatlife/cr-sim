@@ -127,10 +127,20 @@ def push_away(
 ) -> tuple[int, int]:
     """Shove ``point`` ``amount`` further from ``origin``, along the line between them.
 
-    Used by every knockback in the game: a Golem's death nova, a Bowler's
-    boulder, a Log rolling through. Derived from the running total the same way
-    :func:`point_along` is, so a push and a walk of the same length land on
-    exactly the same subtile rather than differing by a rounding step.
+    Used by every knockback in the game: a Golem's death nova, a Fireball's
+    blast, a Log rolling through (the Log takes its own simpler axis-aligned
+    shortcut instead, since it only ever pushes along the lane it rolls down).
+
+    Deliberately **not** implemented as ``point_along(ax, ay, bx, by, span +
+    amount, span)``, despite how natural that looks: :func:`point_along` exists
+    to walk *toward* a destination and clamps at ``travelled >= segment_length``
+    so a mover can never overshoot it (``test_point_along_clamps_at_the_endpoints``
+    pins that down, because pathing and projectile flight both depend on it). A
+    push's whole job is to overshoot the original span by ``amount`` -- feeding
+    it through that clamp made every call land exactly on ``point`` again,
+    silently, since ``span + amount`` is never less than ``span`` for a
+    non-negative push. Extrapolating the ratio directly here is what actually
+    moves the point.
 
     A point sitting exactly on the origin has no direction to be pushed in, so
     it stays put. Picking an arbitrary direction there would make the outcome
@@ -141,7 +151,11 @@ def push_away(
     span = distance(ax, ay, bx, by)
     if span <= 0 or amount == 0:
         return bx, by
-    return point_along(ax, ay, bx, by, span + amount, span)
+    new_span = span + amount
+    return (
+        ax + (bx - ax) * new_span // span,
+        ay + (by - ay) * new_span // span,
+    )
 
 
 def clamp(value: int, low: int, high: int) -> int:
