@@ -652,6 +652,11 @@ class Battle:
         for name in self._SHARED:
             value = getattr(self, name)
             memo[id(value)] = value
+        # The interpreter's own caches, on the same grounds: one is parsed
+        # ACTION rows keyed by name, the other a tally of unimplemented class
+        # types. Neither is state the simulation reads back.
+        memo[id(self.actions._cache)] = self.actions._cache
+        memo[id(self.actions.unsupported)] = self.actions.unsupported
 
         # The append-only histories are set aside rather than copied. A branch
         # adds to them and reads its own additions, but never rereads or

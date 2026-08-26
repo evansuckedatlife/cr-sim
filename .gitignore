@@ -11,3 +11,6 @@ dist/
 # summarised into reference/ or the README instead.
 runs/
 *.log
+projected.err
+projected.log
+runs-overnight.log
