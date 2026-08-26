@@ -172,3 +172,73 @@ def test_a_mirrored_card_keeps_its_own_placement_rules(battle):
     battle.play_card(Team.BLUE, "Knight", tiles(9), tiles(12))
     _force(battle, "Mirror")
     assert not battle.play_card(Team.BLUE, "Mirror", tiles(9), tiles(26))
+
+
+# ------------------------------------------------------------- variant cards
+
+
+def test_merge_maiden_is_read_as_a_variant_card(world):
+    """Its cost is not on the card. It is the trigger of the form afforded.
+
+    ``Options`` lists a mounted form at six elixir and a foot form at three,
+    so what the card *is* depends on what you can pay when you play it.
+    """
+    _data, _levels, registry = world
+    card = registry.get("MergeMaiden")
+    assert card.variants == ((6, "MergeMaiden_Mounted"), (3, "MergeMaiden_Normal"))
+    # Richest first, so resolution is "the best one you can afford" rather
+    # than a search.
+    costs = [c for c, _ in card.variants]
+    assert costs == sorted(costs, reverse=True)
+
+
+def test_no_other_card_has_variants(world):
+    """Pinned so a second one shows up as a failure rather than a mystery."""
+    _data, _levels, registry = world
+    assert [c.name for c in registry.cards if c.variants] == ["MergeMaiden"]
+
+
+@pytest.mark.parametrize(
+    "elixir,expected_cost,form",
+    [(9, 6, "MergeMaiden_Mounted"), (4, 3, "MergeMaiden_Normal")],
+)
+def test_the_form_follows_the_elixir(world, elixir, expected_cost, form):
+    data, levels, registry = world
+    deck = ("MergeMaiden", "Knight", "Musketeer", "Cannon",
+            "Log", "Fireball", "Goblins", "Skeletons")
+    b = Battle(
+        data, levels, registry,
+        BattleConfig(seed=1, blue_deck=deck, red_deck=("Knight",) * 8),
+    )
+    b.entities = [e for e in b.entities if e.kind is not EntityKind.TOWER]
+    b._towers = {Team.BLUE: [], Team.RED: []}
+    player = b.players[Team.BLUE]
+    player.cycle.remove("MergeMaiden")
+    player.cycle.insert(0, "MergeMaiden")
+    player.elixir.amount = 0
+    player.elixir.add(elixir)
+
+    before = player.elixir.units
+    assert b.play_card(Team.BLUE, "MergeMaiden", tiles(9), tiles(12))
+    assert before - player.elixir.units == expected_cost
+    for _ in range(120):
+        b.step()
+    deployed = [e.spec.name for e in b.entities
+                if not e.dead and e.spec is not None and "Maiden" in e.spec.name]
+    assert deployed == [form]
+
+
+def test_a_variant_card_is_refused_below_its_cheapest_form(world):
+    data, levels, registry = world
+    deck = ("MergeMaiden", "Knight", "Musketeer", "Cannon",
+            "Log", "Fireball", "Goblins", "Skeletons")
+    b = Battle(
+        data, levels, registry,
+        BattleConfig(seed=1, blue_deck=deck, red_deck=("Knight",) * 8),
+    )
+    player = b.players[Team.BLUE]
+    player.cycle.remove("MergeMaiden")
+    player.cycle.insert(0, "MergeMaiden")
+    player.elixir.amount = 0
+    player.elixir.add(2)
+    assert not b.play_card(Team.BLUE, "MergeMaiden", tiles(9), tiles(12))

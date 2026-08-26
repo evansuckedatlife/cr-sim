@@ -496,6 +496,25 @@ class Battle:
         mirrored: Card | None = None
         level_offset = 0
         cost = card.mana_cost
+
+        # A variant card is whichever form the elixir on hand pays for. Merge
+        # Maiden mounted at six, on foot at three -- so the cost is not on the
+        # card, it is the trigger of the form that was actually afforded.
+        if card.variants:
+            chosen = next(
+                (
+                    (price, name)
+                    for price, name in card.variants
+                    if player.elixir.can_afford(price)
+                ),
+                None,
+            )
+            if chosen is None:
+                return False
+            variant = self.registry.get(chosen[1])
+            if variant is None:
+                return False
+            cost, card = chosen[0], variant
         if card.is_mirror:
             mirrored = self.registry.get(player.last_played or "")
             if mirrored is None or mirrored.is_mirror:

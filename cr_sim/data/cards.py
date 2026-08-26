@@ -70,6 +70,11 @@ class Card:
     #: ``DarkElixirCost``. One means every second play is evolved, two every
     #: third. Zero for a card with no evolution.
     evolution_cycles: int = 0
+    #: Elixir-dependent forms, richest first, as ``(cost, card name)``. Merge
+    #: Maiden is the only card in this build with any: at six elixir it deploys
+    #: its mounted form and at three the ordinary one, so what the card *is*
+    #: depends on what you can pay when you play it.
+    variants: tuple[tuple[int, str], ...] = ()
     #: Replays the last card played instead of deploying anything of its own.
     is_mirror: bool = False
     #: Never dealt into the opening hand. Mirror with nothing to mirror would
@@ -169,6 +174,30 @@ class CardRegistry:
         return tuple(c for c in self.standard() if c.kind is kind)
 
 
+#: ``AvailableManaTrigger`` is in thousandths of an elixir, matching the
+#: precision the elixir bar itself is kept in.
+_MANA_TRIGGER_PER_ELIXIR = 1000
+
+
+def _variants(options: Any) -> tuple[tuple[int, str], ...]:
+    """Read a variant card's forms, most expensive first.
+
+    Ordered so resolution is "the best one you can afford" rather than a
+    search: the first entry a player can pay for is the one they get.
+    """
+    if not isinstance(options, (list, tuple)):
+        return ()
+    found: list[tuple[int, str]] = []
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        trigger = option.get("AvailableManaTrigger")
+        spell = option.get("SpellData")
+        if isinstance(trigger, int) and isinstance(spell, str) and spell:
+            found.append((trigger // _MANA_TRIGGER_PER_ELIXIR, spell))
+    return tuple(sorted(found, key=lambda pair: -pair[0]))
+
+
 def _first_evolution(value: Any) -> str | None:
     """The evolved form named on a base card.
 
@@ -237,6 +266,7 @@ def build_card_registry(data: LogicData) -> CardRegistry:
                     is_evolution=is_evo,
                     is_hero_form=is_hero,
                     evolution=_first_evolution(row.get("EvolvedSpells")),
+                    variants=_variants(row.get("Options")),
                     is_mirror=row.get("Mirror") is True,
                     omit_from_starting_hand=row.get("OmitFromStartingHand") is True,
                     not_in_use=bool(row.get("NotInUse", False)),

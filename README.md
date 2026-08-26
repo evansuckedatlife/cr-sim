@@ -41,6 +41,14 @@ than one that names them.
   (`ActionClone`, `ActionMegaKnightUppercut`, `ActionSoulDrain` and friends).
   They are counted in `ActionInterpreter.unsupported` and pinned by a test that
   walks the whole playable pool, so the list can only shrink.
+- **The play page draws the arena procedurally, not from the game's art.**
+  The real textures are in `install_time_asset_pack.apk` under `assets/sc3d/`
+  -- `arn_grass_basic_diff.ktx`, `arn_ground_diff.ktx` and friends, 512x512,
+  KTX2 with `vkFormat=172` (ASTC 8x8 SRGB) and no supercompression. ASTC needs
+  a real decoder; there is no reasonable pure-Python path and adding one is a
+  dependency taken on for cosmetics. The models are `.glb`, which *is* standard
+  glTF, but the game is 3D and the viewer is a 2D canvas. The layout matches
+  the battle screen; the surfaces are flat colour.
 - **Pathfinding is waypoints, not a search.** Ground units route through the
   nearer bridge and otherwise steer straight. The `PATHFINDING_*` costs the
   game ships (`DEFAULT=8`, `ROAD=5`, `WATER=7`, `BLOCKED=50`, `BUILDING=50`)
