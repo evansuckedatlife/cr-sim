@@ -30,6 +30,7 @@ from ..engine.arena import Arena, load_arena
 from ..engine.battle import Battle, BattleConfig
 from ..engine.entity import Team
 from ..render.web import render_ascii
+from .reward import RewardTracker, RewardWeights
 from .encoding import (
     NUM_CARD_SLOTS,
     EncodingConfig,
@@ -272,6 +273,7 @@ class CRSimEnv(_EnvBase):
         level: int = 11,
         tower_level: int = 11,
         reward_shaping_weight: float = 0.01,
+        reward_weights: "RewardWeights | None" = None,
         max_ticks: int | None = None,
         render_mode: str | None = None,
         skip_forced: bool = True,
@@ -288,6 +290,15 @@ class CRSimEnv(_EnvBase):
         self.level = level
         self.tower_level = tower_level
         self.reward_shaping_weight = reward_shaping_weight
+        #: When given, the five-term reward replaces the single tower-health
+        #: difference. Kept optional so the simpler signal stays available as a
+        #: control -- an ablation needs something to ablate against.
+        self.reward_weights = reward_weights
+        self._reward = (
+            RewardTracker(team, registry, reward_weights)
+            if reward_weights is not None
+            else None
+        )
         self.max_ticks = max_ticks
         self.render_mode = render_mode
         self.skip_forced = skip_forced
@@ -329,7 +340,13 @@ class CRSimEnv(_EnvBase):
             ),
             arena=self._arena,
         )
-        self._prev_value = _shaped_value(self.battle, self.team, self.reward_shaping_weight)
+        if self._reward is not None:
+            self._reward.reset(self.battle)
+            self._prev_value = 0.0
+        else:
+            self._prev_value = _shaped_value(
+                self.battle, self.team, self.reward_shaping_weight
+            )
         return self._observe(self.team), _info(self.battle)
 
     def step(self, action: Sequence[int]):
@@ -348,9 +365,12 @@ class CRSimEnv(_EnvBase):
 
         _advance(self.battle, self.frame_skip)
 
-        value = _shaped_value(self.battle, self.team, self.reward_shaping_weight)
-        reward = value - self._prev_value
-        self._prev_value = value
+        if self._reward is not None:
+            reward = self._reward.step(self.battle, self.frame_skip)
+        else:
+            value = _shaped_value(self.battle, self.team, self.reward_shaping_weight)
+            reward = value - self._prev_value
+            self._prev_value = value
 
         terminated = self.battle.finished
         truncated = (
@@ -406,9 +426,12 @@ class CRSimEnv(_EnvBase):
             _apply_action(self.battle, opponent, opponent_action, self._config)
             _advance(self.battle, self.frame_skip)
 
-            value = _shaped_value(self.battle, self.team, self.reward_shaping_weight)
-            gained += value - self._prev_value
-            self._prev_value = value
+            if self._reward is not None:
+                gained += self._reward.step(self.battle, self.frame_skip)
+            else:
+                value = _shaped_value(self.battle, self.team, self.reward_shaping_weight)
+                gained += value - self._prev_value
+                self._prev_value = value
 
             if self.battle.finished or (
                 self.max_ticks is not None and self.battle.tick >= self.max_ticks
