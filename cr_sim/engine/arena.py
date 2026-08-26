@@ -28,7 +28,7 @@ The geometry that falls out, all confirmed against the file:
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntFlag
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
@@ -96,6 +96,25 @@ class Arena:
     towers: tuple[TowerPlacement, ...] = ()
     source: str = "tilemap.csv"
 
+    #: Derived geometry, computed once. The river and the bridges are fixed
+    #: properties of a tilemap, but ``river_rows`` used to rescan all 2304
+    #: cells on every call -- and it sits under ``river_band``, ``own_half``,
+    #: ``bridges`` and ``crosses_river``, the last of which runs once per
+    #: moving troop per tick. Recomputing immutable terrain in the movement
+    #: hot loop is pure waste, and throughput is what gates training.
+    _river_rows: tuple[int, int] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _bridges: tuple[tuple[int, int, int], ...] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        # object.__setattr__ because the dataclass is frozen: the cache is not
+        # mutable state, it is a value derived from `cells` at construction.
+        object.__setattr__(self, "_river_rows", self._scan_river_rows())
+        object.__setattr__(self, "_bridges", self._scan_bridges())
+
     # --------------------------------------------------------------- extents
 
     @property
@@ -162,6 +181,10 @@ class Arena:
 
     def river_rows(self) -> tuple[int, int]:
         """Inclusive cell-row range of the river band."""
+        assert self._river_rows is not None
+        return self._river_rows
+
+    def _scan_river_rows(self) -> tuple[int, int]:
         rows = [
             cy
             for cy in range(self.half_height)
@@ -183,6 +206,10 @@ class Arena:
         the data does not mark bridges positively, it marks the river and leaves
         the gaps.
         """
+        assert self._bridges is not None
+        return self._bridges
+
+    def _scan_bridges(self) -> tuple[tuple[int, int, int], ...]:
         first, last = self.river_rows()
         if last < first:
             return ()

@@ -49,6 +49,7 @@ from .combat import (
 )
 from .pathing import Route, crosses_river, route_to, step_towards
 from .areaeffects import AreaEffect, AreaEffectSpec, build_area_effect_spec
+from .actions import ActionContext, ActionInterpreter
 from .buffs import BuffSpec, BuffState, apply_delta, build_buff_spec
 from .projectiles import (
     Projectile,
@@ -134,6 +135,7 @@ class Battle:
         "fire_pending_waves",
         "advance_deploy_timers",
         "advance_lifetimes",
+        "run_actions",
         "run_spawners",
         "update_buffs",
         "update_conditional_buffs",
@@ -189,6 +191,7 @@ class Battle:
         "_last_attack",
         "_spawn_timers",
         "_spawn_children",
+        "actions",
         "_buff_specs",
     )
 
@@ -209,6 +212,7 @@ class Battle:
         self.arena = arena or load_arena(data)
         self.timeline: BattleTimeline = build_timeline(data, clock=self.clock)
         self.rng = Rng(self.config.seed)
+        self.actions = ActionInterpreter(self.data, self.clock, self._spawn_units)
 
         reset_entity_ids()
         self.entities: list[Entity] = []
@@ -442,6 +446,7 @@ class Battle:
                     lifetime_ticks=spec.lifetime_ticks,
                 )
                 self._register(unit)
+                self._begin_actions(unit)
                 index += 1
 
     # ------------------------------------------------------------- the loop
@@ -592,6 +597,16 @@ class Battle:
         for entity in self.entities:
             if not entity.dead and entity.lifetime_left > 0 and not entity.is_deploying:
                 entity.tick_lifetime()
+
+    def _phase_run_actions(self) -> None:
+        """Advance the ACTION graph.
+
+        Actions carry real delays -- Graveyard's twelve skeletons are authored
+        at 2200ms through 8200ms -- so the interpreter holds a queue and this
+        drains whatever is due. Placed before the spawners so an action that
+        creates a hut has it producing on the same tick a stat-driven one would.
+        """
+        self.actions.drain(self.tick)
 
     def _phase_run_spawners(self) -> None:
         """Buildings and units that produce troops on a timer.
@@ -931,6 +946,15 @@ class Battle:
         )
         self.entities.append(effect)
         self._by_id_map[effect.id] = effect
+        if aspec.action:
+            # The reworked spells keep everything here. AEO.Graveyard_rework
+            # carries only a radius and a lifetime; its twelve skeletons, their
+            # timings and their ring positions are all in the action graph.
+            self.actions.start(
+                aspec.action,
+                ActionContext(team=team, x=x, y=y, source=effect),
+                self.tick,
+            )
         return effect
 
     def _projectile_spec(self, name: str, rarity: str, level: int) -> ProjectileSpec | None:
@@ -1537,8 +1561,20 @@ class Battle:
                 lifetime_ticks=spec.lifetime_ticks,
             )
             self._register(unit)
+            self._begin_actions(unit)
             spawned.append(unit)
         return spawned
+
+    def _begin_actions(self, entity: Entity) -> None:
+        """Fire an entity's ``OnStartingAction``, if it has one."""
+        spec = entity.spec
+        if spec is None or not spec.on_starting_action:
+            return
+        self.actions.start(
+            spec.on_starting_action,
+            ActionContext(team=entity.team, x=entity.x, y=entity.y, source=entity),
+            self.tick,
+        )
 
     def _phase_check_tower_activation(self) -> None:
         """Wake a King Tower once it is provoked.

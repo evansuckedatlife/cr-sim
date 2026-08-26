@@ -156,6 +156,11 @@ class UnitSpec:
     #: so nothing can target one.
     is_fuse: bool = False
 
+    #: An ACTION graph fired when this entity appears. In this build that is
+    #: where the reworked cards keep their behaviour -- the Goblin Hut's whole
+    #: spawn cycle is an OnStartingAction and its stat columns are empty.
+    on_starting_action: str | None = None
+
     @property
     def is_melee(self) -> bool:
         # 1900 milli-tiles is the game's own MELEE_RANGE_LIMIT.
@@ -306,6 +311,7 @@ def build_unit_spec(
             else clock.ticks(raw.get("LifeTime"))
         ),
         is_fuse=is_fuse,
+        on_starting_action=_opt_str(raw.get("OnStartingAction")) or None,
         attack_range=milli_tiles(_int(raw.get("Range"))),
         minimum_range=milli_tiles(_int(raw.get("MinimumRange"))),
         sight_range=milli_tiles(_int(raw.get("SightRange"))),

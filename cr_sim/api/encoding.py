@@ -333,6 +333,28 @@ def decode_action(
     return slot, x, y
 
 
+@lru_cache(maxsize=4096)
+def _can_deploy_cached(
+    arena: Arena, team: Team, x: int, y: int, anywhere: bool, on_water: bool
+) -> bool:
+    """Memoised ``Arena.can_deploy``.
+
+    ``can_deploy`` calls ``own_half``, which calls ``river_band`` /
+    ``river_rows``, which rescans the whole 36x64 tilemap for the river band
+    on *every* call rather than caching it -- profiling
+    ``legal_action_mask`` showed that scan alone accounts for essentially
+    all of a mask build's time, since a mask calls ``can_deploy`` up to
+    ``4 * action_width * action_height`` times (576 for the standard board)
+    and every one of those re-triggers it. The action grid only ever asks
+    about a fixed set of cell-centre points per ``(arena, team)``, and at
+    most a handful of ``(anywhere, on_water)`` combinations exist across the
+    card pool, so the whole result space is small and unchanging within an
+    episode -- caching it here, without touching ``Arena`` itself, turns a
+    per-mask O(board area) rescan into a one-time cost.
+    """
+    return arena.can_deploy(team, x, y, anywhere=anywhere, on_water=on_water)
+
+
 def legal_action_mask(
     battle: Battle, team: Team, registry: CardRegistry, config: EncodingConfig
 ) -> np.ndarray:
@@ -365,10 +387,10 @@ def legal_action_mask(
         for gy in range(height):
             for gx in range(width):
                 x, y = cell_to_world(gx, gy, team, arena, span=PLACEMENT_TILE_SPAN)
-                if arena.can_deploy(
-                    team, x, y,
-                    anywhere=card.can_deploy_on_enemy_side,
-                    on_water=card.can_place_on_water,
+                if _can_deploy_cached(
+                    arena, team, x, y,
+                    card.can_deploy_on_enemy_side,
+                    card.can_place_on_water,
                 ):
                     mask[slot, gy, gx] = True
     return mask
