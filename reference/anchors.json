@@ -1,0 +1,87 @@
+{
+  "_comment": [
+    "EXTERNAL ground truth, hand-checked against the live game / published stats.",
+    "This file is the real accuracy gate: it is NOT generated from the game files,",
+    "so it independently pins the ingestion chain (milli-tile units, the shared",
+    "power ladder, the rarity offset, truncation, projectile damage lookup).",
+    "Add an entry only when you have actually confirmed the number. Never",
+    "regenerate this file from a build -- that would make the gate circular.",
+    "'display_level' is the rarity-independent level the game shows (11 = tournament standard)."
+  ],
+  "display_level": 11,
+  "verified_cards": {
+    "Knight": {
+      "_source": "confirmed: 1,766 HP, 202 damage per hit, 168 DPS, 1.2s hit speed, 3 elixir Common",
+      "elixir": 3,
+      "rarity": "Common",
+      "hitpoints": 1766,
+      "damage": 202,
+      "hit_speed": 1200,
+      "dps": 168
+    },
+    "Pekka": {
+      "_source": "confirmed: 3,760 HP at level 11, 1.8s hit speed. NOTE: damage NOT anchored, see open_questions.",
+      "elixir": 7,
+      "rarity": "Epic",
+      "hitpoints": 3760,
+      "hit_speed": 1800
+    },
+    "ArcherQueen": {
+      "_source": "champion rarity offset check: base 391 at power index 0 x2.56 = 1000 at display 11",
+      "elixir": 5,
+      "rarity": "Champion",
+      "hitpoints": 1000
+    },
+    "Rocket": {
+      "_source": "well-established tournament-standard value; pins the spell projectile-damage path",
+      "elixir": 6,
+      "rarity": "Rare",
+      "damage": 1484
+    },
+    "Arrows": {
+      "_source": "well-established tournament-standard value",
+      "elixir": 3,
+      "rarity": "Common",
+      "damage": 122
+    },
+    "Fireball": {
+      "_source": "tournament-standard damage, 2.5-tile radius, reduced crown-tower damage",
+      "elixir": 4,
+      "rarity": "Rare",
+      "damage": 688,
+      "radius": 2500
+    },
+    "Snowball": {
+      "_source": "tournament-standard value for Giant Snowball",
+      "elixir": 2,
+      "rarity": "Common",
+      "damage": 179
+    }
+  },
+  "engine_constants": {
+    "_comment": "Structural facts read out of the game files and cross-checked against live play.",
+    "starting_elixir": 6,
+    "regulation_seconds": 180,
+    "overtime_seconds": 120,
+    "elixir_ms_per_unit": [2800, 1400, 930],
+    "elixir_phase_seconds": [120, 120, 60],
+    "max_elixir": 10,
+    "princess_tower_hitpoints_level_1": 1400,
+    "princess_tower_hit_speed": 800,
+    "king_tower_hitpoints_level_1": 2400,
+    "melee_range_short": 800,
+    "melee_range_medium": 1200,
+    "melee_range_long": 1900,
+    "tiles_per_minute_per_speed_unit": 1,
+    "milli_tiles_per_tile": 1000
+  },
+  "open_questions": [
+    {
+      "id": "pekka-damage",
+      "question": "P.E.K.K.A damage at display level 11: extracted data gives 842 (base 329 x 2.56); some public stat sites report 510.",
+      "why_it_matters": "If 842 is wrong the whole damage-scaling path is wrong; but HP from the same multiplier verifies exactly on three cards, which argues the extracted value is right and the public tables are stale.",
+      "how_to_resolve": "Open P.E.K.K.A's card page in-game at any level and read 'Damage'; compare against cr-sim's `validate` output for that same level.",
+      "status": "open"
+    }
+  ]
+}

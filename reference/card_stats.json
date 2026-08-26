@@ -1,0 +1,1163 @@
+{
+  "_comment": "Frozen expected card stats at the displayed tournament level. Regenerate only after checking against the live game.",
+  "build": "extracted from C:\\Users\\evanP\\Downloads\\Clash+Royale_150535029_APKPure\\install_time_asset_pack.apk",
+  "display_level": 11,
+  "cards": {
+    "AngryBarbarians": {
+      "elixir": 6,
+      "rarity": "Common",
+      "hitpoints": 1341,
+      "damage": 384,
+      "hit_speed": 1400,
+      "range": 1200,
+      "speed": 90,
+      "count": 2,
+      "dps": 274
+    },
+    "Archer": {
+      "elixir": 3,
+      "rarity": "Common",
+      "hitpoints": 304,
+      "damage": 112,
+      "hit_speed": 900,
+      "range": 5000,
+      "speed": 60,
+      "count": 2,
+      "dps": 124
+    },
+    "ArcherQueen": {
+      "elixir": 5,
+      "rarity": "Champion",
+      "hitpoints": 1000,
+      "damage": 225,
+      "hit_speed": 1200,
+      "range": 5000,
+      "speed": 60,
+      "count": 1,
+      "dps": 188
+    },
+    "Arrows": {
+      "elixir": 3,
+      "rarity": "Common",
+      "damage": 122,
+      "radius": 1400
+    },
+    "Assassin": {
+      "elixir": 3,
+      "rarity": "Legendary",
+      "hitpoints": 906,
+      "damage": 194,
+      "hit_speed": 1000,
+      "range": 750,
+      "speed": 90,
+      "count": 1,
+      "dps": 194
+    },
+    "AxeMan": {
+      "elixir": 5,
+      "rarity": "Epic",
+      "hitpoints": 1280,
+      "damage": 179,
+      "hit_speed": 900,
+      "range": 4500,
+      "speed": 60,
+      "count": 1,
+      "dps": 199
+    },
+    "BabyDragon": {
+      "elixir": 4,
+      "rarity": "Epic",
+      "hitpoints": 1152,
+      "damage": 168,
+      "hit_speed": 1500,
+      "range": 3500,
+      "speed": 90,
+      "count": 1,
+      "dps": 112
+    },
+    "Balloon": {
+      "elixir": 5,
+      "rarity": "Epic",
+      "hitpoints": 1676,
+      "damage": 640,
+      "hit_speed": 2000,
+      "range": 100,
+      "speed": 60,
+      "count": 1,
+      "dps": 320
+    },
+    "BarbLog": {
+      "elixir": 2,
+      "rarity": "Epic",
+      "radius": 1300
+    },
+    "BarbarianHut": {
+      "elixir": 6,
+      "rarity": "Rare",
+      "hitpoints": 1164,
+      "hit_speed": 10000,
+      "count": 1
+    },
+    "Barbarians": {
+      "elixir": 5,
+      "rarity": "Common",
+      "hitpoints": 716,
+      "damage": 192,
+      "hit_speed": 1400,
+      "range": 700,
+      "speed": 60,
+      "count": 5,
+      "dps": 137
+    },
+    "Bats": {
+      "elixir": 2,
+      "rarity": "Common",
+      "hitpoints": 81,
+      "damage": 81,
+      "hit_speed": 1200,
+      "range": 1200,
+      "speed": 120,
+      "count": 5,
+      "dps": 68
+    },
+    "BattleHealer": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "hitpoints": 1920,
+      "damage": 268,
+      "hit_speed": 2000,
+      "range": 1600,
+      "speed": 60,
+      "count": 1,
+      "dps": 134
+    },
+    "BattleRam": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "hitpoints": 967,
+      "damage": 286,
+      "hit_speed": 400,
+      "range": 500,
+      "speed": 60,
+      "count": 1,
+      "dps": 715
+    },
+    "Berserker": {
+      "elixir": 2,
+      "rarity": "Common",
+      "hitpoints": 896,
+      "hit_speed": 600,
+      "range": 800,
+      "speed": 90,
+      "count": 1
+    },
+    "BlowdartGoblin": {
+      "elixir": 3,
+      "rarity": "Rare",
+      "hitpoints": 261,
+      "damage": 151,
+      "hit_speed": 800,
+      "range": 6500,
+      "speed": 120,
+      "count": 1,
+      "dps": 189
+    },
+    "BombTower": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "hitpoints": 1356,
+      "damage": 222,
+      "hit_speed": 1800,
+      "range": 6000,
+      "count": 1,
+      "dps": 123
+    },
+    "Bomber": {
+      "elixir": 2,
+      "rarity": "Common",
+      "hitpoints": 304,
+      "damage": 225,
+      "hit_speed": 1800,
+      "range": 4500,
+      "speed": 60,
+      "count": 1,
+      "dps": 125
+    },
+    "BossBandit": {
+      "elixir": 6,
+      "rarity": "Champion",
+      "hitpoints": 2624,
+      "damage": 245,
+      "hit_speed": 1100,
+      "range": 800,
+      "speed": 90,
+      "count": 1,
+      "dps": 223
+    },
+    "Bowler": {
+      "elixir": 5,
+      "rarity": "Epic",
+      "hitpoints": 2081,
+      "damage": 289,
+      "hit_speed": 2500,
+      "range": 4000,
+      "speed": 45,
+      "count": 1,
+      "dps": 116
+    },
+    "Cannon": {
+      "elixir": 3,
+      "rarity": "Common",
+      "hitpoints": 824,
+      "damage": 202,
+      "hit_speed": 1000,
+      "range": 5500,
+      "count": 1,
+      "dps": 202
+    },
+    "Clone": {
+      "elixir": 3,
+      "rarity": "Epic",
+      "radius": 3000
+    },
+    "DarkMagic": {
+      "elixir": 5,
+      "rarity": "Epic"
+    },
+    "DarkPrince": {
+      "elixir": 4,
+      "rarity": "Epic",
+      "hitpoints": 1200,
+      "damage": 266,
+      "hit_speed": 1400,
+      "range": 1200,
+      "speed": 60,
+      "count": 1,
+      "dps": 190
+    },
+    "DarkWitch": {
+      "elixir": 4,
+      "rarity": "Legendary",
+      "hitpoints": 906,
+      "damage": 314,
+      "hit_speed": 1300,
+      "range": 1600,
+      "speed": 60,
+      "count": 1,
+      "dps": 242
+    },
+    "DartBarrell": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "hitpoints": 614,
+      "damage": 171,
+      "hit_speed": 1100,
+      "range": 6000,
+      "speed": 90,
+      "count": 1,
+      "dps": 155
+    },
+    "Earthquake": {
+      "elixir": 3,
+      "rarity": "Rare",
+      "radius": 3500
+    },
+    "ElectroDragon": {
+      "elixir": 5,
+      "rarity": "Epic",
+      "hitpoints": 1049,
+      "damage": 192,
+      "hit_speed": 2100,
+      "range": 3500,
+      "speed": 60,
+      "count": 1,
+      "dps": 91
+    },
+    "ElectroGiant": {
+      "elixir": 7,
+      "rarity": "Epic",
+      "hitpoints": 3952,
+      "damage": 163,
+      "hit_speed": 1800,
+      "range": 1200,
+      "speed": 45,
+      "count": 1,
+      "dps": 91
+    },
+    "ElectroSpirit": {
+      "elixir": 1,
+      "rarity": "Common",
+      "hitpoints": 217,
+      "damage": 99,
+      "hit_speed": 300,
+      "range": 2500,
+      "speed": 120,
+      "count": 1,
+      "dps": 330
+    },
+    "ElectroWizard": {
+      "elixir": 4,
+      "rarity": "Legendary",
+      "radius": 3000
+    },
+    "EliteArcher": {
+      "elixir": 4,
+      "rarity": "Legendary",
+      "hitpoints": 529,
+      "damage": 135,
+      "hit_speed": 1100,
+      "range": 7000,
+      "speed": 60,
+      "count": 1,
+      "dps": 123
+    },
+    "Elixir Collector": {
+      "elixir": 6,
+      "rarity": "Rare",
+      "hitpoints": 1070,
+      "count": 1
+    },
+    "ElixirGolem": {
+      "elixir": 3,
+      "rarity": "Rare",
+      "hitpoints": 1569,
+      "damage": 253,
+      "hit_speed": 1100,
+      "range": 800,
+      "speed": 45,
+      "count": 1,
+      "dps": 230
+    },
+    "FireSpirits": {
+      "elixir": 1,
+      "rarity": "Common",
+      "hitpoints": 217,
+      "damage": 207,
+      "hit_speed": 300,
+      "range": 2500,
+      "speed": 120,
+      "count": 1,
+      "dps": 690
+    },
+    "Fireball": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "damage": 688,
+      "radius": 2500
+    },
+    "Firecracker": {
+      "elixir": 3,
+      "rarity": "Common",
+      "hitpoints": 304,
+      "hit_speed": 3000,
+      "range": 6000,
+      "speed": 90,
+      "count": 1
+    },
+    "FirespiritHut": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "hitpoints": 727,
+      "damage": 179,
+      "hit_speed": 1700,
+      "range": 5500,
+      "speed": 60,
+      "count": 1,
+      "dps": 105
+    },
+    "Fisherman": {
+      "elixir": 3,
+      "rarity": "Legendary",
+      "hitpoints": 870,
+      "damage": 194,
+      "hit_speed": 1300,
+      "range": 1200,
+      "speed": 60,
+      "count": 1,
+      "dps": 149
+    },
+    "Freeze": {
+      "elixir": 4,
+      "rarity": "Epic",
+      "radius": 3000
+    },
+    "Ghost": {
+      "elixir": 3,
+      "rarity": "Legendary",
+      "hitpoints": 1210,
+      "damage": 261,
+      "hit_speed": 1800,
+      "range": 1200,
+      "speed": 90,
+      "count": 1,
+      "dps": 145
+    },
+    "Giant": {
+      "elixir": 5,
+      "rarity": "Rare",
+      "hitpoints": 3968,
+      "damage": 253,
+      "hit_speed": 1500,
+      "range": 1200,
+      "speed": 45,
+      "count": 1,
+      "dps": 169
+    },
+    "GiantBuffer": {
+      "elixir": 4,
+      "rarity": "Epic",
+      "hitpoints": 2816,
+      "damage": 153,
+      "hit_speed": 1500,
+      "range": 1200,
+      "speed": 60,
+      "count": 1,
+      "dps": 102
+    },
+    "GiantSkeleton": {
+      "elixir": 6,
+      "rarity": "Epic",
+      "hitpoints": 3361,
+      "damage": 276,
+      "hit_speed": 1300,
+      "range": 800,
+      "speed": 60,
+      "count": 1,
+      "dps": 212
+    },
+    "GoblinBarrel": {
+      "elixir": 3,
+      "rarity": "Epic",
+      "radius": 1500
+    },
+    "GoblinCage": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "hitpoints": 780,
+      "hit_speed": 10000,
+      "range": 5000,
+      "count": 1
+    },
+    "GoblinCurse": {
+      "elixir": 2,
+      "rarity": "Epic",
+      "radius": 3000
+    },
+    "GoblinDemolisher": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "hitpoints": 1300,
+      "damage": 186,
+      "hit_speed": 1100,
+      "range": 5000,
+      "speed": 60,
+      "count": 1,
+      "dps": 169
+    },
+    "GoblinDrill": {
+      "elixir": 4,
+      "rarity": "Epic",
+      "hitpoints": 2560,
+      "hit_speed": 1200,
+      "range": 1300,
+      "speed": 60,
+      "count": 1
+    },
+    "GoblinGang": {
+      "elixir": 3,
+      "rarity": "Common",
+      "hitpoints": 202,
+      "damage": 125,
+      "hit_speed": 1100,
+      "range": 500,
+      "speed": 120,
+      "count": 3,
+      "dps": 114
+    },
+    "GoblinGiant": {
+      "elixir": 6,
+      "rarity": "Epic",
+      "hitpoints": 3110,
+      "damage": 176,
+      "hit_speed": 1500,
+      "range": 1200,
+      "speed": 60,
+      "count": 1,
+      "dps": 117
+    },
+    "GoblinHut": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "hitpoints": 1180,
+      "hit_speed": 10000,
+      "range": 6000,
+      "count": 1
+    },
+    "GoblinMachine": {
+      "elixir": 5,
+      "rarity": "Legendary",
+      "hitpoints": 2265,
+      "damage": 232,
+      "hit_speed": 1200,
+      "range": 1200,
+      "speed": 60,
+      "count": 1,
+      "dps": 193
+    },
+    "Goblins": {
+      "elixir": 2,
+      "rarity": "Common",
+      "hitpoints": 202,
+      "damage": 125,
+      "hit_speed": 1100,
+      "range": 500,
+      "speed": 120,
+      "count": 4,
+      "dps": 114
+    },
+    "Goblinstein": {
+      "elixir": 5,
+      "rarity": "Champion",
+      "hitpoints": 2385,
+      "damage": 128,
+      "hit_speed": 1500,
+      "range": 1200,
+      "speed": 60,
+      "count": 1,
+      "dps": 85
+    },
+    "GoldenKnight": {
+      "elixir": 4,
+      "rarity": "Champion",
+      "hitpoints": 1799,
+      "damage": 161,
+      "hit_speed": 900,
+      "range": 1200,
+      "speed": 60,
+      "count": 1,
+      "dps": 179
+    },
+    "Golem": {
+      "elixir": 8,
+      "rarity": "Epic",
+      "hitpoints": 5120,
+      "damage": 312,
+      "hit_speed": 2500,
+      "range": 750,
+      "speed": 45,
+      "count": 1,
+      "dps": 125
+    },
+    "Graveyard": {
+      "elixir": 5,
+      "rarity": "Legendary",
+      "radius": 4000
+    },
+    "Heal": {
+      "elixir": 1,
+      "rarity": "Rare",
+      "hitpoints": 217,
+      "damage": 110,
+      "hit_speed": 300,
+      "range": 2500,
+      "speed": 120,
+      "count": 1,
+      "dps": 367
+    },
+    "HogRider": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "hitpoints": 1697,
+      "damage": 317,
+      "hit_speed": 1600,
+      "range": 800,
+      "speed": 120,
+      "count": 1,
+      "dps": 198
+    },
+    "Hunter": {
+      "elixir": 4,
+      "rarity": "Epic",
+      "hitpoints": 885,
+      "damage": 84,
+      "hit_speed": 2200,
+      "range": 4000,
+      "speed": 60,
+      "count": 1,
+      "dps": 38
+    },
+    "IceGolemite": {
+      "elixir": 2,
+      "rarity": "Rare",
+      "hitpoints": 1315,
+      "damage": 84,
+      "hit_speed": 2500,
+      "range": 750,
+      "speed": 45,
+      "count": 1,
+      "dps": 34
+    },
+    "IceSpirits": {
+      "elixir": 1,
+      "rarity": "Common",
+      "hitpoints": 217,
+      "damage": 110,
+      "hit_speed": 300,
+      "range": 2500,
+      "speed": 120,
+      "count": 1,
+      "dps": 367
+    },
+    "IceWizard": {
+      "elixir": 3,
+      "rarity": "Legendary",
+      "radius": 3000
+    },
+    "InfernoDragon": {
+      "elixir": 4,
+      "rarity": "Legendary",
+      "hitpoints": 1295,
+      "damage": 35,
+      "hit_speed": 400,
+      "range": 3500,
+      "speed": 60,
+      "count": 1,
+      "dps": 88
+    },
+    "InfernoTower": {
+      "elixir": 5,
+      "rarity": "Rare",
+      "hitpoints": 1748,
+      "damage": 43,
+      "hit_speed": 400,
+      "range": 6000,
+      "count": 1,
+      "dps": 108
+    },
+    "Knight": {
+      "elixir": 3,
+      "rarity": "Common",
+      "hitpoints": 1766,
+      "damage": 202,
+      "hit_speed": 1200,
+      "range": 1200,
+      "speed": 60,
+      "count": 1,
+      "dps": 168
+    },
+    "LavaHound": {
+      "elixir": 7,
+      "rarity": "Legendary",
+      "hitpoints": 3581,
+      "damage": 53,
+      "hit_speed": 1300,
+      "range": 3500,
+      "speed": 45,
+      "count": 1,
+      "dps": 41
+    },
+    "Lightning": {
+      "elixir": 6,
+      "rarity": "Epic",
+      "radius": 3500
+    },
+    "LittlePrince": {
+      "elixir": 3,
+      "rarity": "Champion",
+      "hitpoints": 698,
+      "damage": 104,
+      "hit_speed": 1200,
+      "range": 5500,
+      "speed": 60,
+      "count": 1,
+      "dps": 87
+    },
+    "Log": {
+      "elixir": 2,
+      "rarity": "Legendary",
+      "radius": 1950
+    },
+    "MegaKnight": {
+      "elixir": 7,
+      "rarity": "Legendary",
+      "hitpoints": 3993,
+      "damage": 268,
+      "hit_speed": 1700,
+      "range": 1200,
+      "speed": 60,
+      "count": 1,
+      "dps": 158
+    },
+    "MegaMinion": {
+      "elixir": 3,
+      "rarity": "Rare",
+      "hitpoints": 837,
+      "damage": 312,
+      "hit_speed": 1500,
+      "range": 1600,
+      "speed": 60,
+      "count": 1,
+      "dps": 208
+    },
+    "MergeMaiden": {
+      "elixir": 6,
+      "rarity": "Legendary"
+    },
+    "MightyMiner": {
+      "elixir": 4,
+      "rarity": "Champion",
+      "hitpoints": 2250,
+      "damage": 43,
+      "hit_speed": 400,
+      "range": 1600,
+      "speed": 60,
+      "count": 1,
+      "dps": 108
+    },
+    "Miner": {
+      "elixir": 3,
+      "rarity": "Legendary",
+      "hitpoints": 1210,
+      "damage": 194,
+      "hit_speed": 1300,
+      "range": 1200,
+      "speed": 90,
+      "count": 1,
+      "dps": 149
+    },
+    "MiniPekka": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "hitpoints": 1390,
+      "damage": 755,
+      "hit_speed": 1600,
+      "range": 800,
+      "speed": 90,
+      "count": 1,
+      "dps": 472
+    },
+    "MiniSparkys": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "hitpoints": 529,
+      "damage": 117,
+      "hit_speed": 2200,
+      "range": 4500,
+      "speed": 60,
+      "count": 3,
+      "dps": 53
+    },
+    "MinionHorde": {
+      "elixir": 5,
+      "rarity": "Common",
+      "hitpoints": 230,
+      "damage": 107,
+      "hit_speed": 1200,
+      "range": 2500,
+      "speed": 90,
+      "count": 6,
+      "dps": 89
+    },
+    "Minions": {
+      "elixir": 3,
+      "rarity": "Common",
+      "hitpoints": 230,
+      "damage": 107,
+      "hit_speed": 1200,
+      "range": 2500,
+      "speed": 90,
+      "count": 3,
+      "dps": 89
+    },
+    "Mirror": {
+      "elixir": 1,
+      "rarity": "Epic"
+    },
+    "Monk": {
+      "elixir": 5,
+      "rarity": "Champion",
+      "hitpoints": 2214,
+      "damage": 140,
+      "hit_speed": 800,
+      "range": 1200,
+      "speed": 60,
+      "count": 1,
+      "dps": 175
+    },
+    "Mortar": {
+      "elixir": 4,
+      "rarity": "Common",
+      "hitpoints": 1369,
+      "damage": 266,
+      "hit_speed": 4700,
+      "range": 11500,
+      "count": 1,
+      "dps": 57
+    },
+    "MovingCannon": {
+      "elixir": 5,
+      "rarity": "Epic",
+      "hitpoints": 1809,
+      "damage": 212,
+      "hit_speed": 900,
+      "range": 5500,
+      "speed": 60,
+      "count": 1,
+      "dps": 236
+    },
+    "Musketeer": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "hitpoints": 721,
+      "damage": 217,
+      "hit_speed": 1000,
+      "range": 6000,
+      "speed": 60,
+      "count": 1,
+      "dps": 217
+    },
+    "Pekka": {
+      "elixir": 7,
+      "rarity": "Epic",
+      "hitpoints": 3760,
+      "damage": 842,
+      "hit_speed": 1800,
+      "range": 1200,
+      "speed": 45,
+      "count": 1,
+      "dps": 468
+    },
+    "Phoenix": {
+      "elixir": 4,
+      "rarity": "Legendary",
+      "hitpoints": 1052,
+      "damage": 217,
+      "hit_speed": 1000,
+      "range": 1600,
+      "speed": 60,
+      "count": 1,
+      "dps": 217
+    },
+    "Poison": {
+      "elixir": 4,
+      "rarity": "Epic",
+      "radius": 3500
+    },
+    "Prince": {
+      "elixir": 5,
+      "rarity": "Epic",
+      "hitpoints": 1920,
+      "damage": 391,
+      "hit_speed": 1400,
+      "range": 1600,
+      "speed": 60,
+      "count": 1,
+      "dps": 279
+    },
+    "Princess": {
+      "elixir": 3,
+      "rarity": "Legendary",
+      "hitpoints": 261,
+      "hit_speed": 3000,
+      "range": 9000,
+      "speed": 60,
+      "count": 1
+    },
+    "Rage": {
+      "elixir": 2,
+      "rarity": "Epic",
+      "count": 1
+    },
+    "RageBarbarian": {
+      "elixir": 4,
+      "rarity": "Legendary",
+      "hitpoints": 1282,
+      "damage": 256,
+      "hit_speed": 800,
+      "range": 700,
+      "speed": 120,
+      "count": 1,
+      "dps": 320
+    },
+    "RamRider": {
+      "elixir": 5,
+      "rarity": "Legendary",
+      "hitpoints": 1766,
+      "damage": 250,
+      "hit_speed": 1700,
+      "range": 800,
+      "speed": 60,
+      "count": 1,
+      "dps": 147
+    },
+    "Rascals": {
+      "elixir": 5,
+      "rarity": "Common",
+      "hitpoints": 1832,
+      "damage": 217,
+      "hit_speed": 1500,
+      "range": 800,
+      "speed": 60,
+      "count": 1,
+      "dps": 145
+    },
+    "Rocket": {
+      "elixir": 6,
+      "rarity": "Rare",
+      "damage": 1484,
+      "radius": 2000
+    },
+    "Ronin": {
+      "elixir": 5,
+      "rarity": "Legendary",
+      "hitpoints": 1779,
+      "damage": 371,
+      "hit_speed": 1400,
+      "range": 1200,
+      "speed": 90,
+      "count": 1,
+      "dps": 265
+    },
+    "RoyalDelivery": {
+      "elixir": 3,
+      "rarity": "Common",
+      "radius": 3000
+    },
+    "RoyalGiant": {
+      "elixir": 6,
+      "rarity": "Common",
+      "hitpoints": 3164,
+      "damage": 307,
+      "hit_speed": 1800,
+      "range": 5000,
+      "speed": 45,
+      "count": 1,
+      "dps": 171
+    },
+    "RoyalHogs": {
+      "elixir": 5,
+      "rarity": "Rare",
+      "hitpoints": 837,
+      "damage": 74,
+      "hit_speed": 1200,
+      "range": 750,
+      "speed": 120,
+      "count": 4,
+      "dps": 62
+    },
+    "RoyalRecruits": {
+      "elixir": 7,
+      "rarity": "Common",
+      "hitpoints": 547,
+      "damage": 133,
+      "hit_speed": 1300,
+      "range": 1600,
+      "speed": 60,
+      "count": 6,
+      "dps": 102
+    },
+    "SkeletonArmy": {
+      "elixir": 3,
+      "rarity": "Epic",
+      "hitpoints": 81,
+      "damage": 81,
+      "hit_speed": 1100,
+      "range": 500,
+      "speed": 90,
+      "count": 15,
+      "dps": 74
+    },
+    "SkeletonBalloon": {
+      "elixir": 3,
+      "rarity": "Common",
+      "hitpoints": 532,
+      "hit_speed": 300,
+      "range": 350,
+      "speed": 90,
+      "count": 1
+    },
+    "SkeletonDragons": {
+      "elixir": 4,
+      "rarity": "Common",
+      "hitpoints": 560,
+      "damage": 151,
+      "hit_speed": 2000,
+      "range": 3500,
+      "speed": 90,
+      "count": 2,
+      "dps": 76
+    },
+    "SkeletonKing": {
+      "elixir": 4,
+      "rarity": "Champion",
+      "hitpoints": 2298,
+      "damage": 204,
+      "hit_speed": 1600,
+      "range": 1200,
+      "speed": 60,
+      "count": 1,
+      "dps": 128
+    },
+    "SkeletonWarriors": {
+      "elixir": 3,
+      "rarity": "Epic",
+      "hitpoints": 81,
+      "damage": 117,
+      "hit_speed": 1000,
+      "range": 1600,
+      "speed": 90,
+      "count": 3,
+      "dps": 117
+    },
+    "Skeletons": {
+      "elixir": 1,
+      "rarity": "Common",
+      "hitpoints": 81,
+      "damage": 81,
+      "hit_speed": 1100,
+      "range": 500,
+      "speed": 90,
+      "count": 3,
+      "dps": 74
+    },
+    "Snowball": {
+      "elixir": 2,
+      "rarity": "Common",
+      "damage": 179,
+      "radius": 2500
+    },
+    "SpearGoblins": {
+      "elixir": 2,
+      "rarity": "Common",
+      "hitpoints": 133,
+      "damage": 81,
+      "hit_speed": 1600,
+      "range": 5000,
+      "speed": 120,
+      "count": 3,
+      "dps": 51
+    },
+    "SuspiciousBush": {
+      "elixir": 2,
+      "rarity": "Rare",
+      "hitpoints": 81,
+      "damage": 0,
+      "hit_speed": 300,
+      "range": 1600,
+      "speed": 60,
+      "count": 1
+    },
+    "Tesla": {
+      "elixir": 4,
+      "rarity": "Common",
+      "hitpoints": 1182,
+      "damage": 220,
+      "hit_speed": 1100,
+      "range": 5500,
+      "count": 1,
+      "dps": 200
+    },
+    "ThreeMusketeers": {
+      "elixir": 9,
+      "rarity": "Rare"
+    },
+    "Tombstone": {
+      "elixir": 3,
+      "rarity": "Rare",
+      "hitpoints": 529,
+      "hit_speed": 10000,
+      "count": 1
+    },
+    "Tornado": {
+      "elixir": 3,
+      "rarity": "Epic",
+      "radius": 5500
+    },
+    "Valkyrie": {
+      "elixir": 4,
+      "rarity": "Rare",
+      "hitpoints": 1907,
+      "damage": 266,
+      "hit_speed": 1500,
+      "range": 1200,
+      "speed": 60,
+      "count": 1,
+      "dps": 177
+    },
+    "Vines": {
+      "elixir": 3,
+      "rarity": "Epic",
+      "radius": 2500
+    },
+    "Wallbreakers": {
+      "elixir": 2,
+      "rarity": "Epic",
+      "hitpoints": 330,
+      "damage": 281,
+      "hit_speed": 1200,
+      "range": 500,
+      "speed": 120,
+      "count": 2,
+      "dps": 234
+    },
+    "Witch": {
+      "elixir": 5,
+      "rarity": "Epic",
+      "hitpoints": 839,
+      "damage": 135,
+      "hit_speed": 1100,
+      "range": 5500,
+      "speed": 60,
+      "count": 1,
+      "dps": 123
+    },
+    "WitchMother": {
+      "elixir": 4,
+      "rarity": "Legendary",
+      "hitpoints": 529,
+      "damage": 133,
+      "hit_speed": 1000,
+      "range": 5500,
+      "speed": 60,
+      "count": 1,
+      "dps": 133
+    },
+    "Wizard": {
+      "elixir": 5,
+      "rarity": "Rare",
+      "hitpoints": 755,
+      "damage": 281,
+      "hit_speed": 1400,
+      "range": 5500,
+      "speed": 60,
+      "count": 1,
+      "dps": 201
+    },
+    "Xbow": {
+      "elixir": 6,
+      "rarity": "Epic",
+      "hitpoints": 1600,
+      "damage": 58,
+      "hit_speed": 400,
+      "range": 11500,
+      "count": 1,
+      "dps": 145
+    },
+    "Zap": {
+      "elixir": 2,
+      "rarity": "Common",
+      "radius": 2500
+    },
+    "ZapMachine": {
+      "elixir": 6,
+      "rarity": "Legendary",
+      "hitpoints": 1451,
+      "damage": 1331,
+      "hit_speed": 4000,
+      "range": 5000,
+      "speed": 45,
+      "count": 1,
+      "dps": 333
+    }
+  }
+}
