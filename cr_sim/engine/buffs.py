@@ -416,6 +416,20 @@ class BuffState:
     def __init__(self) -> None:
         self._buffs: list[ActiveBuff] = []
 
+    def clone(self) -> "BuffState":
+        """A copy that shares specs and duplicates the live applications.
+
+        ``BuffSpec`` is immutable and shared across every entity carrying the
+        buff, so copying it would be waste; ``ActiveBuff`` holds the countdown
+        and must not be shared or the copy would tick the original's timers.
+        """
+        copy = BuffState()
+        copy._buffs = [
+            ActiveBuff(b.spec, b.ticks_left, b.ticks_to_next_damage, b.source)
+            for b in self._buffs
+        ]
+        return copy
+
     def apply(self, spec: BuffSpec, duration_ticks: int, source: int = 0) -> None:
         """Apply ``spec`` for ``duration_ticks``, on behalf of ``source``.
 

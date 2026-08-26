@@ -27,7 +27,10 @@ from .buffs import apply_delta
 if TYPE_CHECKING:  # pragma: no cover
     from .specs import UnitSpec
 
-__all__ = ["Team", "EntityKind", "EntityState", "Entity", "next_entity_id"]
+__all__ = [
+    "Team", "EntityKind", "EntityState", "Entity", "next_entity_id",
+    "entity_id_cursor", "restore_entity_ids",
+]
 
 
 class Team(IntEnum):
@@ -78,6 +81,29 @@ def next_entity_id() -> int:
     global _next_id
     _next_id += 1
     return _next_id
+
+
+def entity_id_cursor() -> int:
+    """Where the id counter currently stands.
+
+    Paired with :func:`restore_entity_ids` so speculative work -- a branch
+    played forward and thrown away -- can hand back the ids it burned. The
+    counter is module-level, so without this a projection would consume ids
+    the live battle was going to use, and the match would run differently for
+    having been *asked about*. Replay determinism is the whole foundation
+    here, and that would quietly undermine it.
+    """
+    return _next_id
+
+
+def restore_entity_ids(cursor: int) -> None:
+    """Wind the id counter back to ``cursor``.
+
+    Only sound when everything allocated since is unreachable; reviving an id
+    that a live entity still holds would collide in ``Battle._by_id_map``.
+    """
+    global _next_id
+    _next_id = cursor
 
 
 def reset_entity_ids() -> None:
@@ -198,6 +224,21 @@ class Entity:
         if not self.is_targetable:
             return False
         return self.buffs is None or not self.buffs.is_invisible()
+
+    def clone(self) -> "Entity":
+        """A copy carrying its own mutable state, sharing its spec.
+
+        Entities refer to each other by ``target_id`` rather than by object,
+        which is what makes this a flat copy: nothing here points at another
+        entity, so a cloned battle needs no reference fixing. ``spec`` is
+        immutable and shared; ``buffs`` is not, and gets its own copy.
+        """
+        copy = Entity.__new__(Entity)
+        for slot in Entity.__slots__:
+            setattr(copy, slot, getattr(self, slot))
+        if self.buffs is not None:
+            copy.buffs = self.buffs.clone()
+        return copy
 
     def tick_deploy(self) -> bool:
         """Advance the deploy timer. Returns True on the tick it completes."""

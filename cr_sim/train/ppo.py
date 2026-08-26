@@ -269,6 +269,28 @@ def train(
         chosen_slots = rollout.action.reshape(-1) // slot_size
         stats["noop_fraction"] = float((chosen_slots == NOOP_SLOT).float().mean())
 
+        # The scale of what the critic is asked to predict. Value loss is a
+        # plain MSE against these, so it cannot be read at all without them:
+        # a loss of 5 is a diverging critic if the targets have spread 0.7 and
+        # an ordinary one if they have spread 3. Logged because that exact
+        # ambiguity stalled a diagnosis -- a run showing value loss sixteen
+        # times higher than its predecessors turned out to be unreadable
+        # without knowing whether the targets had grown with it.
+        stats["ret_mean"] = float(rollout.ret.mean())
+        stats["ret_std"] = float(rollout.ret.std())
+
+        # The scale-free version, and the one to actually watch. 0 means the
+        # critic is no better than predicting the mean return, 1 means it
+        # predicts perfectly, and negative means it is worse than a constant.
+        # PPO's advantages are only as good as this: at 0 the advantage is the
+        # Monte-Carlo return minus a constant, which is unbiased but so noisy
+        # that the policy gradient is mostly variance.
+        variance = float(rollout.ret.var())
+        residual = float((rollout.ret - rollout.value).var())
+        stats["explained_variance"] = (
+            1.0 - residual / variance if variance > 1e-9 else float("nan")
+        )
+
         elapsed = time.perf_counter() - started
         stats.update(
             steps=steps_done,

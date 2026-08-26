@@ -20,6 +20,8 @@ order.
 
 from __future__ import annotations
 
+from copy import deepcopy as _deepcopy
+
 from dataclasses import dataclass, field, replace
 from typing import Callable, Iterable, Sequence
 
@@ -613,6 +615,64 @@ class Battle:
                 self._register(unit)
                 self._begin_actions(unit)
                 index += 1
+
+    # ------------------------------------------------------------ branching
+
+    #: Everything a clone may share rather than copy. All of it is either
+    #: immutable or a cache keyed by name whose entries are themselves
+    #: immutable, so a branch reading through it cannot disturb the battle it
+    #: came from -- and a warmed cache is worth inheriting rather than
+    #: rebuilding. Copying these instead is what made a naive deepcopy cost
+    #: five times more than simulating an entire match: they hold the whole
+    #: card database.
+    _SHARED = (
+        "config", "clock", "data", "levels", "registry", "arena", "timeline",
+        "_specs", "_projectile_specs", "_area_specs", "_spell_plans",
+        "_buff_specs",
+    )
+
+    #: Append-only records: written during a tick, never read back by one.
+    _HISTORIES = ("graveyard", "damage_log", "frames")
+
+    def clone(self) -> "Battle":
+        """An independent battle continuing from this position.
+
+        For asking what happens next without committing to it: play the copy
+        forward, read the outcome, throw it away. The original is untouched,
+        and because the engine is deterministic the answer is exact rather
+        than sampled.
+
+        Implemented by seeding a deepcopy memo with the shared objects instead
+        of enumerating the mutable ones. The enumeration is the version that
+        rots -- a slot added later would silently stay shared between a battle
+        and its branches, and the resulting bug would look like nondeterminism
+        rather than like a missing copy.
+        """
+        memo: dict[int, object] = {}
+        for name in self._SHARED:
+            value = getattr(self, name)
+            memo[id(value)] = value
+
+        # The append-only histories are set aside rather than copied. A branch
+        # adds to them and reads its own additions, but never rereads or
+        # mutates what was already there, so it can share the entries and take
+        # only a fresh container. On a mid-match position these three were
+        # more than half the cost of a copy.
+        stash = {name: getattr(self, name) for name in self._HISTORIES}
+        for name in stash:
+            setattr(self, name, [])
+        try:
+            clone = _deepcopy(self, memo)
+        finally:
+            for name, value in stash.items():
+                setattr(self, name, value)
+
+        clone.graveyard = list(stash["graveyard"])
+        clone.damage_log = list(stash["damage_log"])
+        # Frames are a viewer artefact, and a branch that is thrown away has
+        # no viewer. Kept off so a lookahead does not accumulate megabytes.
+        clone.frames = []
+        return clone
 
     # ------------------------------------------------------------- the loop
 
