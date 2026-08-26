@@ -31,7 +31,7 @@ from .arena import Arena, load_arena
 from .constants import TickClock
 from .elixir import BattleTimeline, ElixirBar, build_timeline
 from .entity import Entity, EntityKind, EntityState, Team, reset_entity_ids
-from .fixed import milli_tiles
+from .fixed import milli_tiles, ring_offsets
 from .combat import (
     AttackState,
     DamageEvent,
@@ -45,7 +45,12 @@ from .targeting import acquire_target, in_attack_range, should_keep_target
 from .rng import Rng
 from .specs import UnitSpec, build_tower_spec, build_unit_spec
 
-__all__ = ["Battle", "BattleConfig", "Player", "BattleResult"]
+__all__ = ["Battle", "BattleConfig", "Player", "BattleResult", "KING_ACTIVATION_MS"]
+
+#: How long a provoked King Tower takes to join the fight. This build replaced
+#: the old ``KING_ACTIVATE_TIME_MS`` global with an ``ActionWithDuration`` of
+#: this length inside ``BUILDING.KingTower``'s action graph.
+KING_ACTIVATION_MS = 3300
 
 
 @dataclass(slots=True)
@@ -147,6 +152,7 @@ class Battle:
         "_tower_sight_bonus",
         "damage_log",
         "_king_active",
+        "_king_waking",
     )
 
     def __init__(
@@ -179,6 +185,7 @@ class Battle:
         self.damage_log: list[DamageEvent] = []
         #: A King Tower is inert until provoked; see _phase_check_tower_activation.
         self._king_active: dict[Team, bool] = {Team.BLUE: False, Team.RED: False}
+        self._king_waking: dict[Team, int] = {Team.BLUE: 0, Team.RED: 0}
         _globals = self.data.globals_map()
         # Grace band that stops a unit flickering between two equidistant enemies.
         _ext = _globals.get('LOGIC_RANGE_EXTENSION_TO_KEEP_TARGET', 0)
@@ -246,6 +253,13 @@ class Battle:
             self.entities.append(tower)
             self._towers[placement.team].append(tower)
 
+    def _summon_layout(self, card: Card) -> tuple[tuple[int, int], ...]:
+        """Ring positions for every unit this card deploys."""
+        total = sum(n for _name, n in card.summons())
+        if total <= 1 or card.summon_radius <= 0:
+            return ((0, 0),) * max(1, total)
+        return ring_offsets(total, milli_tiles(card.summon_radius))
+
     def _spec(self, name: str, *, rarity: str) -> UnitSpec:
         key = f"{name}@{rarity}"
         spec = self._specs.get(key)
@@ -284,7 +298,16 @@ class Battle:
         return True
 
     def _deploy(self, team: Team, card: Card, x: int, y: int) -> None:
-        offsets = card.summon_offsets
+        """Place a card's units, spread and staggered as the card specifies.
+
+        Two details that look cosmetic but are not. ``SummonRadius`` spaces a
+        swarm into a ring instead of stacking it on one point -- stacked units
+        would be perfectly overlapped, so any splash would always catch the
+        whole group. ``SummonDeployDelay`` staggers their arrival by 100-200ms
+        each, so a swarm materialises in sequence rather than all at once.
+        """
+        explicit = card.summon_offsets
+        group = self._summon_layout(card)
         index = 0
         for character, count in card.summons():
             try:
@@ -292,10 +315,11 @@ class Battle:
             except Exception:
                 continue
             for _ in range(count):
-                ox, oy = (0, 0)
-                if index < len(offsets):
-                    # Offsets are milli-tiles, mirrored for the far side.
-                    ox, oy = offsets[index]
+                ox, oy = group[index] if index < len(group) else (0, 0)
+                if index < len(explicit):
+                    # Explicit per-unit offsets are milli-tiles, mirrored for
+                    # the far side of the board.
+                    ox, oy = explicit[index]
                     ox, oy = ox * 18, oy * 18 * (1 if team is Team.BLUE else -1)
                 unit = Entity(
                     kind=spec.kind,
@@ -305,7 +329,8 @@ class Battle:
                     hitpoints=spec.hitpoints,
                     spec=spec,
                     spawn_tick=self.tick,
-                    deploy_ticks=spec.deploy_ticks,
+                    deploy_ticks=spec.deploy_ticks
+                    + index * self.clock.ticks(card.summon_deploy_delay),
                     collision_radius=spec.collision_radius,
                     mass=spec.mass,
                     flying=spec.flying,
@@ -496,6 +521,12 @@ class Battle:
             event = apply_hit(hit, self.tick)
             if event is not None:
                 self.damage_log.append(event)
+            if hit.spec.kamikaze:
+                # The attack *is* the death: Ice Spirit, Balloon and Wall
+                # Breakers each land one hit and are consumed by it. Without
+                # this they keep swinging forever, which turns a one-shot
+                # utility card into a permanent damage dealer.
+                hit.attacker.kill()
             if hit.spec.area_damage_radius > 0:
                 self.damage_log.extend(
                     apply_area_damage(
@@ -587,6 +618,14 @@ class Battle:
         it takes damage directly or when one of its Princess Towers falls --
         which is why chip damage onto the King is a real commitment, and why
         losing a tower changes the whole defensive geometry of that side.
+
+        Waking is not instant. The old ``KING_ACTIVATE_TIME_MS`` global is gone
+        from this build, replaced by an action graph on ``BUILDING.KingTower``:
+        an ``ActionWaitToActivate`` whose condition is
+        ``king_tower_damaged() || coop_king_tower_damaged() || tower_destroyed()
+        || coop_tower_destroyed()``, followed by an ``ActionWithDuration`` of
+        **3300ms** during which the tower is tagged ``ACTIVATING``. That delay is
+        why a tower trade can be finished before the King ever fires.
         """
         for team in (Team.BLUE, Team.RED):
             if self._king_active[team]:
@@ -594,11 +633,16 @@ class Battle:
             king = self._king(team)
             if king is None or king.dead:
                 continue
+            if self._king_waking[team] > 0:
+                self._king_waking[team] -= 1
+                if self._king_waking[team] == 0:
+                    self._king_active[team] = True
+                continue
             provoked = king.hitpoints < king.max_hitpoints or any(
                 t.dead for t in self._towers[team] if t is not king
             )
             if provoked:
-                self._king_active[team] = True
+                self._king_waking[team] = max(1, self.clock.ticks(KING_ACTIVATION_MS))
 
     def _can_tower_fight(self, tower: Entity) -> bool:
         if "King" not in getattr(tower.spec, "name", ""):

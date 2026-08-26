@@ -15,7 +15,7 @@ import pytest
 from cr_sim.data.cards import build_card_registry
 from cr_sim.data.leveling import build_level_table
 from cr_sim.data.source import LogicData
-from cr_sim.engine.battle import Battle, BattleConfig
+from cr_sim.engine.battle import KING_ACTIVATION_MS, Battle, BattleConfig
 from cr_sim.engine.combat import AttackState
 from cr_sim.engine.entity import Entity, EntityKind, Team
 from cr_sim.engine.fixed import milli_tiles, tiles, to_tiles
@@ -291,11 +291,37 @@ def test_king_tower_is_inert_until_provoked(world):
         battle.step()
     assert king.target_id == 0, "an inert King acquired a target"
 
-    # Damaging the King wakes it.
+    # Damaging the King starts it waking -- but not instantly.
     king.apply_damage(1)
     battle.step()
+    assert not battle._king_active[Team.RED], "the King woke with no delay"
+    for _ in range(battle.clock.ticks(KING_ACTIVATION_MS) + 2):
+        battle.step()
     assert battle._king_active[Team.RED]
     assert intruder is not None
+
+
+def test_king_activation_takes_3300ms(world):
+    """The wake-up delay is why a tower trade can finish before the King fires.
+
+    This build dropped the old KING_ACTIVATE_TIME_MS global; the duration now
+    lives in the King Tower's action graph as an ActionWithDuration of 3300ms.
+    """
+    data, levels, registry = world
+    battle = Battle(
+        data, levels, registry,
+        BattleConfig(seed=8, blue_deck=("Knight",) * 8, red_deck=("Knight",) * 8),
+    )
+    battle._king(Team.RED).apply_damage(1)
+    woke = None
+    for _ in range(600):
+        battle.step()
+        if battle._king_active[Team.RED]:
+            woke = battle.tick
+            break
+    expected = battle.clock.ticks(KING_ACTIVATION_MS)
+    assert woke is not None
+    assert abs(woke - expected) <= 2, f"woke at {woke}, expected about {expected}"
 
 
 def test_losing_a_princess_tower_wakes_the_king(world):
@@ -309,7 +335,8 @@ def test_losing_a_princess_tower_wakes_the_king(world):
     )
     assert not battle._king_active[Team.RED]
     princess.kill()
-    battle.step()
+    for _ in range(battle.clock.ticks(KING_ACTIVATION_MS) + 3):
+        battle.step()
     assert battle._king_active[Team.RED]
 
 
@@ -362,3 +389,124 @@ def test_crown_tower_damage_reduction_applies_in_combat(world):
     assert attacker.spec.damage_to(is_crown_tower=True) == attacker.spec.damage
     reduced = dataclasses.replace(attacker.spec, crown_tower_damage_percent=-75)
     assert reduced.damage_to(is_crown_tower=True) == reduced.damage // 4
+
+
+# ------------------------------------------------- swarms and kamikaze units
+
+
+@pytest.mark.parametrize(
+    "card,expected",
+    [("Skeletons", 3), ("Goblins", 4), ("Barbarians", 5), ("MinionHorde", 6),
+     ("GoblinGang", 6), ("SkeletonArmy", 15), ("ThreeMusketeers", 3), ("Rascals", 3)],
+)
+def test_swarm_cards_deploy_their_full_count(world, card, expected):
+    data, levels, registry = world
+    battle = Battle(
+        data, levels, registry,
+        BattleConfig(seed=1, blue_deck=(card,) * 8, red_deck=(card,) * 8),
+    )
+    battle.players[Team.BLUE].elixir.add(10)
+    before = len(battle.entities)
+    assert battle.play_card(Team.BLUE, card, tiles(9), tiles(10))
+    assert len(battle.entities) - before == expected
+
+
+def test_swarm_units_spread_instead_of_stacking(world):
+    """SummonRadius rings a swarm out; stacked units would share one point.
+
+    Beyond looking wrong, perfectly overlapping units mean every splash hits
+    the entire group, which would badly distort spell value.
+    """
+    data, levels, registry = world
+    battle = Battle(
+        data, levels, registry,
+        BattleConfig(seed=1, blue_deck=("Skeletons",) * 8, red_deck=("Knight",) * 8),
+    )
+    battle.players[Team.BLUE].elixir.add(10)
+    battle.play_card(Team.BLUE, "Skeletons", tiles(9), tiles(10))
+    skeletons = [e for e in battle.entities if e.spec and e.spec.name == "Skeleton"]
+    assert len(skeletons) == 3
+    positions = {(e.x, e.y) for e in skeletons}
+    assert len(positions) == 3, "all three spawned on the same point"
+    # And they sit roughly on the card's SummonRadius (700 milli-tiles).
+    for entity in skeletons:
+        offset = ((entity.x - tiles(9)) ** 2 + (entity.y - tiles(10)) ** 2) ** 0.5
+        assert abs(offset - milli_tiles(700)) < milli_tiles(60)
+
+
+def test_swarm_units_deploy_staggered(world):
+    """SummonDeployDelay makes a swarm arrive in sequence, not all at once."""
+    data, levels, registry = world
+    battle = Battle(
+        data, levels, registry,
+        BattleConfig(seed=1, blue_deck=("GoblinGang",) * 8, red_deck=("Knight",) * 8),
+    )
+    battle.players[Team.BLUE].elixir.add(10)
+    battle.play_card(Team.BLUE, "GoblinGang", tiles(9), tiles(10))
+    goblins = [e for e in battle.entities if e.spec and "Goblin" in e.spec.name]
+    delays = sorted(e.deploy_ticks_left for e in goblins)
+    assert len(set(delays)) > 1, "every unit deployed on the same tick"
+    assert delays == sorted(delays)
+
+
+@pytest.mark.parametrize("name", ["IceSpirits", "FireSpirits"])
+def test_kamikaze_units_are_consumed_by_their_attack(world, name):
+    """Ice Spirit and Fire Spirits land one hit and die.
+
+    Without this they keep swinging forever, turning a one-shot utility card
+    into a permanent damage dealer.
+    """
+    battle = _empty_battle(world)
+    bomber = _spawn(battle, world, name, Team.BLUE, 9, 10.0)
+    victim = _spawn(battle, world, "Knight", Team.RED, 9, 11.0)
+    assert bomber.spec.kamikaze
+
+    for _ in range(1200):
+        battle.step()
+        if bomber.dead:
+            break
+    assert bomber.dead, "kamikaze unit survived its own attack"
+    hits = [e for e in battle.damage_log if e.attacker_id == bomber.id]
+    assert len(hits) == 1, f"landed {len(hits)} hits, expected exactly 1"
+    assert victim.hitpoints < victim.max_hitpoints
+
+
+def test_wall_breakers_need_a_building_to_detonate_on(world):
+    """Wall Breakers are kamikaze *and* building-targeting.
+
+    Against a troop they have no valid target at all, so they never detonate --
+    they simply run past. Pairing the two rules is the whole card.
+    """
+    battle = _empty_battle(world)
+    breaker = _spawn(battle, world, "Wallbreaker", Team.BLUE, 9, 10.0)
+    knight = _spawn(battle, world, "Knight", Team.RED, 9, 11.0)
+    assert breaker.spec.kamikaze and breaker.spec.target_only_buildings
+    assert not can_target(breaker.spec, breaker, knight)
+
+    for _ in range(600):
+        battle.step()
+    # It may well be killed by the Knight -- what matters is that it never
+    # detonated, because it never had a target.
+    hits = [e for e in battle.damage_log if e.attacker_id == breaker.id]
+    assert hits == [], "detonated on a troop it cannot even see"
+    assert knight.hitpoints == knight.max_hitpoints
+
+
+def test_wall_breakers_detonate_on_a_tower(world):
+    data, levels, registry = world
+    battle = Battle(
+        data, levels, registry,
+        BattleConfig(seed=9, blue_deck=("Wallbreakers",) * 8, red_deck=("Knight",) * 8),
+    )
+    breaker = _spawn(battle, world, "Wallbreaker", Team.BLUE, 3.5, 24.0)
+    tower = next(
+        e for e in battle._towers[Team.RED]
+        if "King" not in e.spec.name and abs(to_tiles(e.x) - 3.5) < 1
+    )
+    before = tower.hitpoints
+    for _ in range(1200):
+        battle.step()
+        if breaker.dead:
+            break
+    assert breaker.dead
+    assert tower.hitpoints < before, "did not damage the tower it blew up on"

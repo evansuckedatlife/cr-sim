@@ -121,3 +121,29 @@ def point_along(
 
 def clamp(value: int, low: int, high: int) -> int:
     return low if value < low else high if value > high else value
+
+
+def ring_offsets(count: int, radius: int, *, start_eighth: int = 0) -> tuple[tuple[int, int], ...]:
+    """Positions for ``count`` units spread evenly on a circle of ``radius``.
+
+    Swarm cards do not drop their units on one point -- ``SummonRadius`` spaces
+    them out (Skeletons 700, Goblin Gang 1000, Bats 750). Without this a
+    Skeleton Army is fifteen units at identical coordinates: it looks like one
+    unit, and every area effect hits all of them perfectly.
+
+    A single unit lands dead centre. The trigonometry runs once here and is
+    rounded to whole subtiles immediately, so no float reaches the tick loop.
+    """
+    if count <= 1 or radius <= 0:
+        return ((0, 0),) * max(1, count)
+    import math
+
+    step = 2 * math.pi / count
+    phase = start_eighth * math.pi / 4
+    return tuple(
+        (
+            round(radius * math.cos(phase + step * i)),
+            round(radius * math.sin(phase + step * i)),
+        )
+        for i in range(count)
+    )

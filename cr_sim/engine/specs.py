@@ -76,6 +76,9 @@ class UnitSpec:
     source_ref: str
     level: int
 
+    #: Consumed by its own attack (Ice Spirit, Wall Breakers, Balloon's bomb).
+    kamikaze: bool = False
+
     @property
     def is_melee(self) -> bool:
         # 1900 milli-tiles is the game's own MELEE_RANGE_LIMIT.
@@ -169,6 +172,7 @@ def build_unit_spec(
         target_only_buildings=_bool(raw.get("TargetOnlyBuildings")),
         retarget_each_tick=_bool(raw.get("RetargetEachTick")),
         crown_tower_damage_percent=_int(raw.get("CrownTowerDamagePercent")),
+        kamikaze=_bool(raw.get("Kamikaze")),
         source_ref=ref,
         level=level,
     )

@@ -63,6 +63,42 @@ _TOML_FILE_NAMESPACE = {
 
 _MAX_BASE_DEPTH = 16
 
+#: Evolution overlays may express a value *relative to the base* rather than
+#: absolutely, as a two-element ``[operator, operand]`` token. Evo Zap widens
+#: its blast with ``Radius = ["+", 500]``; Evo Mortar replaces its fire rate
+#: with ``HitSpeed = ["=", 4700]``. Merging these as plain lists silently
+#: produces a nonsense value -- a list where an int is expected.
+_MERGE_OPERATORS = {
+    "=": lambda base, operand: operand,
+    "+": lambda base, operand: (base or 0) + operand,
+    "-": lambda base, operand: (base or 0) - operand,
+    "*": lambda base, operand: (base or 0) * operand // 100,
+}
+
+
+def _is_operator_token(value: Any) -> bool:
+    """A two-element ``[operator, operand]`` pair, not an ordinary pair.
+
+    The string check on the operator is load-bearing: plenty of real fields are
+    two-element lists of other things -- ``AttackSequenceList`` is a pair of
+    dicts, ``AttackSequence`` a pair of ints -- and an unhashable first element
+    cannot even be looked up in the operator table.
+    """
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and isinstance(value[0], str)
+        and value[0] in _MERGE_OPERATORS
+    )
+
+
+def apply_operator(base: Any, token: Any) -> Any:
+    """Resolve an ``[operator, operand]`` override against an inherited value."""
+    operator, operand = token[0], token[1]
+    if not isinstance(operand, int):
+        return operand
+    return _MERGE_OPERATORS[operator](base if isinstance(base, int) else 0, operand)
+
 #: Where bare TOML sections go when the file is not an overlay for a CSV table.
 _LOOSE_NAMESPACE = "_LOOSE"
 
@@ -247,11 +283,23 @@ class LogicData:
         merged: dict[str, Any] = {}
         base = (body or {}).get("Base")
         if isinstance(base, str):
-            merged.update(self.resolve(EntityRef.parse(base), _depth + 1))
+            # An unqualified Base names a sibling in the *same* namespace -- a
+            # buff extending a buff, not a character. Defaulting to CHARACTER
+            # sends those lookups somewhere they can never be found.
+            merged.update(
+                self.resolve(
+                    EntityRef.parse(base, default_namespace=ref.namespace), _depth + 1
+                )
+            )
         if csv_row:
             merged.update(csv_row)
         if body:
-            merged.update({k: v for k, v in body.items() if k != "Base"})
+            for key, value in body.items():
+                if key == "Base":
+                    continue
+                if _is_operator_token(value):
+                    value = apply_operator(merged.get(key), value)
+                merged[key] = value
 
         merged.setdefault("Name", ref.name)
         merged["__ref__"] = str(ref)
