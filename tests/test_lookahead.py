@@ -194,3 +194,102 @@ def test_a_longer_horizon_sees_at_least_as_much_damage(world):
     near = project(battle, horizon_ticks=100).red_tower_fraction
     far = project(battle, horizon_ticks=600).red_tower_fraction
     assert far <= near
+
+
+# ------------------------------------------------------- as a reward potential
+
+
+def _env(world, weights, seed=0):
+    from cr_sim.api.env import CRSimEnv
+
+    data, levels, registry = world
+    env = CRSimEnv(data, levels, registry, DECK, DECK,
+                   ticks_per_second=20, frame_skip=30, max_ticks=20 * 60,
+                   reward_shaping_weight=0.01, reward_weights=weights)
+    env.reset(seed=seed)
+    return env
+
+
+def _play_out(env, seed=0):
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    slots, width, height = env.action_space.nvec
+    rewards = []
+    while True:
+        mask = env.legal_action_mask().reshape(-1)
+        index = int(rng.choice(np.flatnonzero(mask))) if mask.any() else 0
+        slot, remainder = divmod(index, width * height)
+        gx, gy = divmod(remainder, height)
+        _, reward, terminated, truncated, _ = env.step(
+            (min(slot, slots - 1), gx, gy))
+        rewards.append(reward)
+        if terminated or truncated:
+            return rewards
+
+
+def test_the_episode_reward_telescopes_to_the_change_in_potential(world):
+    """The defining property of potential-based shaping, and the reason this
+    is safe to use: the rewards sum to the difference in potential between the
+    first and last state, so no policy can farm the shaping for return that
+    the outcome did not earn.
+    """
+    from cr_sim.api.reward import ProjectedReward, ProjectionWeights
+
+    weights = ProjectionWeights(horizon_seconds=2.0)
+    env = _env(world, weights, seed=4)
+    tracker = ProjectedReward(Team.BLUE, weights)
+    start = tracker.score(env.battle)
+
+    total = sum(_play_out(env, seed=4))
+    end = tracker.score(env.battle)
+    assert total == pytest.approx(end - start, abs=1e-6)
+
+
+def test_the_potential_is_opposite_for_the_two_sides(world):
+    from cr_sim.api.reward import ProjectedReward, ProjectionWeights
+
+    weights = ProjectionWeights(horizon_seconds=2.0)
+    battle = _with_knight(world)
+    blue = ProjectedReward(Team.BLUE, weights).score(battle)
+    red = ProjectedReward(Team.RED, weights).score(battle)
+    assert blue == pytest.approx(-red)
+
+
+def test_spending_elixir_costs_potential_immediately(world):
+    """What makes a play have to justify itself.
+
+    A card leaves the hand before it has done anything, so the elixir term
+    drops the moment it is spent. Without that, the potential could only ever
+    go up when playing a card and 'spend everything immediately' would be free.
+    """
+    from cr_sim.api.reward import ProjectedReward, ProjectionWeights
+
+    weights = ProjectionWeights(horizon_seconds=2.0)
+    tracker = ProjectedReward(Team.BLUE, weights)
+    battle = _battle(world)
+    before = tracker.score(battle)
+    assert battle.play_card(Team.BLUE, "Knight", tiles(1), tiles(2))
+    after = tracker.score(battle)
+    assert after < before, "a card that has not deployed yet was free"
+
+
+def test_a_quiet_board_pays_nothing(world):
+    """Neither side committing anything is not progress in either direction."""
+    from cr_sim.api.reward import ProjectedReward, ProjectionWeights
+
+    tracker = ProjectedReward(Team.BLUE, ProjectionWeights(horizon_seconds=2.0))
+    battle = _battle(world, ticks=100)
+    tracker.reset(battle)
+    for _ in range(60):
+        battle.step()
+    assert tracker.step(battle, 60) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_the_terms_are_reported_separately(world):
+    """One number cannot say whether the agent is attacking or hoarding."""
+    from cr_sim.api.reward import ProjectedReward, ProjectionWeights
+
+    tracker = ProjectedReward(Team.BLUE, ProjectionWeights(horizon_seconds=2.0))
+    tracker.score(_with_knight(world))
+    assert set(tracker.terms) == {"crowns", "towers", "elixir", "projected_ticks"}

@@ -30,7 +30,9 @@ from ..engine.arena import Arena, load_arena
 from ..engine.battle import Battle, BattleConfig
 from ..engine.entity import Team
 from ..render.web import render_ascii
-from .reward import RewardTracker, RewardWeights
+from .reward import (
+    ProjectedReward, ProjectionWeights, RewardTracker, RewardWeights,
+)
 from .encoding import (
     NUM_CARD_SLOTS,
     EncodingConfig,
@@ -273,7 +275,7 @@ class CRSimEnv(_EnvBase):
         level: int = 11,
         tower_level: int = 11,
         reward_shaping_weight: float = 0.01,
-        reward_weights: "RewardWeights | None" = None,
+        reward_weights: "RewardWeights | ProjectionWeights | None" = None,
         max_ticks: int | None = None,
         render_mode: str | None = None,
         skip_forced: bool = True,
@@ -294,11 +296,16 @@ class CRSimEnv(_EnvBase):
         #: difference. Kept optional so the simpler signal stays available as a
         #: control -- an ablation needs something to ablate against.
         self.reward_weights = reward_weights
-        self._reward = (
-            RewardTracker(team, registry, reward_weights)
-            if reward_weights is not None
-            else None
-        )
+        # Which weights are passed picks the reward: hand-weighted terms, or
+        # the change in what the board projects to. Dispatching on the type
+        # rather than a separate flag keeps the two from being set
+        # inconsistently.
+        if isinstance(reward_weights, ProjectionWeights):
+            self._reward = ProjectedReward(team, reward_weights)
+        elif reward_weights is not None:
+            self._reward = RewardTracker(team, registry, reward_weights)
+        else:
+            self._reward = None
         self.max_ticks = max_ticks
         self.render_mode = render_mode
         self.skip_forced = skip_forced

@@ -53,6 +53,7 @@ from typing import Any
 from ..data.cards import CardRegistry
 from ..engine.battle import Battle
 from ..engine.entity import Entity, EntityKind, Team
+from ..engine.lookahead import elixir_advantage, project
 
 __all__ = ["RewardWeights", "RewardTracker", "unit_elixir_values"]
 
@@ -271,6 +272,99 @@ class RewardTracker:
         if spec is None:
             return 0.0
         return self._values.get(spec.name, 1.0)
+
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionWeights:
+    """How a projected board is turned into one number.
+
+    Far fewer knobs than :class:`RewardWeights`, because most of what that
+    class weights by hand is already implied by playing the position out. A
+    counterpush is the projection with your push standing on the board; an
+    elixir trade is the change in projection across the exchange. Neither
+    needs its own coefficient.
+    """
+
+    #: Weight on the difference in surviving tower health, against 1.0 for a
+    #: crown. Crowns decide matches; tower health only separates equal crowns.
+    tower: float = 1.0
+    #: Weight on the elixir lead, as a fraction of a full bar. This is what
+    #: makes a card cost something: spending drops the potential immediately,
+    #: so a play has to buy back at least its price in board terms.
+    elixir: float = 0.3
+    #: How far to look. ``None`` plays to the end of the match, which is the
+    #: exact answer and costs about 450ms from a mid-match position. A few
+    #: seconds is enough to see whether a push connects and costs a fortieth
+    #: of that. This is the one real tuning decision here.
+    horizon_seconds: float | None = 3.0
+
+
+class ProjectedReward:
+    """Reward as the change in what the board is already worth.
+
+    Same contract as :class:`RewardTracker` -- ``score`` is a potential and a
+    step is paid its change -- but the potential is computed rather than
+    assembled from weighted terms. The engine is deterministic, so "what
+    happens if neither side plays another card" has one exact answer, and that
+    answer prices the board without anything to calibrate.
+
+    Written because the learned critic was the bottleneck: on its own training
+    distribution it explained six per cent of the variance in returns, leaving
+    PPO's advantages mostly noise. This does not fix the critic, but it makes
+    the reward itself carry the information the critic was failing to supply.
+
+    Potential-based, so the optimal policy is unchanged no matter what the
+    weights are -- the shaping can be wrong without being harmful, which is
+    not true of the hand-weighted terms.
+    """
+
+    __slots__ = ("team", "weights", "_previous", "_terms")
+
+    def __init__(self, team: Team, weights: ProjectionWeights | None = None) -> None:
+        self.team = team
+        self.weights = weights or ProjectionWeights()
+        self._previous = 0.0
+        self._terms: dict[str, float] = {}
+
+    def reset(self, battle: Battle) -> None:
+        self._terms = {}
+        self._previous = self.score(battle)
+
+    def step(self, battle: Battle, elapsed_ticks: int) -> float:
+        current = self.score(battle)
+        reward = current - self._previous
+        self._previous = current
+        return reward
+
+    @property
+    def terms(self) -> dict[str, float]:
+        return dict(self._terms)
+
+    def score(self, battle: Battle) -> float:
+        weights = self.weights
+        horizon = weights.horizon_seconds
+        ticks = (
+            None if horizon is None
+            else int(horizon * battle.config.ticks_per_second)
+        )
+        projection = project(battle, ticks)
+        other = self.team.opponent
+        crowns = float(projection.crowns(self.team) - projection.crowns(other))
+        towers = (
+            projection.tower_fraction(self.team) - projection.tower_fraction(other)
+        )
+        elixir = elixir_advantage(battle, self.team)
+        # Recorded per component for the same reason the five terms were: one
+        # number cannot say whether the agent is learning to attack or to sit
+        # on an elixir lead.
+        self._terms = {
+            "crowns": crowns,
+            "towers": weights.tower * towers,
+            "elixir": weights.elixir * elixir,
+            "projected_ticks": float(projection.ticks),
+        }
+        return crowns + weights.tower * towers + weights.elixir * elixir
 
 
 def describe(tracker: RewardTracker) -> dict[str, Any]:

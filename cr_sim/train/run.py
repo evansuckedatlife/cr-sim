@@ -30,7 +30,7 @@ from ..data.leveling import build_level_table
 from ..data.source import LogicData
 from ..api.encoding import NOOP_SLOT
 from ..api.env import CRSimEnv
-from ..api.reward import RewardWeights
+from ..api.reward import ProjectionWeights, RewardWeights
 from .ppo import PPOConfig, train
 from .selfplay import FrozenOpponent, evaluation_probe
 
@@ -87,9 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--build", type=Path, default=DEFAULT_BUILD)
     parser.add_argument("--save-every", type=int, default=10, help="updates between checkpoints")
     parser.add_argument(
-        "--reward", choices=("simple", "five-term"), default="five-term",
+        "--reward", choices=("simple", "five-term", "projected"), default="five-term",
         help="'simple' is crowns plus a tower-health difference, kept as a control; "
-             "'five-term' adds tower damage, elixir trade, counterpush and kites.",
+             "'five-term' adds tower damage, elixir trade, counterpush and kites; "
+             "'projected' plays the position out with neither side playing "
+             "again and pays the change in that outcome, which prices a board "
+             "exactly instead of weighting proxies for it.",
     )
     parser.add_argument(
         "--eval-every", type=int, default=10,
@@ -98,6 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
              "eighteen points optimistic; this is the number to watch.",
     )
     parser.add_argument("--eval-episodes", type=int, default=40)
+    parser.add_argument(
+        "--horizon-seconds", type=float, default=3.0,
+        help="how far --reward projected looks ahead; 0 plays to the end of "
+             "the match, which is exact but costs about forty times more",
+    )
     parser.add_argument(
         "--refresh-every", type=int, default=20,
         help="updates between refreshing the self-play opponent",
@@ -108,6 +116,17 @@ def build_parser() -> argparse.ArgumentParser:
              "nothing to measure. 'random' spends its elixir on legal placements.",
     )
     return parser
+
+
+def _reward_weights(args):
+    """The weights object whose type selects the reward."""
+    if args.reward == "five-term":
+        return RewardWeights()
+    if args.reward == "projected":
+        return ProjectionWeights(
+            horizon_seconds=args.horizon_seconds if args.horizon_seconds > 0 else None
+        )
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -132,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
             frame_skip=args.frame_skip,
             max_ticks=args.tps * args.match_seconds,
             reward_shaping_weight=args.shaping,
-            reward_weights=RewardWeights() if args.reward == "five-term" else None,
+            reward_weights=_reward_weights(args),
             opponent_policy=opponent,
         )
 
@@ -162,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps({**asdict(config), "deck": list(DEFAULT_DECK), "tps": args.tps,
                     "frame_skip": args.frame_skip, "match_seconds": args.match_seconds,
                     "shaping": args.shaping, "reward": args.reward,
+                    "horizon_seconds": args.horizon_seconds,
                     "opponent": args.opponent}, indent=2),
         encoding="utf-8",
     )

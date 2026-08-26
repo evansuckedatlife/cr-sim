@@ -21,9 +21,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .constants import MAX_ELIXIR
 from .entity import EntityKind, Team, entity_id_cursor, restore_entity_ids
 
-__all__ = ["Projection", "project", "committed_value"]
+__all__ = ["Projection", "project", "committed_value", "elixir_advantage"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,21 +131,46 @@ def project(battle, horizon_ticks: int | None = None) -> Projection:
         restore_entity_ids(cursor)
 
 
+def elixir_advantage(battle, team: Team) -> float:
+    """``team``'s elixir lead, as a fraction of a full bar.
+
+    Read from the board as it stands rather than from the projection. A
+    projection plays forward without either side spending, so both bars fill
+    to the cap and the projected difference is always zero -- the number is
+    only meaningful now.
+    """
+    other = team.opponent
+    mine = battle.players[team].elixir.exact
+    theirs = battle.players[other].elixir.exact
+    return (mine - theirs) / MAX_ELIXIR
+
+
 def committed_value(
     battle,
     team: Team,
     horizon_ticks: int | None = None,
     tower_weight: float = 1.0,
+    elixir_weight: float = 0.3,
 ) -> float:
     """``project`` reduced to one number, from ``team``'s point of view.
 
-    Positive means the board as it stands resolves in ``team``'s favour. A
-    crown is worth one and the tower-health difference is worth
-    ``tower_weight`` at most, so crowns dominate, which is the actual win
-    condition -- tower health only separates equal crowns.
+    Positive means the position resolves in ``team``'s favour. A crown is
+    worth one and the tower-health difference is worth ``tower_weight`` at
+    most, so crowns dominate -- which is the actual win condition, with tower
+    health only separating equal crowns.
+
+    Elixir is the one term not read from the projection, and the one that
+    makes this usable as a reward potential. Spending elixir lowers the value
+    immediately, so a card has to buy back at least what it cost in board
+    terms before it counts as a good play. That is an elixir trade, falling
+    out of the arithmetic rather than being scored separately.
     """
     projection = project(battle, horizon_ticks)
     other = team.opponent
     crowns = projection.crowns(team) - projection.crowns(other)
     towers = projection.tower_fraction(team) - projection.tower_fraction(other)
-    return float(crowns) + tower_weight * towers
+    return (
+        float(crowns)
+        + tower_weight * towers
+        + elixir_weight * elixir_advantage(battle, team)
+    )
