@@ -161,6 +161,19 @@ class UnitSpec:
     #: spawn cycle is an OnStartingAction and its stat columns are empty.
     on_starting_action: str | None = None
 
+    #: Buffs a unit grants *itself* after landing a given number of hits, as
+    #: three parallel ladders. Prince's is 2 / 4 / 6 hits for 6000 / 4000 /
+    #: 2000ms of escalating rage: the longer he is left swinging, the worse he
+    #: gets, which is the pressure the card is meant to apply.
+    buff_after_hits: tuple[str, ...] = ()
+    buff_after_hits_count: tuple[int, ...] = ()
+    buff_after_hits_ticks: tuple[int, ...] = ()
+    #: A buff put on whoever attacks this unit. Electro Giant's is a stun, so
+    #: hitting it is itself a cost -- the card punishes the defence rather than
+    #: out-damaging it.
+    reflected_attack_buff: str | None = None
+    reflected_attack_buff_ticks: int = 0
+
     @property
     def is_melee(self) -> bool:
         # 1900 milli-tiles is the game's own MELEE_RANGE_LIMIT.
@@ -196,6 +209,23 @@ def _bool(value: Any) -> bool:
 
 def _opt_str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _str_tuple(value: Any) -> tuple[str, ...]:
+    """A field that is a list in the data, or a single value, or absent."""
+    if isinstance(value, str):
+        return (value,) if value else ()
+    if isinstance(value, (list, tuple)):
+        return tuple(v for v in value if isinstance(v, str) and v)
+    return ()
+
+
+def _int_tuple(value: Any) -> tuple[int, ...]:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        return tuple(v for v in value if isinstance(v, int) and not isinstance(v, bool))
+    return ()
 
 
 #: ``ChargeRange`` is the one distance in this file that is NOT milli-tiles.
@@ -312,6 +342,13 @@ def build_unit_spec(
         ),
         is_fuse=is_fuse,
         on_starting_action=_opt_str(raw.get("OnStartingAction")) or None,
+        buff_after_hits=_str_tuple(raw.get("BuffAfterHits")),
+        buff_after_hits_count=_int_tuple(raw.get("BuffAfterHitsCount")),
+        buff_after_hits_ticks=tuple(
+            clock.ticks(v) for v in _int_tuple(raw.get("BuffAfterHitsTime"))
+        ),
+        reflected_attack_buff=_opt_str(raw.get("ReflectedAttackBuff")) or None,
+        reflected_attack_buff_ticks=clock.ticks(raw.get("ReflectedAttackBuffDuration")),
         attack_range=milli_tiles(_int(raw.get("Range"))),
         minimum_range=milli_tiles(_int(raw.get("MinimumRange"))),
         sight_range=milli_tiles(_int(raw.get("SightRange"))),

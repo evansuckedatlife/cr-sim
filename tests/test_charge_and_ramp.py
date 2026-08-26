@@ -280,3 +280,64 @@ def test_a_stun_resets_the_ramp_without_dropping_the_target(world):
 
     assert state.locked_ticks == 0, "the stun did not reset the ramp"
     assert state.target_id == held, "the stun dropped the target instead of the ramp"
+
+
+# ------------------------------------------------- reflected and earned buffs
+
+
+def test_hitting_an_electro_giant_stuns_you(world):
+    """Its ReflectedAttackBuff is a stun, so attacking it is itself a cost.
+
+    The card punishes the defence rather than out-damaging it, and that is
+    entirely in the reflect -- its damage is unremarkable for the elixir.
+    """
+    data, levels, registry = world
+    battle = Battle(
+        data, levels, registry,
+        BattleConfig(seed=1, blue_deck=("Knight",) * 8, red_deck=("ElectroGiant",) * 8),
+    )
+    battle.entities = [e for e in battle.entities if e.kind is not EntityKind.TOWER]
+    battle._towers = {Team.BLUE: [], Team.RED: []}
+    battle.players[Team.RED].elixir.add(10)
+    knight = _dummy(battle, world, 9, 20.6, team=Team.BLUE)
+    assert battle.play_card(Team.RED, "ElectroGiant", tiles(9), tiles(21))
+
+    stunned = 0
+    for _ in range(60 * 20):
+        battle.step()
+        if knight.buffs is not None and knight.buffs.is_frozen():
+            stunned += 1
+    assert stunned > 0, "attacking an Electro Giant did not stun"
+
+
+def test_the_after_hits_ladder_is_read_off_the_data(world):
+    """Prince's escalating rage: 2 / 4 / 6 hits for 6000 / 4000 / 2000ms.
+
+    No standard card carries this yet -- every user is an evolution or event
+    variant, which arrive in M7 -- so the ladder is asserted on the spec
+    directly. Pinned here so the mechanism is known to be wired before the
+    cards that need it exist.
+    """
+    data, levels, _ = world
+    spec = build_unit_spec(data, levels, "PrinceBuff", level=11, rarity="Epic")
+    assert spec.buff_after_hits == (
+        "PrinceRageBuff1", "PrinceRageBuff2", "PrinceRageBuff3",
+    )
+    assert spec.buff_after_hits_count == (2, 4, 6)
+    # Later tiers are shorter, so the rage escalates in strength but not in
+    # uptime -- it rewards being left alone rather than snowballing forever.
+    assert list(spec.buff_after_hits_ticks) == sorted(
+        spec.buff_after_hits_ticks, reverse=True
+    )
+
+
+def test_a_single_value_field_reads_as_a_one_entry_ladder(world):
+    """These fields are lists for some units and bare values for others.
+
+    Barbarian's evolution carries one entry where Prince carries three, and a
+    reader that assumed a list would drop it silently.
+    """
+    data, levels, _ = world
+    spec = build_unit_spec(data, levels, "Barbarian_EV1", level=11, rarity="Common")
+    assert len(spec.buff_after_hits) == 1
+    assert len(spec.buff_after_hits_count) == 1

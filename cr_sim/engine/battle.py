@@ -192,6 +192,7 @@ class Battle:
         "_spawn_timers",
         "_spawn_children",
         "_charge",
+        "_hit_counts",
         "actions",
         "_buff_specs",
     )
@@ -256,6 +257,8 @@ class Battle:
         #: Distance each charging unit has covered unobstructed, in
         #: subtiles. Prince, Dark Prince and Battle Ram all live on this.
         self._charge: dict[int, int] = {}
+        #: Hits each unit has landed, for the after-hits buff ladders.
+        self._hit_counts: dict[int, int] = {}
         _globals = self.data.globals_map()
         # Grace band that stops a unit flickering between two equidistant enemies.
         _ext = _globals.get('LOGIC_RANGE_EXTENSION_TO_KEEP_TARGET', 0)
@@ -840,6 +843,8 @@ class Battle:
                     self._apply_buff(
                         hit.target, bspec, hit.spec.buff_on_damage_ticks, source=hit.attacker.id
                     )
+            self._after_hits(hit)
+            self._reflect(hit)
             if hit.attacker.buffs is not None:
                 # Swinging breaks invisibility. Royal Ghost is untargetable
                 # between attacks and exposed from the moment it commits to
@@ -872,6 +877,48 @@ class Battle:
                         self.tick,
                     )
                 )
+
+    def _after_hits(self, hit) -> None:
+        """Grant a unit the buff it has earned by landing hits.
+
+        Prince's ladder is 2 / 4 / 6 hits for 6000 / 4000 / 2000ms of
+        escalating rage: the longer he is left swinging the worse he gets. The
+        count is per unit and never resets, so it is a running total of what
+        that unit has done rather than a per-target streak.
+        """
+        spec = hit.spec
+        if not spec.buff_after_hits:
+            return
+        landed = self._hit_counts.get(hit.attacker.id, 0) + 1
+        self._hit_counts[hit.attacker.id] = landed
+        for index, threshold in enumerate(spec.buff_after_hits_count):
+            if landed != threshold or index >= len(spec.buff_after_hits):
+                continue
+            bspec = self._buff_spec(spec.buff_after_hits[index], spec.rarity, spec.level)
+            if bspec is None:
+                continue
+            duration = (
+                spec.buff_after_hits_ticks[index]
+                if index < len(spec.buff_after_hits_ticks)
+                else 0
+            )
+            self._apply_buff(hit.attacker, bspec, duration, source=hit.attacker.id)
+
+    def _reflect(self, hit) -> None:
+        """Put the victim's reflected buff onto whoever hit it.
+
+        Electro Giant's is a stun, which makes attacking it a cost in itself --
+        the card punishes the defence rather than out-damaging it.
+        """
+        victim = hit.target
+        spec = victim.spec
+        if spec is None or not spec.reflected_attack_buff:
+            return
+        bspec = self._buff_spec(spec.reflected_attack_buff, spec.rarity, spec.level)
+        if bspec is not None:
+            self._apply_buff(
+                hit.attacker, bspec, spec.reflected_attack_buff_ticks, source=victim.id
+            )
 
     def _buff_spec(self, name: str, rarity: str, level: int) -> BuffSpec | None:
         key = f"{name}@{rarity}@{level}"
@@ -1469,6 +1516,7 @@ class Battle:
                 self._spawn_timers.pop(entity.id, None)
                 self._spawn_children.pop(entity.id, None)
                 self._charge.pop(entity.id, None)
+                self._hit_counts.pop(entity.id, None)
                 died = True
                 if entity.kind is EntityKind.TOWER:
                     self.players[entity.team.opponent].crowns += 1
