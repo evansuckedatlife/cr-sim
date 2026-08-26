@@ -106,21 +106,56 @@ class PathGrid:
         #: Terrain and occupancy folded together, per (flying, version).
         self._combined: dict[tuple[bool, int], list[int]] = {}
 
+    def __deepcopy__(self, memo: dict) -> "PathGrid":
+        """Fast path for ``copy.deepcopy`` -- what :meth:`Battle.clone` uses.
+
+        ``arena``, ``costs``, ``_ground`` and ``_air`` are never mutated after
+        construction (``arena`` is one of :attr:`Battle._SHARED`'s objects
+        regardless; the rest are set once in ``__init__`` and only ever read),
+        so a branch can keep the same objects rather than copying them.
+        ``_occupied``, ``version``, ``_fields`` and ``_combined`` are the part
+        that actually changes as buildings appear and die, and those get
+        their own dict -- a shallow one is enough, because every value already
+        in ``_fields``/``_combined`` is a finished array that is never
+        mutated after being cached, only replaced wholesale by
+        :meth:`set_occupancy` clearing the dict and letting entries be
+        rebuilt. Two branches can safely go on sharing those old arrays.
+
+        Skipping the generic deepcopy here matters more than it looks: the
+        naive walk was recursing into every cached flow field (up to
+        :data:`MAX_FIELDS` of them, one int per grid cell each) on every
+        single clone, whether or not the branch ever asks for a new one.
+        """
+        clone = PathGrid.__new__(PathGrid)
+        clone.arena = self.arena
+        clone.costs = self.costs
+        clone._ground = self._ground
+        clone._air = self._air
+        clone._occupied = dict(self._occupied)
+        clone.version = self.version
+        clone._fields = dict(self._fields)
+        clone._combined = dict(self._combined)
+        return clone
+
     def _terrain(self, *, flying: bool) -> list[int]:
         """Cost to enter each cell, or 0 for cells that cannot be entered."""
         arena = self.arena
         costs = self.costs
+        # Plain ints, not Tile members: ``int & Tile`` reflects to IntFlag's
+        # ``__rand__`` and reconstructs a Flag instance on every test, which
+        # showed up as real cost even though this only runs at grid setup.
+        bridge_bit, water_bit, blocked_bit = int(Tile.BRIDGE), int(Tile.WATER), int(Tile.BLOCKED)
         cells: list[int] = []
         for cy in range(arena.half_height):
             for cx in range(arena.half_width):
                 bits = arena.cell(cx, cy)
-                if bits & Tile.BRIDGE:
+                if bits & bridge_bit:
                     # The cheapest ground on the board, which is why every push
                     # funnels onto one whether or not it needs to cross.
                     cells.append(costs["road"])
-                elif bits & Tile.WATER:
+                elif bits & water_bit:
                     cells.append(costs["water"] if flying else 0)
-                elif bits & Tile.BLOCKED:
+                elif bits & blocked_bit:
                     cells.append(costs["blocked"] if flying else 0)
                 else:
                     cells.append(costs["default"])

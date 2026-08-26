@@ -36,7 +36,7 @@ DEFAULT_CELL = 2 * SUBTILES_PER_TILE
 class SpatialIndex:
     """Buckets entities by position for cheap radius queries."""
 
-    __slots__ = ("cell", "columns", "rows", "_buckets", "_count")
+    __slots__ = ("cell", "columns", "rows", "_buckets", "_count", "_dirty")
 
     def __init__(self, width: int, height: int, cell: int = DEFAULT_CELL) -> None:
         self.cell = cell
@@ -44,14 +44,47 @@ class SpatialIndex:
         self.rows = max(1, height // cell + 1)
         self._buckets: list[list[Entity]] = [[] for _ in range(self.columns * self.rows)]
         self._count = 0
+        #: Indices of buckets left non-empty by the last rebuild -- the only
+        #: ones the next rebuild needs to clear. A busy board still touches a
+        #: small fraction of the grid's cells, so clearing all of them (as
+        #: opposed to just the ones that were used) was pure waste: on a
+        #: mid-match board this was measured as roughly a third of a tick's
+        #: total cost, almost all of it clearing buckets nothing had ever put
+        #: an entity into.
+        self._dirty: list[int] = []
+
+    def __deepcopy__(self, memo: dict) -> "SpatialIndex":
+        """Fast path for ``copy.deepcopy`` -- what :meth:`Battle.clone` uses.
+
+        :meth:`Battle.step` rebuilds this from ``self.entities`` before any
+        phase reads it (see the top of ``step``), every single tick -- so
+        whatever a branch's index held at the moment it was cloned is
+        guaranteed to be overwritten before it is ever read. A fresh, empty
+        grid of the same shape is exactly what a freshly-constructed
+        ``Battle`` already starts with (nothing has called ``rebuild`` yet
+        either), and it is what this would be replaced with regardless.
+        Generic deepcopy was instead recursing into every one of
+        ``columns * rows`` bucket lists -- mostly empty on any real board --
+        and every entity referenced by the ones that were not, on every
+        single clone.
+        """
+        clone = SpatialIndex.__new__(SpatialIndex)
+        clone.cell = self.cell
+        clone.columns = self.columns
+        clone.rows = self.rows
+        clone._buckets = [[] for _ in range(self.columns * self.rows)]
+        clone._count = 0
+        clone._dirty = []
+        return clone
 
     def rebuild(self, entities: Iterable[Entity]) -> None:
-        for bucket in self._buckets:
-            bucket.clear()
+        buckets = self._buckets
+        for index in self._dirty:
+            buckets[index].clear()
+        dirty: list[int] = []
         count = 0
         columns, cell = self.columns, self.cell
         rows = self.rows
-        buckets = self._buckets
         for entity in entities:
             if entity.dead:
                 continue
@@ -65,8 +98,13 @@ class SpatialIndex:
                 cy = 0
             elif cy >= rows:
                 cy = rows - 1
-            buckets[cy * columns + cx].append(entity)
+            index = cy * columns + cx
+            bucket = buckets[index]
+            if not bucket:
+                dirty.append(index)
+            bucket.append(entity)
             count += 1
+        self._dirty = dirty
         self._count = count
 
     def __len__(self) -> int:

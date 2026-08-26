@@ -112,6 +112,25 @@ def reset_entity_ids() -> None:
     _next_id = 0
 
 
+#: Every slot a class carries, base classes first, collected once per class
+#: and cached -- ``__slots__`` is per-class, not inherited automatically, so
+#: a subclass (``Projectile``, ``AreaEffect``, ...) needs its own plus every
+#: ancestor's. Used by :meth:`Entity.__deepcopy__`, which has to work for all
+#: of them, not just the base class.
+_slots_cache: dict[type, tuple[str, ...]] = {}
+
+
+def _slots_for(cls: type) -> tuple[str, ...]:
+    found = _slots_cache.get(cls)
+    if found is None:
+        collected: list[str] = []
+        for klass in reversed(cls.__mro__):
+            collected.extend(getattr(klass, "__slots__", ()))
+        found = tuple(collected)
+        _slots_cache[cls] = found
+    return found
+
+
 class Entity:
     """Base for anything that exists on the battlefield."""
 
@@ -233,12 +252,50 @@ class Entity:
         entity, so a cloned battle needs no reference fixing. ``spec`` is
         immutable and shared; ``buffs`` is not, and gets its own copy.
         """
-        copy = Entity.__new__(Entity)
-        for slot in Entity.__slots__:
+        copy = type(self).__new__(type(self))
+        # Every slot down the MRO, and the concrete class rather than the base:
+        # iterating Entity.__slots__ and constructing an Entity silently dropped
+        # whatever a Projectile or AreaEffect adds. Safe only for as long as
+        # nothing cloned one, which is not a property worth relying on.
+        for slot in _slots_for(type(self)):
             setattr(copy, slot, getattr(self, slot))
         if self.buffs is not None:
             copy.buffs = self.buffs.clone()
         return copy
+
+    def __deepcopy__(self, memo: dict) -> "Entity":
+        """Fast path for ``copy.deepcopy`` -- what :meth:`Battle.clone` uses.
+
+        The generic deepcopy machinery reconstructs every entity through
+        ``__reduce_ex__``, which for a ``__slots__`` class means pickling
+        each slot into a state dict and then deep-copying *that dict*,
+        recursing through :mod:`copy`'s dispatch for every attribute even
+        when it is a plain ``int``. Measured on a mid-match clone this was
+        the largest single cost: thousands of entities' worth of attribute
+        traversal for objects with no internal graph to speak of.
+
+        Unlike :meth:`clone`, this covers every concrete subclass
+        (``Projectile``, ``RollingProjectile``, ``AreaEffect``), each of
+        which adds its own ``__slots__`` on top of :class:`Entity`'s --
+        ``clone`` only ever runs on troops and buildings (the Clone spell's
+        targets), so it does not need to.
+        """
+        cls = type(self)
+        copy_obj = cls.__new__(cls)
+        for slot in _slots_for(cls):
+            setattr(copy_obj, slot, getattr(self, slot))
+        if self.buffs is not None:
+            copy_obj.buffs = self.buffs.clone()
+        # The one mutable container slot outside `buffs`: RollingProjectile
+        # and AreaEffect both track ids they have already struck, mutated
+        # in place with `.add()`. Aliasing it would let a branch's hits mark
+        # the origin's projectile as having already struck someone, or vice
+        # versa. `spec`/`pspec`/`aspec` are deliberately left aliased above --
+        # they are immutable and already shared via Battle._SHARED.
+        struck = getattr(self, "struck", None)
+        if struck is not None:
+            copy_obj.struck = set(struck)
+        return copy_obj
 
     def tick_deploy(self) -> bool:
         """Advance the deploy timer. Returns True on the tick it completes."""

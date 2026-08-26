@@ -76,6 +76,25 @@ class Tile(IntFlag):
     CENTRE = 512
 
 
+#: Plain-int mirrors of the flags used in hot per-tick paths.
+#:
+#: ``cells`` (and every value read from it) is already a plain ``int`` --
+#: ``Tile`` is only ever wrapped around a value for the bit *names*. But
+#: ``Tile`` is an ``IntFlag``, and ``int & IntFlag`` prefers the ``IntFlag``
+#: operand's reflected ``__rand__`` over ``int.__and__`` (subclass dispatch),
+#: which reconstructs a ``Flag`` instance -- enum machinery, not a bit test.
+#: ``is_walkable`` alone was measured spending several microseconds per call
+#: in that reconstruction, called thousands of times a match. Testing against
+#: a plain ``int`` instead keeps the comparison on ``int.__and__``, which is
+#: the fast C path; the bit pattern, and therefore every result, is identical.
+_WATER = int(Tile.WATER)
+_BLOCKED = int(Tile.BLOCKED)
+_LANE_LEFT = int(Tile.LANE_LEFT)
+_LANE_RIGHT = int(Tile.LANE_RIGHT)
+_WATER_OR_BLOCKED = _WATER | _BLOCKED
+_LANE_MASK = _LANE_LEFT | _LANE_RIGHT
+
+
 @dataclass(frozen=True, slots=True)
 class TowerPlacement:
     """A structure's position, in subtiles, for one team."""
@@ -139,7 +158,7 @@ class Arena:
     def cell(self, cx: int, cy: int) -> int:
         """Terrain bits at a cell index. Out of bounds reads as BLOCKED."""
         if not (0 <= cx < self.half_width and 0 <= cy < self.half_height):
-            return int(Tile.BLOCKED)
+            return _BLOCKED
         return self.cells[cy * self.half_width + cx]
 
     def cell_at(self, x: int, y: int) -> tuple[int, int]:
@@ -156,10 +175,10 @@ class Arena:
     # ------------------------------------------------------------ walkability
 
     def is_water(self, x: int, y: int) -> bool:
-        return bool(self.flags_at(x, y) & Tile.WATER)
+        return bool(self.flags_at(x, y) & _WATER)
 
     def is_blocked(self, x: int, y: int) -> bool:
-        return bool(self.flags_at(x, y) & Tile.BLOCKED)
+        return bool(self.flags_at(x, y) & _BLOCKED)
 
     def is_walkable(self, x: int, y: int, *, flying: bool = False) -> bool:
         """Can a unit occupy this point?
@@ -172,10 +191,10 @@ class Arena:
             return False
         if flying:
             return True
-        return not (self.flags_at(x, y) & (Tile.WATER | Tile.BLOCKED))
+        return not (self.flags_at(x, y) & _WATER_OR_BLOCKED)
 
     def is_road(self, x: int, y: int) -> bool:
-        return bool(self.flags_at(x, y) & (Tile.LANE_LEFT | Tile.LANE_RIGHT))
+        return bool(self.flags_at(x, y) & _LANE_MASK)
 
     # --------------------------------------------------------------- geometry
 
@@ -188,7 +207,7 @@ class Arena:
         rows = [
             cy
             for cy in range(self.half_height)
-            if any(self.cell(cx, cy) & Tile.WATER for cx in range(self.half_width))
+            if any(self.cell(cx, cy) & _WATER for cx in range(self.half_width))
         ]
         return (rows[0], rows[-1]) if rows else (0, -1)
 
@@ -216,7 +235,7 @@ class Arena:
         crossable = [
             cx
             for cx in range(self.half_width)
-            if not (self.cell(cx, first) & Tile.WATER)
+            if not (self.cell(cx, first) & _WATER)
         ]
         spans: list[tuple[int, int]] = []
         for cx in crossable:
@@ -273,9 +292,9 @@ class Arena:
         if not self.in_bounds(x, y):
             return False
         flags = self.flags_at(x, y)
-        if flags & Tile.BLOCKED:
+        if flags & _BLOCKED:
             return False
-        if (flags & Tile.WATER) and not on_water:
+        if (flags & _WATER) and not on_water:
             return False
         if anywhere:
             return True
