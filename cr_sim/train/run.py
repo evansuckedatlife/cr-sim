@@ -105,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"update {stats['updates']:4d}  steps {stats['steps']:>9d}  "
                 f"{stats['steps_per_second']:6.0f}/s  "
                 f"return {stats['mean_return']:+8.4f}  "
+                f"win {stats['win_rate']:4.0%}  "
                 f"entropy {stats['entropy']:6.3f}  "
                 f"pass {stats['noop_fraction']:4.0%}  "
                 f"loss {stats['policy_loss']:+.4f}/{stats['value_loss']:.4f}",

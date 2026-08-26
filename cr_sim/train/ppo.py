@@ -44,6 +44,11 @@ from .nets import ActorCritic, NetConfig
 
 __all__ = ["PPOConfig", "Rollout", "train", "compute_gae"]
 
+#: Episodes averaged into the reported return and win rate. Wide because the
+#: per-episode spread is larger than any effect worth seeing, and a narrow
+#: window turns that spread into a curve that looks like learning.
+_RETURN_WINDOW = 200
+
 
 @dataclass(frozen=True, slots=True)
 class PPOConfig:
@@ -184,6 +189,7 @@ def train(
 
     steps_done = 0
     episode_returns: list[float] = []
+    episode_crowns: list[int] = []
     running_return = np.zeros(config.num_envs, dtype=np.float64)
     started = time.perf_counter()
     update_index = 0
@@ -208,6 +214,10 @@ def train(
                 if terminated or truncated:
                     dones[index] = 1.0
                     episode_returns.append(float(running_return[index]))
+                    episode_crowns.append(
+                        env.battle.players[env.team].crowns
+                        - env.battle.players[env.team.opponent].crowns
+                    )
                     running_return[index] = 0.0
                     obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
                 observations[index] = obs
@@ -250,7 +260,16 @@ def train(
             updates=update_index,
             steps_per_second=steps_done / max(elapsed, 1e-9),
             episodes=len(episode_returns),
-            mean_return=float(np.mean(episode_returns[-20:])) if episode_returns else float("nan"),
+            # Averaged over a wide window on purpose. Episode returns here have
+            # a standard deviation around 0.5, so a 20-episode mean carries a
+            # standard error of 0.11 and swings by half a crown between updates
+            # for reasons that have nothing to do with the policy. A window
+            # that noisy reads as progress when nothing is happening -- it did,
+            # reporting 0.78 for a policy that evaluated at 0.29.
+            mean_return=float(np.mean(episode_returns[-_RETURN_WINDOW:]))
+            if episode_returns else float("nan"),
+            win_rate=float(np.mean([c > 0 for c in episode_crowns[-_RETURN_WINDOW:]]))
+            if episode_crowns else float("nan"),
         )
         if on_update is not None:
             on_update(stats)
@@ -259,6 +278,7 @@ def train(
                 f"update {update_index:4d}  steps {steps_done:>8d}  "
                 f"{stats['steps_per_second']:6.0f}/s  "
                 f"return {stats['mean_return']:+7.3f}  "
+                f"win {stats['win_rate']:4.0%}  "
                 f"loss {stats['policy_loss']:+.4f}/{stats['value_loss']:.4f}  "
                 f"entropy {stats['entropy']:.3f}  "
                 f"pass {stats['noop_fraction']:.0%}"
