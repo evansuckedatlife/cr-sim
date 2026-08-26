@@ -130,8 +130,70 @@ def test_the_page_renders_before_any_evaluation_exists():
     assert "<svg" in page or "empty" in page
 
 
-def test_the_page_is_self_contained():
-    """No build step, no CDN -- it is opened from disk while a run continues."""
+def test_the_page_carries_its_own_logic_and_data():
+    """No build step and no fetch -- it is opened from disk while a run runs.
+
+    Web fonts are the one exception, and they are allowed only because they
+    degrade silently: the page must name a real fallback stack so it still
+    reads correctly on a machine with no network, which is the state this is
+    most likely to be opened in.
+    """
     page = render([_row(1, 1000, eval_lift_sd=0.2)], "run")
-    assert "http://" not in page and "https://" not in page
     assert "<script" in page and "</html>" in page
+    assert "const DATA = " in page, "the page fetches its data instead of carrying it"
+
+    external = [
+        line for line in page.splitlines()
+        if ("http://" in line or "https://" in line)
+        and "fonts.googleapis.com" not in line
+        and "fonts.gstatic.com" not in line
+    ]
+    assert not external, f"page reaches outside for {external}"
+    assert "ui-sans-serif" in page and "ui-monospace" in page, "no fallback stack"
+
+
+# ------------------------------------------------------ explaining the numbers
+
+
+def test_every_metric_on_the_page_is_explained_somewhere_on_it():
+    """A dashboard of unexplained numbers is a dashboard nobody can act on.
+
+    Two of these were actively misread on this project: value loss was called
+    mis-calibrated when it was only measured against a different reward scale,
+    and a pair of positive lift readings were called a trend when six of them
+    averaged to noise. The glossary exists so the page cannot be read that way
+    again.
+    """
+    page = render([_row(1, 1000, eval_lift_sd=0.3, eval_win=0.4, control_win=0.3)], "run")
+    for term in ("Lift vs control", "Explained variance", "Entropy",
+                 "Value loss and return spread", "Rollout win rate",
+                 "Pass rate", "Throughput"):
+        assert term in page, f"{term!r} is shown but never explained"
+
+
+def test_the_page_says_what_zero_means_for_the_two_numbers_that_need_it():
+    """Both have a meaningful zero that is not obvious from the value alone."""
+    page = render([_row(1, 1000, eval_lift_sd=0.0)], "run")
+    assert "no better than random" in page
+    assert "no better than guessing the average" in page
+
+
+def test_the_headline_reads_noise_as_noise():
+    """A lift inside the control's own bounce must not be presented as a win.
+
+    The failure this prevents is real: an early +0.23 was reported as the
+    first positive signal, and six evaluations later the mean was +0.04.
+    """
+    page = render([_row(1, 1000, eval_lift_sd=0.2, eval_win=0.4, control_win=0.3)], "run")
+    assert "Indistinguishable from random" in page
+
+
+def test_the_page_carries_the_critic_series_it_now_leads_on():
+    rows = [
+        _row(1, 1000, explained_variance=-0.02, ret_std=0.5),
+        _row(2, 2000, explained_variance=0.31, ret_std=0.6),
+    ]
+    payload = json.loads(
+        render(rows, "run").split("const DATA = ", 1)[1].split(";\n", 1)[0])
+    assert payload["series"]["explained_variance"] == [[1000, -0.02], [2000, 0.31]]
+    assert payload["series"]["ret_std"] == [[1000, 0.5], [2000, 0.6]]

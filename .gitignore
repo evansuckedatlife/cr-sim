@@ -15,3 +15,8 @@ projected.err
 projected.log
 runs-overnight.log
 .claude/worktrees/
+training.html
+report.html
+watch.out
+watch.err
+projected-v2.*

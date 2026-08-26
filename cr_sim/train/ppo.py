@@ -318,6 +318,11 @@ def train(
         stats.update(
             steps=steps_done,
             updates=update_index,
+            # Logged so a progress view can say how much is left. Without it
+            # the only honest thing a page can show is a step count with no
+            # denominator.
+            total_steps=config.total_steps,
+            elapsed_seconds=elapsed,
             # Measured over this leg only. Dividing a resumed total by the
             # time since restart reports a throughput no run ever achieved.
             steps_per_second=(steps_done - resumed_steps) / max(elapsed, 1e-9),
