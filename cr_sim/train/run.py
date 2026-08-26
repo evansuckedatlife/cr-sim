@@ -85,7 +85,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, default=ROOT / "runs")
     parser.add_argument("--name", default="ppo")
     parser.add_argument("--build", type=Path, default=DEFAULT_BUILD)
-    parser.add_argument("--save-every", type=int, default=10, help="updates between checkpoints")
+    parser.add_argument(
+        "--save-every", type=int, default=10, help="updates between checkpoints")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="continue from checkpoint.pt in the run directory, keeping the "
+             "optimiser state and step count. Metrics are appended rather "
+             "than overwritten.",
+    )
     parser.add_argument(
         "--reward", choices=("simple", "five-term", "projected"), default="five-term",
         help="'simple' is crowns plus a tower-health difference, kept as a control; "
@@ -187,6 +194,17 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     started = time.perf_counter()
+    resume_state = None
+    if args.resume:
+        checkpoint_path = out / "checkpoint.pt"
+        if not checkpoint_path.exists():
+            print(f"--resume given but {checkpoint_path} does not exist", file=sys.stderr)
+            return 1
+        resume_state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        print(f"resuming from {resume_state.get('steps', 0):,} steps "
+              f"({resume_state.get('updates', 0)} updates)", flush=True)
+
+    optimiser_holder: dict[str, Any] = {}
     net_holder: dict[str, torch.nn.Module] = {}
     probe_holder: dict[str, Any] = {}
     best = {"lift": float("-inf")}
@@ -197,7 +215,10 @@ def main(argv: list[str] | None = None) -> int:
         int(probe_env.action_space.nvec[1]), int(probe_env.action_space.nvec[2])
     )
 
-    with metrics_path.open("w", encoding="utf-8") as stream:
+    # Appended when resuming: the point of a restart is to keep what the
+    # run had already recorded, and "w" would delete the hours being
+    # recovered.
+    with metrics_path.open("a" if args.resume else "w", encoding="utf-8") as stream:
         def record(stats: dict) -> None:
             # No write here. Every exit from this function ends at _write, and
             # writing on the way in as well emitted each update twice -- once
@@ -234,8 +255,21 @@ def main(argv: list[str] | None = None) -> int:
                     torch.save({"state_dict": net.state_dict(), "stats": stats},
                                out / "best.pt")
             if stats["updates"] % args.save_every == 0:
+                # Optimiser state included deliberately. Adam's moment
+                # estimates are most of what a long run has learned about its
+                # own gradients; restarting without them throws that away and
+                # the updates just after a restart look like a bad checkpoint.
                 torch.save(
-                    {"state_dict": net.state_dict(), "stats": stats},
+                    {
+                        "state_dict": net.state_dict(),
+                        "optimiser": (
+                            optimiser_holder["optimiser"].state_dict()
+                            if "optimiser" in optimiser_holder else None
+                        ),
+                        "steps": stats["steps"],
+                        "updates": stats["updates"],
+                        "stats": stats,
+                    },
                     out / "checkpoint.pt",
                 )
             _write(stats)
@@ -271,6 +305,10 @@ def main(argv: list[str] | None = None) -> int:
             on_net=_on_net,
             opponents=snapshots,
             refresh_every=args.refresh_every,
+            # The optimiser itself, not its state at startup: a checkpoint
+            # needs the moment estimates as they are when it is written.
+            on_optimiser=lambda o: optimiser_holder.__setitem__("optimiser", o),
+            resume=resume_state,
         )
 
     torch.save({"state_dict": net.state_dict()}, out / "final.pt")

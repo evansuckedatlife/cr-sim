@@ -148,8 +148,10 @@ def train(
     device: str = "cpu",
     on_update: Callable[[dict], None] | None = None,
     on_net: Callable[[ActorCritic], None] | None = None,
+    on_optimiser: "Callable[[Any], None] | None" = None,
     opponents: "Sequence[Any] | None" = None,
     refresh_every: int = 0,
+    resume: "dict | None" = None,
 ) -> ActorCritic:
     """Run PPO and return the trained network.
 
@@ -161,6 +163,13 @@ def train(
     environment. Refreshed every ``refresh_every`` updates so the thing being
     beaten improves alongside the thing beating it; at zero they never change,
     which makes the opponent a fixed sparring partner instead of self-play.
+
+    ``resume`` restarts a run that stopped: a checkpoint holding the network
+    weights, the optimiser state and how many steps had been taken. The
+    optimiser state is not optional -- Adam's moment estimates are most of what
+    a long run has learned about its own gradients, and restarting without them
+    throws away that adaptation and destabilises the first updates after the
+    restart, which looks exactly like a bad checkpoint.
 
     ``on_net`` is handed the network as soon as it is built. Its shapes come
     from the first observation, so a caller that wants to checkpoint mid-run
@@ -191,15 +200,29 @@ def train(
         )
     ).to(device)
     optimiser = torch.optim.Adam(net.parameters(), lr=config.learning_rate, eps=1e-5)
+
+    resumed_steps = resumed_updates = 0
+    if resume is not None:
+        net.load_state_dict(resume["state_dict"])
+        if resume.get("optimiser") is not None:
+            optimiser.load_state_dict(resume["optimiser"])
+        resumed_steps = int(resume.get("steps", 0))
+        resumed_updates = int(resume.get("updates", 0))
+
     if on_net is not None:
         on_net(net)
+    # Handed out for the same reason as the network: a checkpoint that a run
+    # can actually restart from needs the optimiser state, and only this
+    # function owns it.
+    if on_optimiser is not None:
+        on_optimiser(optimiser)
 
-    steps_done = 0
+    steps_done = resumed_steps
     episode_returns: list[float] = []
     episode_crowns: list[int] = []
     running_return = np.zeros(config.num_envs, dtype=np.float64)
     started = time.perf_counter()
-    update_index = 0
+    update_index = resumed_updates
 
     while steps_done < config.total_steps:
         buffers: dict[str, list[torch.Tensor]] = {
@@ -295,7 +318,9 @@ def train(
         stats.update(
             steps=steps_done,
             updates=update_index,
-            steps_per_second=steps_done / max(elapsed, 1e-9),
+            # Measured over this leg only. Dividing a resumed total by the
+            # time since restart reports a throughput no run ever achieved.
+            steps_per_second=(steps_done - resumed_steps) / max(elapsed, 1e-9),
             episodes=len(episode_returns),
             # Averaged over a wide window on purpose. Episode returns here have
             # a standard deviation around 0.5, so a 20-episode mean carries a

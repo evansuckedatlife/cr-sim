@@ -312,3 +312,69 @@ def test_each_update_writes_exactly_one_metrics_row(tmp_path):
     assert rows, "the run wrote no metrics at all"
     repeated = {u: n for u, n in Counter(r["updates"] for r in rows).items() if n > 1}
     assert not repeated, f"updates written more than once: {repeated}"
+
+
+# ------------------------------------------------------------------- resuming
+
+
+def test_a_run_resumes_from_its_checkpoint_without_losing_progress(tmp_path):
+    """A crash at hour four should not cost four hours.
+
+    The machine this trains on has bugchecked twice in a day, so an
+    unattended run needs to survive one. What makes that worth testing rather
+    than assuming: a resume that silently restarts from zero steps, or that
+    truncates the metrics file it was supposed to continue, looks exactly like
+    a working resume until you read the numbers afterwards.
+    """
+    import json
+    import torch
+
+    from cr_sim.train.run import main
+
+    common = [
+        "--horizon", "16", "--envs", "2", "--match-seconds", "20",
+        "--eval-every", "0", "--save-every", "1", "--opponent", "idle",
+        "--out", str(tmp_path), "--name", "resumed",
+    ]
+    assert main(["--steps", "128", *common]) == 0
+
+    checkpoint = torch.load(
+        tmp_path / "resumed" / "checkpoint.pt", map_location="cpu",
+        weights_only=False)
+    assert checkpoint["steps"] > 0, "checkpoint recorded no progress"
+    assert checkpoint["optimiser"] is not None, "optimiser state was not saved"
+    # Adam keeps per-parameter moments; an optimiser that has never stepped
+    # saves an empty state, which would restart the adaptation from scratch.
+    assert checkpoint["optimiser"]["state"], "optimiser state was empty"
+
+    first_rows = [
+        json.loads(line) for line in
+        (tmp_path / "resumed" / "metrics.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    steps_before = first_rows[-1]["steps"]
+
+    assert main(["--steps", str(steps_before + 128), "--resume", *common]) == 0
+
+    rows = [
+        json.loads(line) for line in
+        (tmp_path / "resumed" / "metrics.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(rows) > len(first_rows), "resuming truncated the earlier metrics"
+    assert rows[len(first_rows)]["steps"] > steps_before, (
+        "the resumed leg restarted the step count instead of continuing it")
+    assert rows[len(first_rows)]["updates"] > first_rows[-1]["updates"], (
+        "the resumed leg restarted the update count")
+
+
+def test_resuming_without_a_checkpoint_fails_loudly(tmp_path):
+    """Better than silently starting a fresh run under the same name and
+    overwriting what someone was trying to recover."""
+    from cr_sim.train.run import main
+
+    assert main([
+        "--steps", "64", "--horizon", "16", "--envs", "2",
+        "--match-seconds", "20", "--eval-every", "0", "--resume",
+        "--out", str(tmp_path), "--name", "nothing-here",
+    ]) == 1
