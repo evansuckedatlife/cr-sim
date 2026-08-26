@@ -193,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             net = net_holder.get("net")
             if net is None:
+                _write(stats)
                 return
             probe = probe_holder.get("probe")
             if probe is not None and args.eval_every and stats["updates"] % args.eval_every == 0:
@@ -215,6 +216,15 @@ def main(argv: list[str] | None = None) -> int:
                     {"state_dict": net.state_dict(), "stats": stats},
                     out / "checkpoint.pt",
                 )
+            _write(stats)
+
+        def _write(stats: dict) -> None:
+            # Written *after* the evaluation, not before. The probe adds the
+            # eval fields to this same dict, so writing first recorded every
+            # row without the one number worth keeping -- the honest lift
+            # against the control lived only in the console.
+            print(json.dumps(stats), file=stream)
+            stream.flush()  # a run that dies at hour three should keep hour two
 
         # The network's shapes come from the first observation, so it does not
         # exist until the trainer has one. It hands it back here, which is what
