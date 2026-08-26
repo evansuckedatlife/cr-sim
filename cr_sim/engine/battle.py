@@ -191,6 +191,7 @@ class Battle:
         "_last_attack",
         "_spawn_timers",
         "_spawn_children",
+        "_charge",
         "actions",
         "_buff_specs",
     )
@@ -252,6 +253,9 @@ class Battle:
         self._spawn_timers: dict[int, int] = {}
         #: Children of the spawners that cap how many may live at once.
         self._spawn_children: dict[int, list[int]] = {}
+        #: Distance each charging unit has covered unobstructed, in
+        #: subtiles. Prince, Dark Prince and Battle Ram all live on this.
+        self._charge: dict[int, int] = {}
         _globals = self.data.globals_map()
         # Grace band that stops a unit flickering between two equidistant enemies.
         _ext = _globals.get('LOGIC_RANGE_EXTENSION_TO_KEEP_TARGET', 0)
@@ -794,6 +798,16 @@ class Battle:
             if entity.buffs is not None and entity.buffs.is_frozen():
                 # Frozen means frozen: no windup progress, no swing. This is
                 # why Freeze buys time rather than merely reducing damage.
+                # A stunned charger is stopped, and stopping loses the run-up.
+                if entity.spec is not None and entity.spec.charge_range:
+                    self._charge[entity.id] = 0
+                stunned = self._attacks.get(entity.id)
+                if stunned is not None:
+                    # And a stun sends a ramping attacker back to its first
+                    # stage. An Inferno Tower does not forget its target, it
+                    # starts the burn again -- which is the entire reason a
+                    # 500ms Electro Wizard zap answers the card.
+                    stunned.break_lock()
                 continue
             state = self._attacks.get(entity.id)
             if state is None:
@@ -808,6 +822,14 @@ class Battle:
         # skipped before swinging back. Mirrors must trade evenly.
         for hit in pending:
             self._last_attack[hit.attacker.id] = self.tick
+            if hit.spec.charge_range:
+                if self._is_charged(hit.attacker, hit.spec) and hit.spec.damage_special:
+                    # The charge hit. Prince's DamageSpecial is exactly double
+                    # his ordinary damage, and spending it here is what makes
+                    # blocking a Prince before he connects worth a card.
+                    hit.damage = hit.spec.damage_special
+                # Connecting spends the charge whether or not it was ready.
+                self._charge[hit.attacker.id] = 0
             if hit.spec.buff_on_damage:
                 # Electro Wizard's stun. Applied on the decision to hit rather
                 # than on impact, so a shot already in the air still stuns --
@@ -1283,6 +1305,23 @@ class Battle:
                 # river really does hold units above it.
                 entity.x, entity.y = x, y
 
+    def _accumulate_charge(self, entity: Entity, x: int, y: int) -> None:
+        """Count ground covered toward a charge.
+
+        Measured from where the unit actually ends up rather than from the step
+        it intended, so a Prince shoved sideways by a crowd or sliding along a
+        river bank builds his charge from the distance he really travelled.
+        """
+        spec = entity.spec
+        if spec is None or not spec.charge_range:
+            return
+        moved = distance(entity.x, entity.y, x, y)
+        if moved:
+            self._charge[entity.id] = self._charge.get(entity.id, 0) + moved
+
+    def _is_charged(self, entity: Entity, spec: UnitSpec) -> bool:
+        return self._charge.get(entity.id, 0) >= spec.charge_range
+
     def _phase_move_units(self) -> None:
         for entity in self.entities:
             if entity.dead or entity.is_deploying or entity.kind is not EntityKind.TROOP:
@@ -1298,11 +1337,22 @@ class Battle:
                 continue
 
             step = spec.speed_per_tick
+            if spec.charge_range and self._is_charged(entity, spec):
+                # A charged unit gallops. Prince's ChargeSpeedMultiplier is
+                # 200, and the acceleration is half of what makes the card
+                # frightening -- it closes the ground you were relying on.
+                step = step * spec.charge_speed_multiplier // 100
             if entity.buffs is not None:
                 # A frozen unit does not move at all; a slowed or raged one
                 # moves at its adjusted rate.
                 step = apply_delta(step, entity.buffs.speed_multiplier())
                 if step <= 0:
+                    # Stopped, so the run-up is lost. Checked here as well as
+                    # in the attack phase because a charger frozen on open
+                    # ground never reaches that branch at all -- it has no
+                    # target in range to be attacking.
+                    if spec.charge_range:
+                        self._charge[entity.id] = 0
                     entity.set_state(EntityState.IDLE)
                     continue
 
@@ -1376,6 +1426,7 @@ class Battle:
         unit slides along a bank rather than sticking to it.
         """
         if self.arena.is_walkable(x, y, flying=entity.flying):
+            self._accumulate_charge(entity, x, y)
             entity.x, entity.y = x, y
             return
         if self.arena.is_walkable(x, entity.y, flying=entity.flying):
@@ -1417,6 +1468,7 @@ class Battle:
                 self._last_attack.pop(entity.id, None)
                 self._spawn_timers.pop(entity.id, None)
                 self._spawn_children.pop(entity.id, None)
+                self._charge.pop(entity.id, None)
                 died = True
                 if entity.kind is EntityKind.TOWER:
                     self.players[entity.team.opponent].crowns += 1
