@@ -79,6 +79,16 @@ _PAGE = """<!doctype html>
   button:hover {{ background:#333a52; }}
   .bar {{ height:7px; background:#262b3d; border-radius:4px; overflow:hidden; margin-top:3px; }}
   .bar > i {{ display:block; height:100%; }}
+  .hand {{ display:flex; gap:6px; margin-top:8px; align-items:flex-end; }}
+  .card {{ width:52px; text-align:center; }}
+  .card .art {{ width:52px; height:52px; border-radius:7px; background:#20263a;
+                border:1px solid #333a52; object-fit:cover; display:block; }}
+  .card.dim .art {{ opacity:.32; }}
+  .card.next {{ opacity:.75; }}
+  .card .nm {{ font-size:9px; color:var(--dim); margin-top:2px;
+               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+  .card .co {{ font-size:10px; font-weight:700; }}
+  .sep {{ width:1px; align-self:stretch; background:#333a52; margin:0 3px; }}
   .legend {{ margin-top:14px; color:var(--dim); font-size:12px; }}
   .legend b {{ color:var(--fg); font-weight:600; }}
 </style>
@@ -91,15 +101,18 @@ _PAGE = """<!doctype html>
     <div class="row"><span>entities</span><span id="count">0</span></div>
     <div class="row"><span>blue elixir</span><span id="be">0</span></div>
     <div class="bar"><i id="beb" style="background:#4c8dff;width:0%"></i></div>
-    <div class="row" style="margin-top:8px"><span>red elixir</span><span id="re">0</span></div>
+    <div class="hand" id="bh"></div>
+    <div class="row" style="margin-top:10px"><span>red elixir</span><span id="re">0</span></div>
     <div class="bar"><i id="reb" style="background:#ff5c6c;width:0%"></i></div>
+    <div class="hand" id="rh"></div>
     <p><input id="s" type="range" min="0" max="0" value="0"></p>
     <p><button id="play">play</button>
        <button id="slow">0.5x</button>
        <button id="fast">4x</button></p>
     <div class="legend">
       <b>blue</b> defends the top, <b>red</b> the bottom.<br>
-      dashed ring = still deploying.<br>
+      units are drawn at their real collision radius.<br>
+      dashed ring = still deploying; dimmed card = unaffordable.<br>
       {meta}
     </div>
   </div>
@@ -111,6 +124,7 @@ const SCALE = {scale};
 const TPS = {tps};
 const REAL_TPS = {real_tps};
 const ICON_SRC = {icons};
+const COSTS = {costs};
 const ICONS = {{}};
 const HW = ARENA.half_width, HH = ARENA.half_height;
 const c = document.getElementById('c'), g = c.getContext('2d');
@@ -139,10 +153,12 @@ function draw(i) {{
   g.clearRect(0, 0, c.width, c.height);
   terrain();
   for (const e of f.e) {{
-    const [id, team, kind, x, y, hp, mhp, deploying, name] = e;
+    const [id, team, kind, x, y, hp, mhp, deploying, name, cr] = e;
     const cx = px(x), cy = px(y);
     const tower = kind === 2;
-    const r = tower ? SCALE * 1.5 : Math.max(4, SCALE * 0.55);
+    // Draw each unit at its true collision radius, so a Giant reads as bigger
+    // than a Skeleton and overlaps are visible rather than implied.
+    const r = Math.max(tower ? SCALE : 7, px(cr || 0));
     const img = ICONS[name];
     g.globalAlpha = deploying ? 0.5 : 1;
     // Team ring first, so the art sits on a coloured disc and ownership stays
@@ -177,6 +193,42 @@ function draw(i) {{
   $('re').textContent = f.x[1].toFixed(2);
   $('beb').style.width = (f.x[0] * 10) + '%';
   $('reb').style.width = (f.x[1] * 10) + '%';
+  // Hands are delta-encoded: scan back for the last frame that carried them.
+  let h = null, n = null;
+  for (let j = i; j >= 0 && !h; j--) {{ if (FRAMES[j].h) {{ h = FRAMES[j].h; n = FRAMES[j].n; }} }}
+  if (h) {{
+    hand($('bh'), h[0], n && n[0], f.x[0]);
+    hand($('rh'), h[1], n && n[1], f.x[1]);
+  }}
+}}
+
+function hand(host, cards, next, elixir) {{
+  const want = (cards || []).concat(next ? ['|', next] : []);
+  if (host.dataset.key === want.join(',') + ':' + Math.floor(elixir)) return;
+  host.dataset.key = want.join(',') + ':' + Math.floor(elixir);
+  host.innerHTML = '';
+  for (const name of want) {{
+    if (name === '|') {{
+      const s = document.createElement('div'); s.className = 'sep'; host.appendChild(s);
+      continue;
+    }}
+    const cost = COSTS[name] || 0;
+    const el = document.createElement('div');
+    el.className = 'card' + (cost > elixir ? ' dim' : '') + (name === next ? ' next' : '');
+    el.title = name;
+    const art = document.createElement(ICON_SRC[name] ? 'img' : 'div');
+    art.className = 'art';
+    if (ICON_SRC[name]) art.src = ICON_SRC[name];
+    el.appendChild(art);
+    const co = document.createElement('div');
+    co.className = 'co';
+    co.style.color = cost > elixir ? '#6d7391' : '#c9a3ff';
+    co.textContent = cost ? cost + 'e' : '';
+    el.appendChild(co);
+    const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = name;
+    el.appendChild(nm);
+    host.appendChild(el);
+  }}
 }}
 
 let playing = false, speed = 1, acc = 0, last = 0;
@@ -221,6 +273,7 @@ def render_replay(
     meta: str = "",
     real_tps: int | None = None,
     icons: Mapping[str, str] | None = None,
+    costs: Mapping[str, int] | None = None,
 ) -> Path:
     """Write a standalone HTML replay of ``frames``.
 
@@ -233,7 +286,15 @@ def render_replay(
         "half_height": arena.half_height,
         "cells": list(arena.cells),
     }
+    # Names needing art: every unit that appears on the board, plus every card
+    # that appears in either hand, since the panel draws those too.
     present = {e[8] for frame in frames for e in frame.get("e", ())}
+    for frame in frames:
+        for hand in frame.get("h", ()) or ():
+            present.update(hand)
+        for nxt in frame.get("n", ()) or ():
+            if nxt:
+                present.add(nxt)
     embedded = {
         name: _data_uri(Path(path))
         for name, path in (icons or {}).items()
@@ -241,6 +302,9 @@ def render_replay(
     }
     page = _PAGE.format(
         icons=json.dumps(embedded, separators=(",", ":")),
+        costs=json.dumps(
+            {k: v for k, v in (costs or {}).items() if k in present}, separators=(",", ":")
+        ),
         real_tps=real_tps or ticks_per_second,
         arena=json.dumps(arena_payload, separators=(",", ":")),
         frames=json.dumps(list(frames), separators=(",", ":")),

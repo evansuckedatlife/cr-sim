@@ -237,6 +237,7 @@ def cmd_battle(args) -> int:
             ticks_per_second=args.tps / max(1, args.frame_interval),
             real_tps=args.tps,
             icons=build_icon_map(registry),
+            costs={c.name: c.mana_cost for c in registry.standard()},
             meta=f"seed {args.seed} &middot; {args.tps} TPS &middot; level {args.level}",
         )
         print(f"\nwrote {out}  ({len(battle.frames)} frames) - open it in a browser")

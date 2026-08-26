@@ -129,6 +129,7 @@ class Battle:
         "_phase_fns",
         "frames",
         "_towers",
+        "_last_hands",
     )
 
     def __init__(
@@ -159,6 +160,7 @@ class Battle:
         self._towers: dict[Team, list[Entity]] = {Team.BLUE: [], Team.RED: []}
         self._pending: list[Command] = []
         self.frames: list[dict] = []
+        self._last_hands = None
         self.tick = 0
         self.finished = False
         self.result: BattleResult | None = None
@@ -296,6 +298,21 @@ class Battle:
         if self.config.record_frames and self.tick % max(1, self.config.frame_interval) == 0:
             self._capture_frame()
 
+    def _hand_delta(self) -> dict:
+        """Hands, but only when they change.
+
+        Hands are identical on the vast majority of ticks, and repeating them in
+        every frame tripled the replay file for no information. The viewer
+        carries the last value forward.
+        """
+        hands = [list(self.players[Team.BLUE].hand), list(self.players[Team.RED].hand)]
+        nxt = [self.players[Team.BLUE].next_card, self.players[Team.RED].next_card]
+        current = (hands, nxt)
+        if getattr(self, "_last_hands", None) == current:
+            return {}
+        self._last_hands = current
+        return {"h": hands, "n": nxt}
+
     def _capture_frame(self) -> None:
         """Snapshot the board for the replay viewer.
 
@@ -316,11 +333,15 @@ class Battle:
                         e.max_hitpoints,
                         1 if e.is_deploying else 0,
                         getattr(e.spec, "name", "?"),
+                        # Real collision radius, so the viewer can draw each
+                        # unit at its true footprint instead of a token dot.
+                        e.collision_radius,
                     ]
                     for e in self.entities
                     if not e.dead
                 ],
                 "x": [self.players[Team.BLUE].elixir.exact, self.players[Team.RED].elixir.exact],
+                **self._hand_delta(),
             }
         )
 
