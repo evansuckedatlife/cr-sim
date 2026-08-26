@@ -23,7 +23,7 @@ from cr_sim.engine.actions import (
     ExpressionError,
     evaluate_expression,
 )
-from cr_sim.engine.battle import Battle, BattleConfig
+from cr_sim.engine.battle import CLONE_HITPOINTS, Battle, BattleConfig
 from cr_sim.engine.entity import EntityKind, Team
 from cr_sim.engine.fixed import tiles, to_tiles
 
@@ -246,16 +246,12 @@ def test_no_playable_card_hits_an_unsupported_action_node(world):
     """
     data, levels, registry = world
     known = {
-        "ActionClone",
-        "ActionCounter",
-        "ActionGiantBufferCollectFriends",
-        "ActionPlayAnimationIfHasTarget",
-        "ActionRunActionAtHealth",
-        "ActionRunActionListOnObjectsInShapeWithPrio",
-        "ActionRunIfGameObjectExists",
-        "ActionSkeletonBarrelPopBalloon",
-        "ActionTargetIndicatorAttack",
-        "<spawntype:AreaEffectType>",
+        "ActionCounter",                             # Ronin's parry
+        "ActionGiantBufferCollectFriends",           # Giant Buffer, an event card
+        "ActionRunActionAtHealth",                   # fires below a health threshold
+        "ActionRunActionListOnObjectsInShapeWithPrio",  # needs the Shape definitions
+        "ActionSkeletonBarrelPopBalloon",            # the Skeleton Balloon evolution
+        "ActionTargetIndicatorAttack",               # Goblin Machine's second attack
     }
 
     seen: set[str] = set()
@@ -272,3 +268,70 @@ def test_no_playable_card_hits_an_unsupported_action_node(world):
         seen.update(battle.actions.unsupported)
 
     assert seen <= known, f"new unsupported action nodes: {sorted(seen - known)}"
+
+
+# ------------------------------------------------------------------- clone
+
+
+def test_clone_duplicates_a_friendly_troop(world):
+    """The spell acts per unit, not at a point.
+
+    It arrives through the area effect's ``OnHitAction`` with the touched unit
+    as its source, which is the only way a spell that duplicates *each* troop
+    it covers can work. Running it once at the centre would duplicate nothing.
+    """
+    # The unit is placed directly rather than played: only four of a deck's
+    # eight cards are in hand at a time, so playing a specific one depends on
+    # the shuffle. What is under test is the cloning, not the draw.
+    battle = _battle(world, "Clone")
+    battle._spawn_units(
+        team=Team.BLUE, character="DarkPrince", count=1,
+        x=tiles(9), y=tiles(12), rarity="Epic",
+    )
+    for _ in range(120):
+        battle.step()
+
+    battle.players[Team.BLUE].elixir.add(10)
+    assert battle.play_card(Team.BLUE, "Clone", tiles(9), tiles(12))
+    for _ in range(90):
+        battle.step()
+
+    princes = [
+        e for e in battle.entities
+        if e.spec is not None and e.spec.name == "DarkPrince" and not e.dead
+    ]
+    assert len(princes) == 2, f"{len(princes)} Dark Princes after a Clone"
+
+    clone = next(e for e in princes if e.is_clone)
+    original = next(e for e in princes if not e.is_clone)
+    assert clone.hitpoints == CLONE_HITPOINTS
+    # The shield is preserved and the body is not, which is the entire reason
+    # cloning a Dark Prince is worth three elixir.
+    assert clone.shield == original.shield > 0
+    assert (clone.x, clone.y) != (original.x, original.y), "the clone was stacked"
+
+
+def test_a_clone_cannot_itself_be_cloned(world):
+    """CLONE_CLONED_UNITS is False.
+
+    Two 3-elixir spells would otherwise quadruple a push rather than double it.
+    """
+    battle = _battle(world, "Clone")
+    battle._spawn_units(
+        team=Team.BLUE, character="Knight", count=1,
+        x=tiles(9), y=tiles(12), rarity="Common",
+    )
+    for _ in range(120):
+        battle.step()
+
+    for _ in range(2):
+        battle.players[Team.BLUE].elixir.add(10)
+        battle.play_card(Team.BLUE, "Clone", tiles(9), tiles(12))
+        for _ in range(90):
+            battle.step()
+
+    knights = [
+        e for e in battle.entities
+        if e.spec is not None and e.spec.name == "Knight" and not e.dead
+    ]
+    assert len(knights) == 3, f"{len(knights)} Knights; two Clones should give three"

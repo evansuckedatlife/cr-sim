@@ -64,7 +64,22 @@ from .rng import Rng
 from .spatial import SpatialIndex
 from .specs import UnitSpec, build_tower_spec, build_unit_spec
 
-__all__ = ["Battle", "BattleConfig", "Player", "BattleResult", "KING_ACTIVATION_MS"]
+__all__ = [
+    "Battle", "BattleConfig", "Player", "BattleResult", "KING_ACTIVATION_MS",
+    "CLONE_HITPOINTS",
+]
+
+#: A clone's hitpoints. Every other number the Clone spell needs is in the
+#: build -- the offset, the shield rule, whether a clone may be cloned -- but
+#: this one is in none of them, so it is the card's documented behaviour rather
+#: than a value read from the files. See `clone-hitpoints` in
+#: reference/anchors.json.
+CLONE_HITPOINTS = 1
+
+
+def _int_global(globals_map: dict, key: str, default: int) -> int:
+    value = globals_map.get(key, default)
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
 
 #: How long a provoked King Tower takes to join the fight. This build replaced
 #: the old ``KING_ACTIVATE_TIME_MS`` global with an ``ActionWithDuration`` of
@@ -214,7 +229,14 @@ class Battle:
         self.arena = arena or load_arena(data)
         self.timeline: BattleTimeline = build_timeline(data, clock=self.clock)
         self.rng = Rng(self.config.seed)
-        self.actions = ActionInterpreter(self.data, self.clock, self._spawn_units)
+        self.actions = ActionInterpreter(
+            self.data,
+            self.clock,
+            self._spawn_units,
+            self._clone_entity,
+            self._place_area_from_action,
+            self._count_living,
+        )
 
         reset_entity_ids()
         self.entities: list[Entity] = []
@@ -1015,12 +1037,12 @@ class Battle:
         )
         self.entities.append(effect)
         self._by_id_map[effect.id] = effect
-        if aspec.action:
+        if aspec.on_start_action:
             # The reworked spells keep everything here. AEO.Graveyard_rework
             # carries only a radius and a lifetime; its twelve skeletons, their
             # timings and their ring positions are all in the action graph.
             self.actions.start(
-                aspec.action,
+                aspec.on_start_action,
                 ActionContext(team=team, x=x, y=y, source=effect),
                 self.tick,
             )
@@ -1291,6 +1313,17 @@ class Battle:
                     continue
                 if distance(entity.x, entity.y, victim.x, victim.y) > aspec.radius + victim.collision_radius:
                     continue
+                if aspec.on_hit_action:
+                    # Per affected entity, not once at the centre. Clone acts on
+                    # each friendly troop it touches; running it at the point
+                    # cast would duplicate nothing at all.
+                    self.actions.run(
+                        aspec.on_hit_action,
+                        ActionContext(
+                            team=entity.team, x=victim.x, y=victim.y, source=victim
+                        ),
+                        self.tick,
+                    )
                 if aspec.buff:
                     # Keyed by the effect's own id, so re-touching a unit every
                     # scan refreshes its status instead of stacking a new copy
@@ -1664,6 +1697,70 @@ class Battle:
             self._begin_actions(unit)
             spawned.append(unit)
         return spawned
+
+    def _place_area_from_action(
+        self, team: Team, name: str, x: int, y: int, source: Entity | None
+    ) -> None:
+        """Place an area effect on behalf of an action node."""
+        spec = source.spec if source is not None else None
+        self._place_area(
+            team, name,
+            spec.rarity if spec is not None else "Common",
+            spec.level if spec is not None else self.config.level,
+            x, y,
+            owner_id=source.id if source is not None else 0,
+        )
+
+    def _count_living(self, team: Team, names: set[str]) -> int:
+        """How many living units of the given names a team has on the board."""
+        return sum(
+            1
+            for entity in self.entities
+            if not entity.dead
+            and entity.team is team
+            and entity.spec is not None
+            and entity.spec.name in names
+        )
+
+    def _clone_entity(self, source: Entity) -> Entity | None:
+        """Duplicate a troop, the way the Clone spell does.
+
+        A clone is the same unit with one hitpoint. Full damage, full speed,
+        the original's shield if it had one -- which is the whole reason to
+        clone a Dark Prince, and why the spell is a damage multiplier rather
+        than a health one.
+
+        The single hitpoint is the one figure not in this build: not in
+        ``ACTION.CloneAction``, not in ``BUFF.Clone``, and not in any
+        ``CLONE_*`` global. It is applied as the card's known behaviour and
+        recorded as an open anchor rather than passed off as data.
+        """
+        spec = source.spec
+        if spec is None:
+            return None
+        globals_map = self.data.globals_map()
+        offset_x = _int_global(globals_map, "CLONE_DISTANCE_X", 0) * 18
+        offset_y = _int_global(globals_map, "CLONE_DISTANCE_Y", 250) * 18
+        keep_shield = globals_map.get("CLONE_PRESERVE_SHIELD") is True
+
+        clone = Entity(
+            kind=spec.kind,
+            team=source.team,
+            x=source.x + offset_x,
+            y=source.y + offset_y * (1 if source.team is Team.BLUE else -1),
+            hitpoints=CLONE_HITPOINTS,
+            spec=spec,
+            spawn_tick=self.tick,
+            collision_radius=source.collision_radius,
+            mass=source.mass,
+            flying=source.flying,
+            shield=source.shield if keep_shield else 0,
+            lifetime_ticks=spec.lifetime_ticks,
+        )
+        clone.max_hitpoints = CLONE_HITPOINTS
+        clone.is_clone = True
+        self._register(clone)
+        return clone
 
     def _begin_actions(self, entity: Entity) -> None:
         """Fire an entity's ``OnStartingAction``, if it has one."""

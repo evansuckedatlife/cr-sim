@@ -1,0 +1,29 @@
+{
+  "total_steps": 300000,
+  "horizon": 256,
+  "num_envs": 8,
+  "epochs": 4,
+  "minibatches": 4,
+  "learning_rate": 0.0003,
+  "gamma": 0.997,
+  "gae_lambda": 0.95,
+  "clip_coefficient": 0.2,
+  "value_coefficient": 0.5,
+  "entropy_coefficient": 0.02,
+  "max_grad_norm": 0.5,
+  "seed": 0,
+  "log_every": 1,
+  "deck": [
+    "Knight",
+    "Musketeer",
+    "Cannon",
+    "Skeletons",
+    "IceSpirits",
+    "Log",
+    "Fireball",
+    "Goblins"
+  ],
+  "tps": 20,
+  "frame_skip": 10,
+  "match_seconds": 120
+}

@@ -253,6 +253,14 @@
       "why_it_matters": "Heal is a 1-elixir card whose whole value is the size of the top-up; the mechanism is verified but the magnitude is not.",
       "status": "open",
       "how_to_resolve": "Damage a Knight in-game, drop a Heal Spirit on it, read the hitpoints back. The per-application rhythm (4 x 250ms) is already confirmed from HealPerSecond/HitFrequency/BuffTime and is not in question -- only the scaled total."
+    },
+    {
+      "id": "clone-hitpoints",
+      "question": "A Clone's hitpoints. Every other detail of the spell is in the build -- the 0.25 tile offset (CLONE_DISTANCE_Y), that the shield is preserved (CLONE_PRESERVE_SHIELD), that a clone cannot be cloned (CLONE_CLONED_UNITS) -- but the clone's own hitpoint value is in none of them.",
+      "why_it_matters": "It is the whole balance of the card: full damage on a body that dies to anything. Getting it wrong in either direction turns a 3-elixir damage multiplier into either a no-op or a second push.",
+      "status": "open",
+      "how_to_resolve": "Clone a Knight in-game and hit the clone once with anything. The engine uses 1, which is the card's universally documented behaviour, but it is applied as known behaviour rather than read from the files and should be confirmed.",
+      "note": "Searched ACTION.CloneAction, BUFF.Clone and every CLONE_* global in this build; none carries a hitpoint value. Likely hardcoded client-side."
     }
   ]
 }

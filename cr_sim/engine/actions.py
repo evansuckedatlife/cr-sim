@@ -53,7 +53,7 @@ from typing import Any, Callable, Mapping
 
 from ..data.source import LogicData, UnknownEntity
 from .constants import TickClock
-from .entity import Entity, Team
+from .entity import Entity, EntityKind, Team
 
 __all__ = [
     "ActionContext",
@@ -281,6 +281,7 @@ class ActionContext:
 #: second is a gap worth reporting.
 COSMETIC_CLASSES = frozenset({
     "ActionPlayEffect",
+    "ActionPlayAnimationIfHasTarget",
     "ActionRunForcedAnimationOnce",
     "ActionStopForcedAnimation",
     "ActionAnimatorLayer",
@@ -313,19 +314,28 @@ class ActionInterpreter:
     whatever is due each tick.
     """
 
-    __slots__ = ("data", "clock", "_spawn", "_pending", "unsupported", "_cache")
+    __slots__ = (
+        "data", "clock", "_spawn", "_clone", "_place_area", "_count_units",
+        "_pending", "unsupported", "_cache",
+    )
 
     def __init__(
         self,
         data: LogicData,
         clock: TickClock,
         spawn: Callable[..., list[Entity]],
+        clone: Callable[[Entity], Entity | None] | None = None,
+        place_area: Callable[..., Any] | None = None,
+        count_units: Callable[[Team, set[str]], int] | None = None,
     ) -> None:
         self.data = data
         self.clock = clock
         #: Injected rather than reached for, so this module never imports the
         #: battle and the two can be tested apart.
         self._spawn = spawn
+        self._clone = clone or (lambda entity: None)
+        self._place_area = place_area or (lambda *a, **k: None)
+        self._count_units = count_units or (lambda team, names: 0)
         self._pending: list[_Pending] = []
         #: ClassTypes seen but not implemented, with how often. The engine's
         #: gaps should be enumerable rather than discovered one card at a time.
@@ -489,9 +499,14 @@ def _handle_spawn(
     if not isinstance(what, str) or not what:
         return
     spawn_type = str(row.get("SpawnType", "CharacterType"))
+    if spawn_type in ("AreaEffectType", "AreaEffectObject"):
+        # An action can place a cloud instead of a unit. Routed to the area
+        # effect path rather than spawned as a troop, which would put a
+        # 1-hitpoint object on the board for the enemy to walk into.
+        x, y = interp.position_for(row, ctx)
+        interp._place_area(ctx.team, what, x, y, ctx.source)
+        return
     if spawn_type not in ("CharacterType", "", "Character"):
-        # Projectile and area-effect spawn types exist; they are not units and
-        # are recorded rather than mis-spawned as troops.
         interp.unsupported[f"<spawntype:{spawn_type}>"] += 1
         return
     x, y = interp.position_for(row, ctx)
@@ -597,6 +612,61 @@ def _handle_hut_life_state(
         interp.schedule(row["Name"], ctx, tick, interval)
 
 
+def _handle_run_if_exists(
+    interp: ActionInterpreter, row: Mapping[str, Any], ctx: ActionContext, tick: int
+) -> None:
+    """``ActionRunIfGameObjectExists``: branch on what is on the board.
+
+    Counts friendly units whose name is in ``MatchName`` and runs one action if
+    there are at least ``NumMatchesNeeded`` of them, another if not. The Boss
+    Bandit uses it to greet her gang, so the branch not taken matters as much
+    as the branch taken -- falling through silently would leave the unit doing
+    nothing at all rather than taking its default path.
+    """
+    names = row.get("MatchName")
+    if isinstance(names, str):
+        names = [names]
+    wanted = {n for n in (names or ()) if isinstance(n, str)}
+    needed = row.get("NumMatchesNeeded")
+    needed = needed if isinstance(needed, int) and needed > 0 else 1
+
+    found = interp._count_units(ctx.team, wanted) if wanted else 0
+    target = (
+        row.get("ActionToRun") if found >= needed else row.get("ActionToRunIfNoMatch")
+    )
+    if isinstance(target, str) and target:
+        interp.schedule(target, ctx, tick, row.get("ActionDelay", 0))
+
+
+def _handle_clone(
+    interp: ActionInterpreter, row: Mapping[str, Any], ctx: ActionContext, tick: int
+) -> None:
+    """``ActionClone``: duplicate the friendly troop this ran on.
+
+    The Clone spell acts per unit rather than at a point, which is why it
+    arrives here through the area effect's ``OnHitAction`` with the touched
+    unit as its source.
+
+    The globals settle the details the action row does not carry:
+    ``CLONE_DISTANCE_Y`` (250) offsets the copy a quarter tile so it is not
+    perfectly overlapped with its original, ``CLONE_PRESERVE_SHIELD`` keeps a
+    Dark Prince's shield -- the reason cloning one is worth doing -- and
+    ``CLONE_CLONED_UNITS`` is False, so a clone cannot itself be cloned.
+
+    A clone's single hitpoint is the one part not in the data. It is not in the
+    action row, the buff, or any global in this build, so it is applied as the
+    card's known behaviour and recorded in reference/anchors.json rather than
+    presented as something the files said.
+    """
+    source = ctx.source
+    if source is None or source.dead or source.is_clone:
+        return
+    spec = source.spec
+    if spec is None or source.kind is not EntityKind.TROOP:
+        return
+    interp._clone(source)
+
+
 def _handle_kill(
     interp: ActionInterpreter, row: Mapping[str, Any], ctx: ActionContext, tick: int
 ) -> None:
@@ -616,5 +686,7 @@ _HANDLERS: dict[str, Handler] = {
     "ActionActivateOnCardDeploy": _handle_next,
     "ActionInterval": _handle_interval,
     "ActionKill": _handle_kill,
+    "ActionClone": _handle_clone,
+    "ActionRunIfGameObjectExists": _handle_run_if_exists,
     "ActionGoblinHutLifeState": _handle_hut_life_state,
 }

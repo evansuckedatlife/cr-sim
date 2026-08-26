@@ -80,10 +80,13 @@ class AreaEffectSpec:
     @property
     def spawns_over_time(self) -> bool:
         return bool(self.spawn_character and self.spawn_interval_ticks > 0)
-    #: Named ACTION driving it, for the effects defined entirely in the action
-    #: graph (Graveyard, Vines, Clone). Recorded so they are visible rather
-    #: than silently inert; the interpreter lands in M6.
-    action: str | None
+    #: Action fired once, where the effect lands. Graveyard's whole trickle.
+    on_start_action: str | None
+    #: Action fired **per affected entity**, every time the effect applies.
+    #: Clone's is here: the spell does not do something at a point, it does
+    #: something to each friendly troop it touches, and running it once at the
+    #: centre would duplicate nothing.
+    on_hit_action: str | None
 
     @property
     def is_instant(self) -> bool:
@@ -172,7 +175,8 @@ def build_area_effect_spec(
         ),
         spawn_deploy_ticks=clock.ticks(raw.get("SpawnTime")),
         spawn_randomize=_bool(raw.get("SpawnRandomizeSequence")),
-        action=_str(raw.get("OnStartingAction")) or _str(raw.get("OnHitAction")),
+        on_start_action=_str(raw.get("OnStartingAction")),
+        on_hit_action=_str(raw.get("OnHitAction")),
     )
 
 

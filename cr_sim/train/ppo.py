@@ -142,12 +142,18 @@ def train(
     *,
     device: str = "cpu",
     on_update: Callable[[dict], None] | None = None,
+    on_net: Callable[[ActorCritic], None] | None = None,
 ) -> ActorCritic:
     """Run PPO and return the trained network.
 
     ``make_env`` takes an index so each environment can be seeded differently;
     identical seeds across the batch would collect the same battle several
     times over and report a misleadingly smooth return.
+
+    ``on_net`` is handed the network as soon as it is built. Its shapes come
+    from the first observation, so a caller that wants to checkpoint mid-run
+    cannot construct it in advance and would otherwise have nothing to save
+    until the whole job returns.
     """
     torch.manual_seed(config.seed)
     rng = np.random.default_rng(config.seed)
@@ -173,6 +179,8 @@ def train(
         )
     ).to(device)
     optimiser = torch.optim.Adam(net.parameters(), lr=config.learning_rate, eps=1e-5)
+    if on_net is not None:
+        on_net(net)
 
     steps_done = 0
     episode_returns: list[float] = []

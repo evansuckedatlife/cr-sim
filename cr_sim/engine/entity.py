@@ -110,6 +110,7 @@ class Entity:
         "dead",
         "lifetime_left",
         "buffs",
+        "is_clone",
     )
 
     def __init__(
@@ -155,6 +156,11 @@ class Entity:
         #: Timed status effects. Created lazily -- most entities never carry
         #: one, and a battle holds hundreds of entities.
         self.buffs = None
+        #: Produced by a Clone spell. Kept because the game's own
+        #: CLONE_CLONED_UNITS global is False: a second Clone cast over the
+        #: first one's output must not double it again, or two 3-elixir spells
+        #: would quadruple a push.
+        self.is_clone = False
 
     # ------------------------------------------------------------- lifecycle
 
