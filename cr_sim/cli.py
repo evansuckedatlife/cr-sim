@@ -131,6 +131,133 @@ def cmd_validate(args) -> int:
     return 0 if ok else 1
 
 
+#: A couple of recognisable decks so `battle` works with no arguments.
+DECKS = {
+    "hog_cycle": ("HogRider", "Musketeer", "Cannon", "Skeletons", "IceSpirits", "Log", "Fireball", "Goblins"),
+    "giant_beatdown": ("Giant", "Musketeer", "MiniPekka", "Archer", "Zap", "Fireball", "Knight", "Bomber"),
+    "golem_beatdown": ("Golem", "BabyDragon", "Wizard", "MegaMinion", "Barbarians", "Zap", "Arrows", "Knight"),
+}
+
+
+def _resolve_deck(name: str) -> tuple[str, ...]:
+    if name in DECKS:
+        return DECKS[name]
+    return tuple(part.strip() for part in name.split(",") if part.strip())
+
+
+def cmd_battle(args) -> int:
+    from .engine.battle import Battle, BattleConfig
+    from .engine.entity import Team
+    from .engine.fixed import SUBTILES_PER_TILE, to_tiles
+    from .render.web import render_ascii, render_replay
+
+    data, levels, registry = _load(args.build)
+    blue, red = _resolve_deck(args.blue), _resolve_deck(args.red)
+    for deck, label in ((blue, "blue"), (red, "red")):
+        missing = [c for c in deck if registry.get(c) is None]
+        if missing:
+            print(f"unknown {label} card(s): {missing}", file=sys.stderr)
+            return 1
+
+    battle = Battle(
+        data,
+        levels,
+        registry,
+        BattleConfig(
+            seed=args.seed,
+            ticks_per_second=args.tps,
+            blue_deck=blue,
+            red_deck=red,
+            level=args.level,
+            record_frames=args.html is not None,
+            frame_interval=args.frame_interval,
+        ),
+    )
+    print(f"seed={args.seed} tps={args.tps} level={args.level}")
+    print(f"blue: {', '.join(blue)}")
+    print(f"red:  {', '.join(red)}")
+    print(f"blue opening hand: {battle.players[Team.BLUE].hand}")
+
+    # Scripted deployments so there is something to watch. M2 replaces this
+    # with real agents; for now it exercises deploy, routing and the tick loop.
+    tile = SUBTILES_PER_TILE
+    script = [
+        (int(1.5 * args.tps), Team.BLUE, 0, 3.5, 12.0),
+        (int(4.0 * args.tps), Team.RED, 0, 14.5, 20.0),
+        (int(8.0 * args.tps), Team.BLUE, 1, 9.0, 10.0),
+        (int(12.0 * args.tps), Team.RED, 1, 3.5, 22.0),
+    ]
+    pending = list(script)
+    played: list[str] = []
+
+    limit = args.ticks if args.ticks else battle.timeline.total_ticks
+    while battle.tick < limit and not battle.finished:
+        while pending and pending[0][0] <= battle.tick:
+            _t, team, slot, tx, ty = pending.pop(0)
+            hand = battle.players[team].hand
+            if slot < len(hand):
+                card = hand[slot]
+                if battle.play_card(team, card, int(tx * tile), int(ty * tile)):
+                    played.append(f"t={battle.tick / args.tps:.1f}s {team.name} {card} @({tx},{ty})")
+        battle.step()
+
+    result = battle.result or battle._decide("time")
+    print("\ndeployments:")
+    for line in played:
+        print(f"  {line}")
+    alive = [e for e in battle.entities if not e.dead and int(e.kind) != 2]
+    print(f"\nafter {battle.tick} ticks ({battle.tick / args.tps:.1f}s): {len(alive)} unit(s) alive")
+    for e in alive:
+        print(
+            f"  {getattr(e.spec, 'name', '?'):16} {e.team.name:5} "
+            f"({to_tiles(e.x):>6.2f},{to_tiles(e.y):>6.2f}) hp={e.hitpoints}"
+        )
+    print(f"\nresult: {result.reason}, crowns {result.blue_crowns}-{result.red_crowns}")
+    print(f"state hash: {battle.hash():016x}")
+
+    if args.ascii:
+        print("\n" + render_ascii(battle.arena, battle.entities))
+    if args.html:
+        out = render_replay(
+            battle.arena,
+            battle.frames,
+            args.html,
+            # playback advances one frame at a time; the clock still counts real ticks
+            ticks_per_second=args.tps / max(1, args.frame_interval),
+            real_tps=args.tps,
+            meta=f"seed {args.seed} &middot; {args.tps} TPS &middot; level {args.level}",
+        )
+        print(f"\nwrote {out}  ({len(battle.frames)} frames) - open it in a browser")
+    return 0
+
+
+def cmd_arena(args) -> int:
+    from .engine.arena import load_arena
+    from .engine.entity import Team
+    from .engine.fixed import to_tiles
+
+    data, _levels, _registry = _load(args.build)
+    arena = load_arena(data)
+    top, bottom = arena.river_band()
+    print(f"{arena.width_tiles} x {arena.height_tiles} tiles  (source: {arena.source})")
+    print(f"river:   y {to_tiles(top)} -> {to_tiles(bottom)}   midline y={to_tiles(arena.midline())}")
+    for i, (lo, hi, centre) in enumerate(arena.bridges()):
+        print(
+            f"bridge {i}: x {to_tiles(lo)}..{to_tiles(hi)} "
+            f"({to_tiles(hi - lo)} tiles wide), centre x={to_tiles(centre)}"
+        )
+    print("towers:")
+    for tower in arena.towers:
+        print(f"  {tower.name:14} {tower.team.name:5} ({to_tiles(tower.x):>5}, {to_tiles(tower.y):>5})")
+    for team in (Team.BLUE, Team.RED):
+        low, high = arena.own_half(team)
+        print(f"{team.name} deploy zone: y {to_tiles(low)} .. {to_tiles(high)}")
+    if args.map:
+        print()
+        print(arena.render())
+    return 0
+
+
 def cmd_freeze(args) -> int:
     data, levels, registry = _load(args.build)
     provenance = args.build / "_PROVENANCE.txt"
@@ -161,6 +288,22 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("validate", help="run the stat gate")
     p.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE)
     p.set_defaults(func=cmd_validate)
+
+    p = sub.add_parser("battle", help="run a battle and optionally write an HTML replay")
+    p.add_argument("--blue", default="hog_cycle", help="deck name or comma-separated cards")
+    p.add_argument("--red", default="giant_beatdown")
+    p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--tps", type=int, default=60)
+    p.add_argument("--level", type=int, default=TOURNAMENT_DISPLAY_LEVEL)
+    p.add_argument("--ticks", type=int, default=0, help="stop early (0 = full match)")
+    p.add_argument("--html", type=Path, help="write a standalone replay viewer here")
+    p.add_argument("--ascii", action="store_true", help="print a terminal snapshot")
+    p.add_argument("--frame-interval", type=int, default=3, help="record 1 viewer frame every N ticks")
+    p.set_defaults(func=cmd_battle)
+
+    p = sub.add_parser("arena", help="print the arena geometry")
+    p.add_argument("--map", action="store_true", help="draw the terrain grid")
+    p.set_defaults(func=cmd_arena)
 
     p = sub.add_parser("freeze", help="re-freeze the regression baseline")
     p.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE)

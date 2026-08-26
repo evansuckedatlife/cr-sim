@@ -75,6 +75,9 @@ class BattleConfig:
     red_deck: tuple[str, ...] = ()
     level: int = 11
     record_frames: bool = False
+    #: Record one viewer frame every N ticks. Viewing does not need 60fps, and
+    #: a full match at every tick is several megabytes of JSON.
+    frame_interval: int = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +126,7 @@ class Battle:
         "_specs",
         "_pending",
         "_phase_fns",
+        "frames",
     )
 
     def __init__(
@@ -148,6 +152,7 @@ class Battle:
         self._routes: dict[int, Route] = {}
         self._specs: dict[str, UnitSpec] = {}
         self._pending: list[Command] = []
+        self.frames: list[dict] = []
         self.tick = 0
         self.finished = False
         self.result: BattleResult | None = None
@@ -280,6 +285,36 @@ class Battle:
         for phase in self._phase_fns:
             phase()
         self.tick += 1
+        if self.config.record_frames and self.tick % max(1, self.config.frame_interval) == 0:
+            self._capture_frame()
+
+    def _capture_frame(self) -> None:
+        """Snapshot the board for the replay viewer.
+
+        Frames are cosmetic and never hashed, so recording them cannot change a
+        battle's outcome -- only its memory use.
+        """
+        self.frames.append(
+            {
+                "t": self.tick,
+                "e": [
+                    [
+                        e.id,
+                        int(e.team),
+                        int(e.kind),
+                        e.x,
+                        e.y,
+                        e.hitpoints,
+                        e.max_hitpoints,
+                        1 if e.is_deploying else 0,
+                        getattr(e.spec, "name", "?"),
+                    ]
+                    for e in self.entities
+                    if not e.dead
+                ],
+                "x": [self.players[Team.BLUE].elixir.exact, self.players[Team.RED].elixir.exact],
+            }
+        )
 
     def run(self, max_ticks: int | None = None) -> BattleResult:
         limit = max_ticks if max_ticks is not None else self.timeline.total_ticks
