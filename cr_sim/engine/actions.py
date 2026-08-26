@@ -301,7 +301,7 @@ COSMETIC_CLASSES = frozenset({
 @dataclass(slots=True)
 class _Pending:
     due_tick: int
-    action: str
+    action: "str | Mapping[str, Any]"
     context: ActionContext
 
 
@@ -316,7 +316,7 @@ class ActionInterpreter:
 
     __slots__ = (
         "data", "clock", "_spawn", "_clone", "_place_area", "_count_units",
-        "_pending", "unsupported", "_cache",
+        "_apply_buff_action", "_pending", "unsupported", "_cache",
     )
 
     def __init__(
@@ -327,6 +327,7 @@ class ActionInterpreter:
         clone: Callable[[Entity], Entity | None] | None = None,
         place_area: Callable[..., Any] | None = None,
         count_units: Callable[[Team, set[str]], int] | None = None,
+        apply_buff: Callable[..., None] | None = None,
     ) -> None:
         self.data = data
         self.clock = clock
@@ -336,6 +337,7 @@ class ActionInterpreter:
         self._clone = clone or (lambda entity: None)
         self._place_area = place_area or (lambda *a, **k: None)
         self._count_units = count_units or (lambda team, names: 0)
+        self._apply_buff_action = apply_buff or (lambda ctx, name, row: None)
         self._pending: list[_Pending] = []
         #: ClassTypes seen but not implemented, with how often. The engine's
         #: gaps should be enumerable rather than discovered one card at a time.
@@ -366,7 +368,13 @@ class ActionInterpreter:
 
     # -- scheduling --------------------------------------------------------
 
-    def schedule(self, name: str, context: ActionContext, tick: int, delay_ms: Any = 0) -> None:
+    def schedule(
+        self,
+        name: "str | Mapping[str, Any]",
+        context: ActionContext,
+        tick: int,
+        delay_ms: Any = 0,
+    ) -> None:
         self._pending.append(
             _Pending(tick + self.clock.ticks(delay_ms), name, context)
         )
@@ -386,9 +394,18 @@ class ActionInterpreter:
         else:
             self.run(name, context, tick)
 
-    def run(self, name: str, context: ActionContext, tick: int) -> None:
-        """Execute one action now, scheduling whatever it defers."""
-        row = self.resolve(name)
+    def run(self, name: "str | Mapping[str, Any]", context: ActionContext, tick: int) -> None:
+        """Execute one action now, scheduling whatever it defers.
+
+        ``name`` may be a name to look up or the action itself. Nineteen
+        actions in this build are written inline rather than referenced --
+        Goblin Curse's buffs and Dark Magic's whole effect among them -- and a
+        reader that only accepted names dropped every one of them silently.
+        """
+        if isinstance(name, Mapping):
+            row: Mapping[str, Any] | None = name
+        else:
+            row = self.resolve(name)
         if row is None:
             self.unsupported[f"<missing:{name}>"] += 1
             return
@@ -485,7 +502,7 @@ def _handle_group(
     if isinstance(subs, str):
         subs = [subs]
     for index, sub in enumerate(subs):
-        if not isinstance(sub, str):
+        if not isinstance(sub, (str, Mapping)) or (isinstance(sub, str) and not sub):
             continue
         delay = delays[index] if index < len(delays) else 0
         interp.schedule(sub, ctx, tick, delay)
@@ -496,9 +513,20 @@ def _handle_spawn(
 ) -> None:
     """``ActionSpawn`` / ``ActionSpawnToLocation``: put a character on the board."""
     what = row.get("SpawnData")
+    if isinstance(what, Mapping):
+        # An inline definition rather than a reference. Dark Magic's damage
+        # tiers are written this way, as whole buffs inside the action.
+        what = str(what.get("Name") or "")
     if not isinstance(what, str) or not what:
         return
     spawn_type = str(row.get("SpawnType", "CharacterType"))
+    if spawn_type == "BuffType":
+        # Goblin Curse works this way: the cloud hits nothing itself, and its
+        # per-hit action puts two buffs on whatever it touched -- the curse
+        # that spawns a Goblin for the caster when the victim dies, and the
+        # damage-over-time. Applied to the entity the action ran on.
+        interp._apply_buff_action(ctx, what, row)
+        return
     if spawn_type in ("AreaEffectType", "AreaEffectObject"):
         # An action can place a cloud instead of a unit. Routed to the area
         # effect path rather than spawned as a troop, which would put a

@@ -295,6 +295,7 @@ class Battle:
             self._clone_entity,
             self._place_area_from_action,
             self._count_living,
+            self._apply_buff_from_action,
         )
 
         reset_entity_ids()
@@ -1497,7 +1498,11 @@ class Battle:
                     self.actions.run(
                         aspec.on_hit_action,
                         ActionContext(
-                            team=entity.team, x=victim.x, y=victim.y, source=victim
+                            team=entity.team, x=victim.x, y=victim.y, source=victim,
+                            variables={
+                                "buff_ticks": aspec.buff_ticks or aspec.life_ticks,
+                                "owner": entity.id,
+                            },
                         ),
                         self.tick,
                     )
@@ -1797,6 +1802,20 @@ class Battle:
         rather than begin the second half of it -- so a death that produces
         nothing is not a neutral simplification, it deletes the card.
         """
+        # A buff can carry a death spawn of its own, and it belongs to
+        # whoever applied the buff rather than to whoever died -- which is the
+        # whole of Goblin Curse: what dies under it comes back on your side.
+        if entity.buffs is not None:
+            for character, count, to_applier, source_id in entity.buffs.death_spawns():
+                owner = self._entity(source_id)
+                team = entity.team
+                if to_applier:
+                    team = owner.team if owner is not None else entity.team.opponent
+                self._spawn_units(
+                    team=team, character=character, count=count,
+                    x=entity.x, y=entity.y, rarity="Common",
+                )
+
         spec = entity.spec
         if spec is None:
             return
@@ -1932,6 +1951,31 @@ class Battle:
             x, y,
             owner_id=source.id if source is not None else 0,
         )
+
+    def _apply_buff_from_action(self, ctx, name: str, row) -> None:
+        """Put a named buff on whatever the action is running against.
+
+        The duration is the one puzzle. A buff carries no lifetime of its own
+        -- that belongs to whatever applies it -- and these actions carry a
+        ``SpawnTime`` that is a spawn delay rather than a duration. So the
+        effect that fired the action passes its own remaining life down, which
+        is right for the case this exists for: Goblin Curse's cloud re-applies
+        every 50ms for six seconds, so each application only has to outlive the
+        next one.
+        """
+        target = ctx.source
+        if target is None or target.dead:
+            return
+        spec = target.spec
+        bspec = self._buff_spec(
+            name,
+            spec.rarity if spec is not None else "Common",
+            spec.level if spec is not None else self.config.level,
+        )
+        if bspec is None:
+            return
+        duration = ctx.variables.get("buff_ticks") or self.clock.ticks(row.get("SpawnTime"))
+        self._apply_buff(target, bspec, max(1, int(duration)), source=ctx.variables.get("owner", 0))
 
     def _count_living(self, team: Team, names: set[str]) -> int:
         """How many living units of the given names a team has on the board."""

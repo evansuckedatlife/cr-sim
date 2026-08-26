@@ -335,3 +335,118 @@ def test_a_clone_cannot_itself_be_cloned(world):
         if e.spec is not None and e.spec.name == "Knight" and not e.dead
     ]
     assert len(knights) == 3, f"{len(knights)} Knights; two Clones should give three"
+
+
+# ------------------------------------------------------- inline actions
+
+
+def test_an_action_may_be_written_inline_rather_than_referenced(world):
+    """Nineteen actions in this build are objects, not names.
+
+    Goblin Curse's buffs and Dark Magic's whole effect are among them, and a
+    reader that only accepted names dropped every one silently.
+    """
+    battle = _battle(world, "GoblinCurse")
+    inline = {
+        "ClassType": "ActionGroup",
+        "SubActionsDelay": [0],
+        "SubActions": [{"ClassType": "ActionSpawn", "SpawnType": "CharacterType",
+                        "SpawnData": "Skeleton"}],
+    }
+    before = len(battle.entities)
+    battle.actions.run(
+        inline, ActionContext(team=Team.BLUE, x=tiles(9), y=tiles(12)), battle.tick
+    )
+    for _ in range(120):
+        battle.step()
+    assert len(battle.entities) > before
+    assert dict(battle.actions.unsupported) == {}
+
+
+# --------------------------------------------------------- goblin curse
+
+
+def _cursed(world, hitpoints=99_999):
+    from cr_sim.engine.entity import Entity
+    from cr_sim.engine.specs import build_unit_spec
+
+    data, levels, _ = world
+    battle = _battle(world, "GoblinCurse")
+    player = battle.players[Team.BLUE]
+    player.elixir.add(10)
+    player.cycle.remove("GoblinCurse")
+    player.cycle.insert(0, "GoblinCurse")
+
+    spec = build_unit_spec(data, levels, "Knight", level=11, rarity="Common",
+                           clock=battle.clock)
+    foe = Entity(
+        kind=spec.kind, team=Team.RED, x=tiles(9), y=tiles(12), hitpoints=hitpoints,
+        spec=spec, collision_radius=spec.collision_radius, mass=spec.mass,
+        flying=spec.flying,
+    )
+    foe.max_hitpoints = hitpoints
+    foe.deploy_ticks_left = 0
+    battle._register(foe)
+    assert battle.play_card(Team.BLUE, "GoblinCurse", tiles(9), tiles(12))
+    return battle, foe
+
+
+def test_goblin_curse_applies_its_curse_and_its_damage(world):
+    """The cloud hits nothing itself -- HitsAir and HitsGround are both false.
+
+    Its whole effect is an action chain: place a second area effect, and have
+    that put two buffs on what it touches.
+    """
+    battle, foe = _cursed(world)
+    for _ in range(300):
+        battle.step()
+    assert foe.buffs is not None
+    names = set(foe.buffs.active_names())
+    assert {"GoblinCurse", "GoblinCurseDamage"} <= names, names
+    assert foe.hitpoints < foe.max_hitpoints, "the curse dealt no damage"
+    assert foe.buffs.speed_multiplier() < 0, "the curse did not slow"
+
+
+def test_what_dies_under_the_curse_comes_back_on_your_side(world):
+    """The card's entire point, and it is carried by the buff rather than by
+    the dying unit -- DeathSpawnIsEnemy means the spawn belongs to whoever
+    applied it, not to whoever died."""
+    battle, foe = _cursed(world, hitpoints=400)
+    for _ in range(120):
+        battle.step()
+    foe.hitpoints = 1
+    foe.apply_damage(1)
+    for _ in range(120):
+        battle.step()
+
+    goblins = [
+        e for e in battle.entities
+        if not e.dead and e.spec is not None and e.spec.name == "Goblin"
+    ]
+    assert len(goblins) == 1, "nothing came back"
+    assert goblins[0].team is Team.BLUE, "it came back on the wrong side"
+
+
+def test_an_uncursed_death_leaves_nothing_behind(world):
+    """So the spawn is the curse's doing and not the Knight's."""
+    from cr_sim.engine.entity import Entity
+    from cr_sim.engine.specs import build_unit_spec
+
+    data, levels, _ = world
+    battle = _battle(world, "GoblinCurse")
+    spec = build_unit_spec(data, levels, "Knight", level=11, rarity="Common",
+                           clock=battle.clock)
+    foe = Entity(
+        kind=spec.kind, team=Team.RED, x=tiles(9), y=tiles(12), hitpoints=400,
+        spec=spec, collision_radius=spec.collision_radius, mass=spec.mass,
+        flying=spec.flying,
+    )
+    foe.max_hitpoints = 400
+    foe.deploy_ticks_left = 0
+    battle._register(foe)
+    foe.hitpoints = 1
+    foe.apply_damage(1)
+    for _ in range(120):
+        battle.step()
+    assert not [e for e in battle.entities
+                if not e.dead and e.spec is not None and e.spec.name == "Goblin"]

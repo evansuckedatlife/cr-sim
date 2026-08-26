@@ -202,6 +202,10 @@ def _int(value: Any, default: int = 0) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else default
 
 
+def _str(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 def _bool(value: Any) -> bool:
     return value is True
 
@@ -269,6 +273,14 @@ class BuffSpec:
     #: module docstring for why this is a flat rate and not a percentage.
     attract: int = 0
     ignore_pushback: bool = False
+    #: A unit carrying this buff spawns something when it dies. Goblin Curse
+    #: is the card built on it: the curse itself does modest damage, and what
+    #: it is actually for is that whatever dies under it comes back as a
+    #: Goblin on the caster's side.
+    death_spawn: str | None = None
+    death_spawn_count: int = 1
+    #: The spawn belongs to whoever applied the buff, not to whoever died.
+    death_spawn_is_enemy: bool = False
 
     def damage_to(self, is_crown_tower: bool) -> int:
         """Per-application damage, reduced against a crown tower where applicable.
@@ -345,6 +357,9 @@ def build_buff_spec(
         remove_on_attack=_bool(raw.get("RemoveOnAttack")),
         attract=attract,
         ignore_pushback=_bool(raw.get("IgnorePushBack")),
+        death_spawn=_str(raw.get("DeathSpawn")) or None,
+        death_spawn_count=_int(raw.get("DeathSpawnCount"), 1),
+        death_spawn_is_enemy=_bool(raw.get("DeathSpawnIsEnemy")),
     )
 
 
@@ -522,6 +537,15 @@ class BuffState:
         untargetable for its whole life.
         """
         self._buffs = [a for a in self._buffs if not a.spec.remove_on_attack]
+
+    def death_spawns(self) -> tuple[tuple[str, int, bool, int], ...]:
+        """``(character, count, belongs_to_applier, source_id)`` per active buff."""
+        return tuple(
+            (a.spec.death_spawn, max(1, a.spec.death_spawn_count),
+             a.spec.death_spawn_is_enemy, a.source)
+            for a in self._buffs
+            if a.spec.death_spawn
+        )
 
     def attract_sources(self) -> tuple[tuple[int, int], ...]:
         """``(source_id, tiles_per_minute)`` for every pull acting on this entity.
