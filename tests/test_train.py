@@ -16,6 +16,8 @@ learns nothing.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -277,3 +279,36 @@ def test_reward_during_a_run_out_is_not_lost(world):
         if terminated or truncated:
             break
     assert total != 0.0, "a whole match produced exactly zero reward"
+
+
+# --------------------------------------------------------------- metrics file
+
+
+def test_each_update_writes_exactly_one_metrics_row(tmp_path):
+    """One update, one line.
+
+    The writer once emitted each update twice -- once on the way into the
+    callback and again on the way out, after the evaluation had added its
+    fields. Both rows carried the same update number, so a run read as two
+    trainers racing on one file, and every average over the file counted each
+    update twice.
+    """
+    from collections import Counter
+
+    from cr_sim.train.run import main
+
+    code = main([
+        "--steps", "128", "--horizon", "16", "--envs", "2",
+        "--match-seconds", "20", "--eval-every", "0", "--save-every", "1000",
+        "--opponent", "idle", "--out", str(tmp_path), "--name", "once",
+    ])
+    assert code == 0
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "once" / "metrics.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert rows, "the run wrote no metrics at all"
+    repeated = {u: n for u, n in Counter(r["updates"] for r in rows).items() if n > 1}
+    assert not repeated, f"updates written more than once: {repeated}"

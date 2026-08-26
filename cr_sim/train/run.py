@@ -179,8 +179,10 @@ def main(argv: list[str] | None = None) -> int:
 
     with metrics_path.open("w", encoding="utf-8") as stream:
         def record(stats: dict) -> None:
-            stream.write(json.dumps(stats) + "\n")
-            stream.flush()  # a run that dies at hour three should keep hour two
+            # No write here. Every exit from this function ends at _write, and
+            # writing on the way in as well emitted each update twice -- once
+            # without the eval fields and once with, which read as two trainers
+            # racing on one file.
             print(
                 f"update {stats['updates']:4d}  steps {stats['steps']:>9d}  "
                 f"{stats['steps_per_second']:6.0f}/s  "
