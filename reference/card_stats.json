@@ -12,7 +12,8 @@
       "range": 1200,
       "speed": 90,
       "count": 2,
-      "dps": 274
+      "dps": 274,
+      "damage_source": "character"
     },
     "Archer": {
       "elixir": 3,
@@ -23,7 +24,8 @@
       "range": 5000,
       "speed": 60,
       "count": 2,
-      "dps": 124
+      "dps": 124,
+      "damage_source": "projectile:ArcherArrow"
     },
     "ArcherQueen": {
       "elixir": 5,
@@ -34,13 +36,15 @@
       "range": 5000,
       "speed": 60,
       "count": 1,
-      "dps": 188
+      "dps": 188,
+      "damage_source": "projectile:ArcherQueenArrow"
     },
     "Arrows": {
       "elixir": 3,
       "rarity": "Common",
       "damage": 122,
-      "radius": 1400
+      "radius": 1400,
+      "damage_source": "projectile"
     },
     "Assassin": {
       "elixir": 3,
@@ -51,7 +55,8 @@
       "range": 750,
       "speed": 90,
       "count": 1,
-      "dps": 194
+      "dps": 194,
+      "damage_source": "character"
     },
     "AxeMan": {
       "elixir": 5,
@@ -62,7 +67,8 @@
       "range": 4500,
       "speed": 60,
       "count": 1,
-      "dps": 199
+      "dps": 199,
+      "damage_source": "projectile:AxeManProjectile"
     },
     "BabyDragon": {
       "elixir": 4,
@@ -73,7 +79,8 @@
       "range": 3500,
       "speed": 90,
       "count": 1,
-      "dps": 112
+      "dps": 112,
+      "damage_source": "projectile:BabyDragonProjectile"
     },
     "Balloon": {
       "elixir": 5,
@@ -84,12 +91,15 @@
       "range": 100,
       "speed": 60,
       "count": 1,
-      "dps": 320
+      "dps": 320,
+      "damage_source": "character"
     },
     "BarbLog": {
       "elixir": 2,
       "rarity": "Epic",
-      "radius": 1300
+      "damage": 232,
+      "radius": 1300,
+      "damage_source": "spawn_projectile:BarbLogProjectileRolling"
     },
     "BarbarianHut": {
       "elixir": 6,
@@ -107,7 +117,8 @@
       "range": 700,
       "speed": 60,
       "count": 5,
-      "dps": 137
+      "dps": 137,
+      "damage_source": "character"
     },
     "Bats": {
       "elixir": 2,
@@ -118,7 +129,8 @@
       "range": 1200,
       "speed": 120,
       "count": 5,
-      "dps": 68
+      "dps": 68,
+      "damage_source": "character"
     },
     "BattleHealer": {
       "elixir": 4,
@@ -129,7 +141,8 @@
       "range": 1600,
       "speed": 60,
       "count": 1,
-      "dps": 134
+      "dps": 134,
+      "damage_source": "character"
     },
     "BattleRam": {
       "elixir": 4,
@@ -140,16 +153,20 @@
       "range": 500,
       "speed": 60,
       "count": 1,
-      "dps": 715
+      "dps": 715,
+      "damage_source": "character"
     },
     "Berserker": {
       "elixir": 2,
       "rarity": "Common",
       "hitpoints": 896,
+      "damage": 102,
       "hit_speed": 600,
       "range": 800,
       "speed": 90,
-      "count": 1
+      "count": 1,
+      "dps": 170,
+      "damage_source": "attack_sequence"
     },
     "BlowdartGoblin": {
       "elixir": 3,
@@ -160,7 +177,8 @@
       "range": 6500,
       "speed": 120,
       "count": 1,
-      "dps": 189
+      "dps": 189,
+      "damage_source": "projectile:BlowdartGoblinProjectile"
     },
     "BombTower": {
       "elixir": 4,
@@ -170,7 +188,8 @@
       "hit_speed": 1800,
       "range": 6000,
       "count": 1,
-      "dps": 123
+      "dps": 123,
+      "damage_source": "projectile:BombTowerProjectile"
     },
     "Bomber": {
       "elixir": 2,
@@ -181,7 +200,8 @@
       "range": 4500,
       "speed": 60,
       "count": 1,
-      "dps": 125
+      "dps": 125,
+      "damage_source": "projectile:BombSkeletonProjectile"
     },
     "BossBandit": {
       "elixir": 6,
@@ -192,7 +212,8 @@
       "range": 800,
       "speed": 90,
       "count": 1,
-      "dps": 223
+      "dps": 223,
+      "damage_source": "character"
     },
     "Bowler": {
       "elixir": 5,
@@ -203,7 +224,8 @@
       "range": 4000,
       "speed": 45,
       "count": 1,
-      "dps": 116
+      "dps": 116,
+      "damage_source": "projectile:BowlerProjectile"
     },
     "Cannon": {
       "elixir": 3,
@@ -213,7 +235,8 @@
       "hit_speed": 1000,
       "range": 5500,
       "count": 1,
-      "dps": 202
+      "dps": 202,
+      "damage_source": "projectile:TowerCannonball"
     },
     "Clone": {
       "elixir": 3,
@@ -222,7 +245,10 @@
     },
     "DarkMagic": {
       "elixir": 5,
-      "rarity": "Epic"
+      "rarity": "Epic",
+      "damage": 256,
+      "radius": 2500,
+      "damage_source": "area_effect"
     },
     "DarkPrince": {
       "elixir": 4,
@@ -233,7 +259,8 @@
       "range": 1200,
       "speed": 60,
       "count": 1,
-      "dps": 190
+      "dps": 190,
+      "damage_source": "character"
     },
     "DarkWitch": {
       "elixir": 4,
@@ -244,7 +271,8 @@
       "range": 1600,
       "speed": 60,
       "count": 1,
-      "dps": 242
+      "dps": 242,
+      "damage_source": "character"
     },
     "DartBarrell": {
       "elixir": 4,
@@ -255,12 +283,14 @@
       "range": 6000,
       "speed": 90,
       "count": 1,
-      "dps": 155
+      "dps": 155,
+      "damage_source": "projectile:DartBarrellProjectile"
     },
     "Earthquake": {
       "elixir": 3,
       "rarity": "Rare",
-      "radius": 3500
+      "radius": 3500,
+      "damage_per_second": 81
     },
     "ElectroDragon": {
       "elixir": 5,
@@ -271,7 +301,8 @@
       "range": 3500,
       "speed": 60,
       "count": 1,
-      "dps": 91
+      "dps": 91,
+      "damage_source": "projectile:ElectroDragonProjectile"
     },
     "ElectroGiant": {
       "elixir": 7,
@@ -282,7 +313,8 @@
       "range": 1200,
       "speed": 45,
       "count": 1,
-      "dps": 91
+      "dps": 91,
+      "damage_source": "character"
     },
     "ElectroSpirit": {
       "elixir": 1,
@@ -293,12 +325,20 @@
       "range": 2500,
       "speed": 120,
       "count": 1,
-      "dps": 330
+      "dps": 330,
+      "damage_source": "projectile:ElectroSpiritProjectile"
     },
     "ElectroWizard": {
       "elixir": 4,
       "rarity": "Legendary",
-      "radius": 3000
+      "hitpoints": 714,
+      "damage": 117,
+      "hit_speed": 1800,
+      "range": 5000,
+      "speed": 90,
+      "count": 1,
+      "dps": 65,
+      "damage_source": "character"
     },
     "EliteArcher": {
       "elixir": 4,
@@ -309,7 +349,8 @@
       "range": 7000,
       "speed": 60,
       "count": 1,
-      "dps": 123
+      "dps": 123,
+      "damage_source": "projectile:EliteArcherArrow"
     },
     "Elixir Collector": {
       "elixir": 6,
@@ -326,7 +367,8 @@
       "range": 800,
       "speed": 45,
       "count": 1,
-      "dps": 230
+      "dps": 230,
+      "damage_source": "character"
     },
     "FireSpirits": {
       "elixir": 1,
@@ -337,13 +379,15 @@
       "range": 2500,
       "speed": 120,
       "count": 1,
-      "dps": 690
+      "dps": 690,
+      "damage_source": "projectile:FireSpiritsProjectile"
     },
     "Fireball": {
       "elixir": 4,
       "rarity": "Rare",
       "damage": 688,
-      "radius": 2500
+      "radius": 2500,
+      "damage_source": "projectile"
     },
     "Firecracker": {
       "elixir": 3,
@@ -363,7 +407,8 @@
       "range": 5500,
       "speed": 60,
       "count": 1,
-      "dps": 105
+      "dps": 105,
+      "damage_source": "projectile:Furnace_Rework_Projectile"
     },
     "Fisherman": {
       "elixir": 3,
@@ -374,12 +419,15 @@
       "range": 1200,
       "speed": 60,
       "count": 1,
-      "dps": 149
+      "dps": 149,
+      "damage_source": "character"
     },
     "Freeze": {
       "elixir": 4,
       "rarity": "Epic",
-      "radius": 3000
+      "damage": 148,
+      "radius": 3000,
+      "damage_source": "area_effect"
     },
     "Ghost": {
       "elixir": 3,
@@ -390,7 +438,8 @@
       "range": 1200,
       "speed": 90,
       "count": 1,
-      "dps": 145
+      "dps": 145,
+      "damage_source": "character"
     },
     "Giant": {
       "elixir": 5,
@@ -401,7 +450,8 @@
       "range": 1200,
       "speed": 45,
       "count": 1,
-      "dps": 169
+      "dps": 169,
+      "damage_source": "character"
     },
     "GiantBuffer": {
       "elixir": 4,
@@ -412,7 +462,8 @@
       "range": 1200,
       "speed": 60,
       "count": 1,
-      "dps": 102
+      "dps": 102,
+      "damage_source": "character"
     },
     "GiantSkeleton": {
       "elixir": 6,
@@ -423,7 +474,8 @@
       "range": 800,
       "speed": 60,
       "count": 1,
-      "dps": 212
+      "dps": 212,
+      "damage_source": "character"
     },
     "GoblinBarrel": {
       "elixir": 3,
@@ -441,7 +493,9 @@
     "GoblinCurse": {
       "elixir": 2,
       "rarity": "Epic",
-      "radius": 3000
+      "damage": 256,
+      "radius": 3000,
+      "damage_source": "area_effect"
     },
     "GoblinDemolisher": {
       "elixir": 4,
@@ -452,7 +506,8 @@
       "range": 5000,
       "speed": 60,
       "count": 1,
-      "dps": 169
+      "dps": 169,
+      "damage_source": "projectile:GoblinDemolisherProjectile"
     },
     "GoblinDrill": {
       "elixir": 4,
@@ -471,8 +526,9 @@
       "hit_speed": 1100,
       "range": 500,
       "speed": 120,
-      "count": 3,
-      "dps": 114
+      "count": 6,
+      "dps": 114,
+      "damage_source": "character"
     },
     "GoblinGiant": {
       "elixir": 6,
@@ -483,7 +539,8 @@
       "range": 1200,
       "speed": 60,
       "count": 1,
-      "dps": 117
+      "dps": 117,
+      "damage_source": "character"
     },
     "GoblinHut": {
       "elixir": 4,
@@ -502,7 +559,8 @@
       "range": 1200,
       "speed": 60,
       "count": 1,
-      "dps": 193
+      "dps": 193,
+      "damage_source": "character"
     },
     "Goblins": {
       "elixir": 2,
@@ -513,7 +571,8 @@
       "range": 500,
       "speed": 120,
       "count": 4,
-      "dps": 114
+      "dps": 114,
+      "damage_source": "character"
     },
     "Goblinstein": {
       "elixir": 5,
@@ -523,8 +582,9 @@
       "hit_speed": 1500,
       "range": 1200,
       "speed": 60,
-      "count": 1,
-      "dps": 85
+      "count": 2,
+      "dps": 85,
+      "damage_source": "character"
     },
     "GoldenKnight": {
       "elixir": 4,
@@ -535,7 +595,8 @@
       "range": 1200,
       "speed": 60,
       "count": 1,
-      "dps": 179
+      "dps": 179,
+      "damage_source": "character"
     },
     "Golem": {
       "elixir": 8,
@@ -546,7 +607,8 @@
       "range": 750,
       "speed": 45,
       "count": 1,
-      "dps": 125
+      "dps": 125,
+      "damage_source": "character"
     },
     "Graveyard": {
       "elixir": 5,
@@ -562,7 +624,8 @@
       "range": 2500,
       "speed": 120,
       "count": 1,
-      "dps": 367
+      "dps": 367,
+      "damage_source": "projectile:HealSpiritProjectile"
     },
     "HogRider": {
       "elixir": 4,
@@ -573,7 +636,8 @@
       "range": 800,
       "speed": 120,
       "count": 1,
-      "dps": 198
+      "dps": 198,
+      "damage_source": "character"
     },
     "Hunter": {
       "elixir": 4,
@@ -584,7 +648,8 @@
       "range": 4000,
       "speed": 60,
       "count": 1,
-      "dps": 38
+      "dps": 38,
+      "damage_source": "custom_first_projectile:HunterProjectile"
     },
     "IceGolemite": {
       "elixir": 2,
@@ -595,7 +660,8 @@
       "range": 750,
       "speed": 45,
       "count": 1,
-      "dps": 34
+      "dps": 34,
+      "damage_source": "character"
     },
     "IceSpirits": {
       "elixir": 1,
@@ -606,12 +672,20 @@
       "range": 2500,
       "speed": 120,
       "count": 1,
-      "dps": 367
+      "dps": 367,
+      "damage_source": "projectile:IceSpiritsProjectile"
     },
     "IceWizard": {
       "elixir": 3,
       "rarity": "Legendary",
-      "radius": 3000
+      "hitpoints": 688,
+      "damage": 89,
+      "hit_speed": 1700,
+      "range": 5500,
+      "speed": 60,
+      "count": 1,
+      "dps": 52,
+      "damage_source": "projectile:ice_wizardProjectile"
     },
     "InfernoDragon": {
       "elixir": 4,
@@ -622,7 +696,8 @@
       "range": 3500,
       "speed": 60,
       "count": 1,
-      "dps": 88
+      "dps": 88,
+      "damage_source": "character"
     },
     "InfernoTower": {
       "elixir": 5,
@@ -632,7 +707,8 @@
       "hit_speed": 400,
       "range": 6000,
       "count": 1,
-      "dps": 108
+      "dps": 108,
+      "damage_source": "character"
     },
     "Knight": {
       "elixir": 3,
@@ -643,7 +719,8 @@
       "range": 1200,
       "speed": 60,
       "count": 1,
-      "dps": 168
+      "dps": 168,
+      "damage_source": "character"
     },
     "LavaHound": {
       "elixir": 7,
@@ -654,12 +731,15 @@
       "range": 3500,
       "speed": 45,
       "count": 1,
-      "dps": 41
+      "dps": 41,
+      "damage_source": "projectile:LavaHoundProjectile"
     },
     "Lightning": {
       "elixir": 6,
       "rarity": "Epic",
-      "radius": 3500
+      "damage": 1057,
+      "radius": 3500,
+      "damage_source": "area_projectile"
     },
     "LittlePrince": {
       "elixir": 3,
@@ -670,12 +750,15 @@
       "range": 5500,
       "speed": 60,
       "count": 1,
-      "dps": 87
+      "dps": 87,
+      "damage_source": "projectile:LittlePrinceProjectile"
     },
     "Log": {
       "elixir": 2,
       "rarity": "Legendary",
-      "radius": 1950
+      "damage": 268,
+      "radius": 1950,
+      "damage_source": "spawn_projectile:LogProjectileRolling"
     },
     "MegaKnight": {
       "elixir": 7,
@@ -686,7 +769,8 @@
       "range": 1200,
       "speed": 60,
       "count": 1,
-      "dps": 158
+      "dps": 158,
+      "damage_source": "character"
     },
     "MegaMinion": {
       "elixir": 3,
@@ -697,7 +781,8 @@
       "range": 1600,
       "speed": 60,
       "count": 1,
-      "dps": 208
+      "dps": 208,
+      "damage_source": "projectile:MegaMinionSpit"
     },
     "MergeMaiden": {
       "elixir": 6,
@@ -712,7 +797,8 @@
       "range": 1600,
       "speed": 60,
       "count": 1,
-      "dps": 108
+      "dps": 108,
+      "damage_source": "character"
     },
     "Miner": {
       "elixir": 3,
@@ -723,7 +809,8 @@
       "range": 1200,
       "speed": 90,
       "count": 1,
-      "dps": 149
+      "dps": 149,
+      "damage_source": "character"
     },
     "MiniPekka": {
       "elixir": 4,
@@ -734,7 +821,8 @@
       "range": 800,
       "speed": 90,
       "count": 1,
-      "dps": 472
+      "dps": 472,
+      "damage_source": "character"
     },
     "MiniSparkys": {
       "elixir": 4,
@@ -745,7 +833,8 @@
       "range": 4500,
       "speed": 60,
       "count": 3,
-      "dps": 53
+      "dps": 53,
+      "damage_source": "character"
     },
     "MinionHorde": {
       "elixir": 5,
@@ -756,7 +845,8 @@
       "range": 2500,
       "speed": 90,
       "count": 6,
-      "dps": 89
+      "dps": 89,
+      "damage_source": "projectile:MinionSpit"
     },
     "Minions": {
       "elixir": 3,
@@ -767,7 +857,8 @@
       "range": 2500,
       "speed": 90,
       "count": 3,
-      "dps": 89
+      "dps": 89,
+      "damage_source": "projectile:MinionSpit"
     },
     "Mirror": {
       "elixir": 1,
@@ -782,7 +873,8 @@
       "range": 1200,
       "speed": 60,
       "count": 1,
-      "dps": 175
+      "dps": 175,
+      "damage_source": "character"
     },
     "Mortar": {
       "elixir": 4,
@@ -792,7 +884,8 @@
       "hit_speed": 4700,
       "range": 11500,
       "count": 1,
-      "dps": 57
+      "dps": 57,
+      "damage_source": "projectile:MortarProjectile"
     },
     "MovingCannon": {
       "elixir": 5,
@@ -803,7 +896,8 @@
       "range": 5500,
       "speed": 60,
       "count": 1,
-      "dps": 236
+      "dps": 236,
+      "damage_source": "projectile:MovingCannonProjectile"
     },
     "Musketeer": {
       "elixir": 4,
@@ -814,7 +908,8 @@
       "range": 6000,
       "speed": 60,
       "count": 1,
-      "dps": 217
+      "dps": 217,
+      "damage_source": "projectile:MusketeerProjectile"
     },
     "Pekka": {
       "elixir": 7,
@@ -825,7 +920,8 @@
       "range": 1200,
       "speed": 45,
       "count": 1,
-      "dps": 468
+      "dps": 468,
+      "damage_source": "character"
     },
     "Phoenix": {
       "elixir": 4,
@@ -836,12 +932,14 @@
       "range": 1600,
       "speed": 60,
       "count": 1,
-      "dps": 217
+      "dps": 217,
+      "damage_source": "character"
     },
     "Poison": {
       "elixir": 4,
       "rarity": "Epic",
-      "radius": 3500
+      "radius": 3500,
+      "damage_per_second": 92
     },
     "Prince": {
       "elixir": 5,
@@ -852,16 +950,20 @@
       "range": 1600,
       "speed": 60,
       "count": 1,
-      "dps": 279
+      "dps": 279,
+      "damage_source": "character"
     },
     "Princess": {
       "elixir": 3,
       "rarity": "Legendary",
       "hitpoints": 261,
+      "damage": 168,
       "hit_speed": 3000,
       "range": 9000,
       "speed": 60,
-      "count": 1
+      "count": 1,
+      "dps": 56,
+      "damage_source": "custom_first_projectile:PrincessProjectile"
     },
     "Rage": {
       "elixir": 2,
@@ -877,7 +979,8 @@
       "range": 700,
       "speed": 120,
       "count": 1,
-      "dps": 320
+      "dps": 320,
+      "damage_source": "character"
     },
     "RamRider": {
       "elixir": 5,
@@ -888,7 +991,8 @@
       "range": 800,
       "speed": 60,
       "count": 1,
-      "dps": 147
+      "dps": 147,
+      "damage_source": "character"
     },
     "Rascals": {
       "elixir": 5,
@@ -898,14 +1002,16 @@
       "hit_speed": 1500,
       "range": 800,
       "speed": 60,
-      "count": 1,
-      "dps": 145
+      "count": 3,
+      "dps": 145,
+      "damage_source": "character"
     },
     "Rocket": {
       "elixir": 6,
       "rarity": "Rare",
       "damage": 1484,
-      "radius": 2000
+      "radius": 2000,
+      "damage_source": "projectile"
     },
     "Ronin": {
       "elixir": 5,
@@ -916,12 +1022,14 @@
       "range": 1200,
       "speed": 90,
       "count": 1,
-      "dps": 265
+      "dps": 265,
+      "damage_source": "character"
     },
     "RoyalDelivery": {
       "elixir": 3,
       "rarity": "Common",
-      "radius": 3000
+      "range": 3000,
+      "count": 1
     },
     "RoyalGiant": {
       "elixir": 6,
@@ -932,7 +1040,8 @@
       "range": 5000,
       "speed": 45,
       "count": 1,
-      "dps": 171
+      "dps": 171,
+      "damage_source": "projectile:RoyalGiantProjectile"
     },
     "RoyalHogs": {
       "elixir": 5,
@@ -943,7 +1052,8 @@
       "range": 750,
       "speed": 120,
       "count": 4,
-      "dps": 62
+      "dps": 62,
+      "damage_source": "character"
     },
     "RoyalRecruits": {
       "elixir": 7,
@@ -954,7 +1064,8 @@
       "range": 1600,
       "speed": 60,
       "count": 6,
-      "dps": 102
+      "dps": 102,
+      "damage_source": "character"
     },
     "SkeletonArmy": {
       "elixir": 3,
@@ -965,7 +1076,8 @@
       "range": 500,
       "speed": 90,
       "count": 15,
-      "dps": 74
+      "dps": 74,
+      "damage_source": "character"
     },
     "SkeletonBalloon": {
       "elixir": 3,
@@ -985,7 +1097,8 @@
       "range": 3500,
       "speed": 90,
       "count": 2,
-      "dps": 76
+      "dps": 76,
+      "damage_source": "projectile:SkeletonDragonProjectile"
     },
     "SkeletonKing": {
       "elixir": 4,
@@ -996,7 +1109,8 @@
       "range": 1200,
       "speed": 60,
       "count": 1,
-      "dps": 128
+      "dps": 128,
+      "damage_source": "character"
     },
     "SkeletonWarriors": {
       "elixir": 3,
@@ -1007,7 +1121,8 @@
       "range": 1600,
       "speed": 90,
       "count": 3,
-      "dps": 117
+      "dps": 117,
+      "damage_source": "character"
     },
     "Skeletons": {
       "elixir": 1,
@@ -1018,13 +1133,15 @@
       "range": 500,
       "speed": 90,
       "count": 3,
-      "dps": 74
+      "dps": 74,
+      "damage_source": "character"
     },
     "Snowball": {
       "elixir": 2,
       "rarity": "Common",
       "damage": 179,
-      "radius": 2500
+      "radius": 2500,
+      "damage_source": "projectile"
     },
     "SpearGoblins": {
       "elixir": 2,
@@ -1035,7 +1152,8 @@
       "range": 5000,
       "speed": 120,
       "count": 3,
-      "dps": 51
+      "dps": 51,
+      "damage_source": "projectile:SpearGoblinProjectile"
     },
     "SuspiciousBush": {
       "elixir": 2,
@@ -1045,7 +1163,8 @@
       "hit_speed": 300,
       "range": 1600,
       "speed": 60,
-      "count": 1
+      "count": 1,
+      "damage_source": "character"
     },
     "Tesla": {
       "elixir": 4,
@@ -1055,11 +1174,20 @@
       "hit_speed": 1100,
       "range": 5500,
       "count": 1,
-      "dps": 200
+      "dps": 200,
+      "damage_source": "character"
     },
     "ThreeMusketeers": {
       "elixir": 9,
-      "rarity": "Rare"
+      "rarity": "Rare",
+      "hitpoints": 883,
+      "damage": 204,
+      "hit_speed": 1300,
+      "range": 6000,
+      "speed": 60,
+      "count": 3,
+      "dps": 157,
+      "damage_source": "projectile:ThreeMusketeer_Rework_Projectile"
     },
     "Tombstone": {
       "elixir": 3,
@@ -1071,7 +1199,8 @@
     "Tornado": {
       "elixir": 3,
       "rarity": "Epic",
-      "radius": 5500
+      "radius": 5500,
+      "damage_per_second": 153
     },
     "Valkyrie": {
       "elixir": 4,
@@ -1082,7 +1211,8 @@
       "range": 1200,
       "speed": 60,
       "count": 1,
-      "dps": 177
+      "dps": 177,
+      "damage_source": "character"
     },
     "Vines": {
       "elixir": 3,
@@ -1098,7 +1228,8 @@
       "range": 500,
       "speed": 120,
       "count": 2,
-      "dps": 234
+      "dps": 234,
+      "damage_source": "projectile:WallbreakerProjectile"
     },
     "Witch": {
       "elixir": 5,
@@ -1109,7 +1240,8 @@
       "range": 5500,
       "speed": 60,
       "count": 1,
-      "dps": 123
+      "dps": 123,
+      "damage_source": "projectile:WitchProjectile"
     },
     "WitchMother": {
       "elixir": 4,
@@ -1120,7 +1252,8 @@
       "range": 5500,
       "speed": 60,
       "count": 1,
-      "dps": 133
+      "dps": 133,
+      "damage_source": "projectile:VoodooProjectile"
     },
     "Wizard": {
       "elixir": 5,
@@ -1131,7 +1264,8 @@
       "range": 5500,
       "speed": 60,
       "count": 1,
-      "dps": 201
+      "dps": 201,
+      "damage_source": "projectile:chr_wizardProjectile"
     },
     "Xbow": {
       "elixir": 6,
@@ -1141,12 +1275,15 @@
       "hit_speed": 400,
       "range": 11500,
       "count": 1,
-      "dps": 145
+      "dps": 145,
+      "damage_source": "projectile:xbow_projectile"
     },
     "Zap": {
       "elixir": 2,
       "rarity": "Common",
-      "radius": 2500
+      "damage": 192,
+      "radius": 2500,
+      "damage_source": "area_effect"
     },
     "ZapMachine": {
       "elixir": 6,
@@ -1157,7 +1294,8 @@
       "range": 5000,
       "speed": 45,
       "count": 1,
-      "dps": 333
+      "dps": 333,
+      "damage_source": "projectile:ZapMachineProjectile"
     }
   }
 }

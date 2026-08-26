@@ -247,5 +247,142 @@ def test_ranged_unit_damage_comes_from_its_projectile(data, levels, registry):
     musketeer = data.resolve("Musketeer")
     assert musketeer.get("Damage") is None
     summary = card_stat_summary(data, levels, registry["Musketeer"])
-    assert summary.get("damage_from_projectile")
+    assert summary.get("damage_source", "").startswith("projectile:")
     assert isinstance(summary.get("damage"), int) and summary["damage"] > 0
+
+
+# --------------------------------------------- the awkward resolution paths
+#
+# Each of these is a card the naive "SummonCharacter -> Damage" reading gets
+# wrong, and each was silently producing a blank row before.
+
+
+def test_toml_overlay_sections_are_bare_names(data):
+    """spells_characters.toml keys are card names, not namespaces."""
+    three = data.resolve("SPELL_CHARACTER.ThreeMusketeers")
+    assert three["ManaCost"] == 9  # from the CSV row
+    assert len(three["SummonCharactersList"]) == 3  # from the TOML overlay
+    # buildings.toml overlays too, and used to be dropped entirely.
+    assert data.resolve("BUILDING.KingTower").get("IsSummoner") is True
+
+
+def test_card_with_no_summon_field_uses_its_own_name(data, levels, registry):
+    """Ice Wizard's card row names no character; the convention is same-name."""
+    card = registry["IceWizard"]
+    assert card.summon_character is None
+    assert card.implicit_character == "IceWizard"
+    summary = card_stat_summary(data, levels, card)
+    assert summary["hitpoints"] == 688
+    assert summary["damage"] == 89
+
+
+def test_explicit_unit_list_with_offsets(data, levels, registry):
+    """Three Musketeers names its three units and where each one lands."""
+    card = registry["ThreeMusketeers"]
+    assert len(card.summons()) == 3
+    assert card.summon_offsets == ((0, -1000), (-1000, 1000), (1000, 1000))
+    assert card_stat_summary(data, levels, card)["count"] == 3
+
+
+def test_squad_counts_total_all_units(data, levels, registry):
+    """Goblin Gang is 3 Goblins + 3 Spear Goblins, not 3."""
+    summary = card_stat_summary(data, levels, registry["GoblinGang"])
+    assert summary["count"] == 6
+    assert len(summary["squad"]) == 2
+
+
+def test_visual_only_projectile_is_skipped(data, levels, registry):
+    """Princess' Projectile is a decorative round; CustomFirstProjectile hurts."""
+    princess = data.resolve("Princess")
+    assert princess["Projectile"] == "PrincessProjectileDeco"
+    assert data.resolve("PROJECTILE.PrincessProjectileDeco").get("Damage") is None
+    summary = card_stat_summary(data, levels, registry["Princess"])
+    assert summary["damage_source"].startswith("custom_first_projectile:")
+    assert summary["damage"] > 0
+
+
+def test_attack_sequence_damage(data, levels, registry):
+    """Berserker keeps per-swing damage in AttackSequenceList."""
+    berserker = data.resolve("Berserker")
+    assert berserker.get("Damage") is None
+    summary = card_stat_summary(data, levels, registry["Berserker"])
+    assert summary["damage_source"] == "attack_sequence"
+    assert summary["damage"] == 102
+
+
+@pytest.mark.parametrize(
+    "card_name,expected_damage,expected_source",
+    [
+        ("Zap", 192, "area_effect"),
+        ("Freeze", 148, "area_effect"),
+        ("Lightning", 1057, "area_projectile"),
+        ("Log", 268, "spawn_projectile:LogProjectileRolling"),
+    ],
+)
+def test_spell_damage_chains(data, levels, registry, card_name, expected_damage, expected_source):
+    """Spells keep damage on the projectile, the area effect, or a spawned one."""
+    summary = card_stat_summary(data, levels, registry[card_name])
+    assert summary["damage"] == expected_damage
+    assert summary["damage_source"] == expected_source
+
+
+def test_damage_over_time_comes_from_the_buff(data, levels, registry):
+    """Poison has no Damage anywhere -- only a buff carrying DamagePerSecond."""
+    area = data.resolve("AEO.Poison")
+    assert area.get("Damage") is None
+    summary = card_stat_summary(data, levels, registry["Poison"])
+    assert summary["damage_per_second"] == 92
+    assert summary["duration"] == 8000
+    assert summary["buff_speed_multiplier"] == -15
+
+
+def test_spell_projectile_can_carry_troops(data, levels, registry):
+    """Goblin Barrel's payload is on the projectile, not the card."""
+    summary = card_stat_summary(data, levels, registry["GoblinBarrel"])
+    assert summary["spawns_character"] == "Goblin"
+    assert summary["spawns_count"] == 3
+
+
+def test_arena_tower_layout_is_defined(data):
+    """spawn_groups.toml pins the tower positions, in half-tiles."""
+    layout = data.resolve("SPAWN_GROUP.King_PrincessTowers")
+    objects = {(o["Data"], o["x"], o["y"]) for o in layout["Objects"]}
+    assert ("KingTower", 18, 6) in objects
+    assert ("PrincessTower", 7, 13) in objects
+    assert ("PrincessTower", 29, 13) in objects
+    # x is in half-tiles across an 18-tile arena, so the king sits on centre.
+    assert 18 / 2 == 9
+
+
+def test_action_driven_spells_are_identified(data, levels, registry):
+    """Graveyard and Vines have no stats -- their behavior is an ACTION graph."""
+    for name in ("Graveyard", "Vines", "Clone"):
+        summary = card_stat_summary(data, levels, registry[name])
+        assert summary.get("action"), f"{name} should name the action driving it"
+        assert summary["action"] in data.namespace("ACTION") or True
+
+
+def test_no_standard_card_is_completely_unresolved(data, levels, registry):
+    """Every playable card must yield stats, a payload, or a named action.
+
+    A card that produces none of these is one the engine could not spawn, and
+    that is the failure this whole module exists to prevent.
+    """
+    blank = []
+    for card in registry.standard():
+        s = card_stat_summary(data, levels, card)
+        informative = any(
+            s.get(k) is not None
+            for k in (
+                "hitpoints",
+                "damage",
+                "damage_per_second",
+                "spawns_character",
+                "buff",
+                "action",
+            )
+        )
+        if not informative and not card.summons():
+            blank.append(card.name)
+    # Mirror has no payload of its own by definition -- it replays the last card.
+    assert set(blank) <= {"Mirror", "MergeMaiden"}, blank

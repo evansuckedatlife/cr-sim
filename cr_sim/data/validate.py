@@ -40,6 +40,8 @@ CHECKED_FIELDS = (
     "count",
     "dps",
     "radius",
+    "damage_per_second",
+    "damage_source",
 )
 
 

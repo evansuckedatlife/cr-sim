@@ -73,11 +73,18 @@ class Card:
     summon_count_second: int = 0
     summon_radius: int = 0
     summon_deploy_delay: int = 0
+    #: Reworked multi-unit cards (Three Musketeers) name their units explicitly
+    #: and give each a spawn offset in milli-tiles instead of a radius.
+    summon_characters_list: tuple[str, ...] = ()
+    summon_offsets: tuple[tuple[int, int], ...] = ()
     projectile: str | None = None
     area_effect_object: str | None = None
 
     unlock_arena: str | None = None
     tid: str | None = None
+    #: Set when the card has no explicit summon field but a character of the
+    #: same name exists -- the game's implicit convention.
+    implicit_character: str | None = None
     raw: Mapping[str, Any] | None = None
 
     @property
@@ -92,12 +99,22 @@ class Card:
         return not self.not_in_use and not self.not_visible and self.mana_cost > 0
 
     def summons(self) -> tuple[tuple[str, int], ...]:
-        """(character, count) pairs this card deploys."""
+        """(character, count) pairs this card deploys.
+
+        Three spellings exist and are tried in order: an explicit character
+        list (Three Musketeers), the classic ``SummonCharacter`` field, and --
+        when neither is set -- the character sharing the card's own name, which
+        is how Ice Wizard and Electro Wizard are wired.
+        """
+        if self.summon_characters_list:
+            return tuple((name, 1) for name in self.summon_characters_list)
         out: list[tuple[str, int]] = []
         if self.summon_character:
             out.append((self.summon_character, max(1, self.summon_count)))
         if self.summon_character_second and self.summon_count_second:
             out.append((self.summon_character_second, self.summon_count_second))
+        if not out and self.implicit_character:
+            out.append((self.implicit_character, max(1, self.summon_count)))
         return tuple(out)
 
 
@@ -137,39 +154,68 @@ def _int(value: Any, default: int = 0) -> int:
     return value if isinstance(value, int) else default
 
 
+#: source table -> the namespace its TOML overlay lands in
+_TABLE_NAMESPACE = {
+    "spells_characters": "SPELL_CHARACTER",
+    "spells_buildings": "SPELL_BUILDING",
+    "spells_other": "SPELL_OTHER",
+    "spells_evolved": "SPELL_EVOLVED",
+    "spells_hero_form": "SPELL_HERO",
+}
+
+
 def build_card_registry(data: LogicData) -> CardRegistry:
-    """Read every ``spells_*`` table into a :class:`CardRegistry`."""
+    """Read every ``spells_*`` table into a :class:`CardRegistry`.
+
+    Cards are read through :meth:`LogicData.resolve` rather than straight off
+    the CSV row, because several have migrated into the matching ``.toml``
+    overlay -- Three Musketeers' unit list only exists there.
+    """
     cards: list[Card] = []
     for table_name, (kind, is_evo, is_hero) in _CARD_TABLES.items():
-        table = data.tables.get(table_name)
-        if table is None:
+        namespace = _TABLE_NAMESPACE[table_name]
+        if table_name not in data.tables and not data.namespace(namespace):
             continue
-        for record in table:
-            mana = record.scalar("ManaCost")
-            if mana is None:
+        for name in data.names(namespace):
+            row = data.resolve(f"{namespace}.{name}")
+            mana = row.get("ManaCost")
+            if not isinstance(mana, int):
                 continue
+
+            summon_list = tuple(_strs(row.get("SummonCharactersList")))
+            offsets_x = _ints(row.get("SummonCharactersOffsetsX"))
+            offsets_y = _ints(row.get("SummonCharactersOffsetsY"))
+            offsets = tuple(zip(offsets_x, offsets_y)) if offsets_x and offsets_y else ()
+
+            explicit = row.get("SummonCharacter") or summon_list
+            implicit = None
+            if not explicit and _character_exists(data, name):
+                implicit = name
+
             cards.append(
                 Card(
-                    name=record.name,
+                    name=name,
                     kind=kind,
                     mana_cost=mana,
-                    rarity=record.scalar("Rarity", "Common"),
+                    rarity=row.get("Rarity") or "Common",
                     source_table=table_name,
                     is_evolution=is_evo,
                     is_hero_form=is_hero,
-                    not_in_use=bool(record.scalar("NotInUse", False)),
-                    not_visible=bool(record.scalar("NotVisible", False)),
-                    summon_character=record.scalar("SummonCharacter"),
-                    summon_count=_int(record.scalar("SummonNumber"), 1),
-                    summon_character_second=record.scalar("SummonCharacterSecond"),
-                    summon_count_second=_int(record.scalar("SummonCharacterSecondCount"), 0),
-                    summon_radius=_int(record.scalar("SummonRadius"), 0),
-                    summon_deploy_delay=_int(record.scalar("SummonDeployDelay"), 0),
-                    projectile=record.scalar("Projectile"),
-                    area_effect_object=record.scalar("AreaEffectObject"),
-                    unlock_arena=record.scalar("UnlockArena"),
-                    tid=record.scalar("TID"),
-                    raw=None,
+                    not_in_use=bool(row.get("NotInUse", False)),
+                    not_visible=bool(row.get("NotVisible", False)),
+                    summon_character=row.get("SummonCharacter"),
+                    summon_count=_int(row.get("SummonNumber"), 1),
+                    summon_character_second=row.get("SummonCharacterSecond"),
+                    summon_count_second=_int(row.get("SummonCharacterSecondCount"), 0),
+                    summon_radius=_int(row.get("SummonRadius"), 0),
+                    summon_deploy_delay=_int(row.get("SummonDeployDelay"), 0),
+                    summon_characters_list=summon_list,
+                    summon_offsets=offsets,
+                    projectile=row.get("Projectile"),
+                    area_effect_object=row.get("AreaEffectObject"),
+                    unlock_arena=row.get("UnlockArena"),
+                    tid=row.get("TID"),
+                    implicit_character=implicit,
                 )
             )
 
@@ -179,49 +225,180 @@ def build_card_registry(data: LogicData) -> CardRegistry:
     return CardRegistry(cards=tuple(cards), by_name=by_name)
 
 
+def _character_exists(data: LogicData, name: str) -> bool:
+    for namespace in ("CHARACTER", "BUILDING", "EXT"):
+        if name in data.namespace(namespace) or name in data.names(namespace):
+            return True
+    return False
+
+
+def _strs(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [v for v in value if isinstance(v, str)]
+    return []
+
+
+def _ints(value: Any) -> list[int]:
+    if isinstance(value, int):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [v for v in value if isinstance(v, int)]
+    return []
+
+
 #: The level the game displays for tournament standard, for every rarity.
 TOURNAMENT_DISPLAY_LEVEL = 11
 
 
+def _projectile_damage(data: LogicData, name: Any) -> int | None:
+    if not isinstance(name, str):
+        return None
+    try:
+        projectile = data.resolve(f"PROJECTILE.{name}")
+    except UnknownEntity:
+        return None
+    damage = projectile.get("Damage")
+    return damage if isinstance(damage, int) else None
+
+
+def _character_damage(data: LogicData, character: Mapping[str, Any]) -> tuple[int | None, str | None]:
+    """Find a character's per-hit damage, wherever the build happens to keep it.
+
+    Four places, in precedence order:
+
+    1. ``Damage`` on the character (melee units).
+    2. ``CustomFirstProjectile`` -- Princess fires this for damage while her
+       plain ``Projectile`` is a visual-only "Deco" round.
+    3. ``Projectile`` (ordinary ranged units).
+    4. ``AttackSequenceList`` -- reworked multi-swing units such as Berserker
+       and Three Musketeers carry per-swing damage or a per-swing projectile.
+    """
+    damage = character.get("Damage")
+    if isinstance(damage, int):
+        return damage, "character"
+
+    for field_name, label in (
+        ("CustomFirstProjectile", "custom_first_projectile"),
+        ("Projectile", "projectile"),
+    ):
+        found = _projectile_damage(data, character.get(field_name))
+        if found is not None:
+            return found, f"{label}:{character[field_name]}"
+
+    sequence = character.get("AttackSequenceList")
+    if isinstance(sequence, (list, tuple)):
+        for step in sequence:
+            if not isinstance(step, Mapping):
+                continue
+            step_damage = step.get("Damage")
+            if isinstance(step_damage, int):
+                return step_damage, "attack_sequence"
+            found = _projectile_damage(data, step.get("Projectile"))
+            if found is not None:
+                return found, f"attack_sequence_projectile:{step['Projectile']}"
+    return None, None
+
+
+def _resolve_opt(data: LogicData, namespace: str, name: Any) -> Mapping[str, Any]:
+    if not isinstance(name, str):
+        return {}
+    try:
+        return data.resolve(f"{namespace}.{name}")
+    except UnknownEntity:
+        return {}
+
+
 def _spell_payload(data: LogicData, scale, level: int, card: Card, summary: dict[str, Any]) -> None:
-    """Fill in a spell's damage/radius by following projectile -> area effect."""
-    projectile: Mapping[str, Any] = {}
-    if card.projectile:
-        try:
-            projectile = data.resolve(f"PROJECTILE.{card.projectile}")
-        except UnknownEntity:
-            summary["error"] = f"unknown projectile {card.projectile!r}"
-            return
+    """Fill in a spell's payload by walking projectile -> area effect -> buff.
+
+    Spells keep their numbers in three different places depending on how they
+    work, and a spell can chain through all of them:
+
+    * **direct hit** -- damage on the projectile (Rocket, Fireball) or on a
+      one-shot area effect (Zap, Freeze);
+    * **indirect** -- the area effect fires its own projectile (Lightning);
+    * **over time** -- no damage at all on either, just a buff that carries
+      ``DamagePerSecond`` (Poison, Tornado).
+    """
+    projectile = _resolve_opt(data, "PROJECTILE", card.projectile)
+    if projectile:
         summary["projectile"] = card.projectile
 
     area_name = card.area_effect_object or projectile.get("AreaEffectObject")
-    area: Mapping[str, Any] = {}
-    if isinstance(area_name, str):
-        try:
-            area = data.resolve(f"AEO.{area_name}")
-            summary["area_effect"] = area_name
-        except UnknownEntity:
-            area = {}
+    area = _resolve_opt(data, "AEO", area_name)
+    if area:
+        summary["area_effect"] = area_name
 
-    damage = projectile.get("Damage")
-    if isinstance(damage, int):
-        summary["damage"] = scale.scale(damage, level)
+    # An area effect may itself launch the projectile that does the damage.
+    area_projectile = _resolve_opt(data, "PROJECTILE", area.get("Projectile"))
+
+    # The Log's thrown projectile carries no damage; the rolling one it spawns
+    # does, so follow the SpawnProjectile chain.
+    chain: list[tuple[Mapping[str, Any], str]] = []
+    seen: set[str] = set()
+    current, label = projectile, "projectile"
+    while current:
+        chain.append((current, label))
+        spawn = current.get("SpawnProjectile")
+        if not isinstance(spawn, str) or spawn in seen:
+            break
+        seen.add(spawn)
+        current, label = _resolve_opt(data, "PROJECTILE", spawn), f"spawn_projectile:{spawn}"
+
+    for source, source_label in [*chain, (area, "area_effect"), (area_projectile, "area_projectile")]:
+        damage = source.get("Damage")
+        if isinstance(damage, int):
+            summary["damage"] = scale.scale(damage, level)
+            summary["damage_source"] = source_label
+            break
+
+    # A spell projectile can also carry troops (Goblin Barrel, Royal Delivery).
+    for source, _label in chain:
+        spawned = source.get("SpawnCharacter")
+        if isinstance(spawned, str):
+            summary["spawns_character"] = spawned
+            summary["spawns_count"] = _int(source.get("SpawnCharacterCount"), 1)
+            break
+
     radius = projectile.get("Radius") or area.get("Radius")
     if isinstance(radius, int):
         summary["radius"] = radius
 
-    # Area effects tick damage over a lifetime instead of hitting once.
-    tick_damage = area.get("Damage")
-    if isinstance(tick_damage, int):
-        summary["area_damage_per_tick"] = scale.scale(tick_damage, level)
+    # Damage-over-time lives on the buff the area effect applies.
+    buff = _resolve_opt(data, "BUFF", area.get("Buff") or projectile.get("TargetBuff"))
+    if buff:
+        summary["buff"] = area.get("Buff") or projectile.get("TargetBuff")
+        dps = buff.get("DamagePerSecond")
+        if isinstance(dps, int):
+            summary["damage_per_second"] = scale.scale(dps, level)
+        for key, field_name in (
+            ("buff_speed_multiplier", "SpeedMultiplier"),
+            ("buff_hit_speed_multiplier", "HitSpeedMultiplier"),
+            ("buff_hit_frequency", "HitFrequency"),
+        ):
+            if buff.get(field_name) is not None:
+                summary[key] = buff[field_name]
+
     for key, field_name in (
-        ("area_duration", "LifeDuration"),
-        ("area_hit_frequency", "HitFrequency"),
+        ("duration", "LifeDuration"),
+        ("hit_frequency", "HitSpeed"),
+        ("buff_time", "BuffTime"),
         ("crown_tower_damage_percent", "CrownTowerDamagePercent"),
     ):
         value = area.get(field_name, projectile.get(field_name))
         if value is not None:
             summary[key] = value
+
+    # Graveyard, Vines and Clone define what they do entirely in the ACTION
+    # graph rather than in stat fields.  Record which action drives them so the
+    # cards needing the action interpreter are visible rather than looking blank.
+    for field_name in ("OnStartingAction", "OnHitAction"):
+        action = area.get(field_name) or projectile.get(field_name)
+        if isinstance(action, str):
+            summary["action"] = action
+            break
 
 
 def card_stat_summary(
@@ -259,7 +436,11 @@ def card_stat_summary(
 
     character_name, count = summons[0]
     summary["character"] = character_name
-    summary["count"] = count
+    # Total bodies deployed, across a squad of mixed unit types (Rascals) or an
+    # explicit unit list (Three Musketeers).
+    summary["count"] = sum(n for _name, n in summons)
+    if len(summons) > 1:
+        summary["squad"] = [{"character": n, "count": c} for n, c in summons]
     try:
         character = data.resolve(character_name)
     except UnknownEntity:
@@ -270,17 +451,11 @@ def card_stat_summary(
     if isinstance(hitpoints, int):
         summary["hitpoints"] = scale.scale(hitpoints, level)
 
-    damage = character.get("Damage")
-    projectile_name = character.get("Projectile")
-    if not isinstance(damage, int) and isinstance(projectile_name, str):
-        try:
-            projectile = data.resolve(f"PROJECTILE.{projectile_name}")
-        except UnknownEntity:
-            projectile = {}
-        damage = projectile.get("Damage")
-        summary["damage_from_projectile"] = projectile_name
+    damage, source = _character_damage(data, character)
     if isinstance(damage, int):
         summary["damage"] = scale.scale(damage, level)
+        if source:
+            summary["damage_source"] = source
 
     for key, field in (
         ("hit_speed", "HitSpeed"),

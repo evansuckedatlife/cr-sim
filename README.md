@@ -12,7 +12,7 @@ Full plan: `../.claude/plans/i-want-to-build-purrfect-kernighan.md`.
 
 | Milestone | State | Notes |
 |-----------|-------|-------|
-| **M0 — data pipeline** | ✅ | APK decoder, csv_logic + TOML ingestion, `EXT` inheritance, level scaling, 122-card registry, stat gate. **27 tests.** |
+| **M0 — data pipeline** | ✅ | APK decoder, csv_logic + TOML ingestion, `EXT` inheritance, level scaling, 122-card registry, stat gate. Every playable card resolves. **50 tests.** |
 | M1 — fixed-point core, arena, tick loop | ⬜ next | |
 | M2 — targeting, attacks, projectiles, towers | ⬜ | |
 | M3 — pathing, collision, pushback | ⬜ | |
@@ -70,10 +70,44 @@ Two traps here, both caught by tests rather than assumed away:
 | Fireball | 688 dmg, 2.5-tile radius | ✅ exact |
 | Arrows | 122 dmg | ✅ exact |
 | Snowball | 179 dmg | ✅ exact |
+| Zap / Freeze / Lightning / Log | 192 / 148 / 1057 / 268 | ✅ exact |
+| Poison | 92 dmg/sec over 8s | ✅ exact |
+| Ice Wizard / Electro Wizard | 688 HP 89 dmg / 714 HP | ✅ exact |
 
 Match structure comes straight out of `battle_timelines.csv` and matches live
 play exactly: 6 starting elixir, 180s regulation + 120s overtime, and elixir at
 2800 / 1400 / 930 ms per unit across 120s / 120s / 60s phases.
+
+### Where the numbers actually hide
+
+A card's stats are not in one place, and the naive "`SummonCharacter` →
+`Damage`" reading silently produces a blank row for a third of the roster.
+Every one of these paths is exercised by a test:
+
+| Path | Card that needs it |
+|---|---|
+| `Damage` on the character | Knight |
+| `Projectile` → `Damage` | Musketeer |
+| `CustomFirstProjectile` (plain `Projectile` is a visual-only "Deco" round) | Princess |
+| `AttackSequenceList[].Damage` (multi-swing rework) | Berserker |
+| No summon field at all → character of the **same name** | Ice Wizard, Electro Wizard |
+| `SummonCharactersList` + per-unit offsets | Three Musketeers |
+| Area effect → `Damage` | Zap, Freeze |
+| Area effect → `Projectile` → `Damage` | Lightning |
+| `SpawnProjectile` chain | The Log |
+| Buff → `DamagePerSecond` | Poison, Tornado |
+| `SpawnCharacter` on the spell's *projectile* | Goblin Barrel |
+| `OnStartingAction` → the ACTION graph | Graveyard, Vines, Clone |
+
+That last row is the important one for later milestones: this build ships **828
+`ACTION` definitions**, a declarative behavior-graph language with expression
+conditions (`target_in_range(x) && target_is_ground`) driving branching attacks,
+evolutions and champion abilities. 18 characters and 4 spells hook into it.
+M6/M7 will need an interpreter for it rather than hand-coded special cases.
+
+The arena layout is data too — `SPAWN_GROUP.King_PrincessTowers` places the King
+Tower at (18, 6) and Princess Towers at (7, 13) and (29, 13), in half-tiles
+across the 18×32 arena. M1 does not have to guess the geometry.
 
 ## Data provenance
 
@@ -104,7 +138,7 @@ python -m cr_sim.cli cards               # the 122-card playable pool
 python -m cr_sim.cli cards --kind spell --level 14
 python -m cr_sim.cli card Knight         # full resolved stats for one card
 python -m cr_sim.cli validate            # the stat gate + open questions
-python -m pytest                         # 27 tests
+python -m pytest                         # 50 tests
 ```
 
 `freeze` re-cuts the regression baseline (`reference/card_stats.json`). Note the

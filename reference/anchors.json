@@ -56,6 +56,55 @@
       "elixir": 2,
       "rarity": "Common",
       "damage": 179
+    },
+    "Zap": {
+      "_source": "tournament-standard 192 damage; pins the area-effect damage path",
+      "elixir": 2,
+      "rarity": "Common",
+      "damage": 192
+    },
+    "Lightning": {
+      "_source": "tournament-standard 1057; pins the area-effect -> projectile chain",
+      "elixir": 6,
+      "rarity": "Epic",
+      "damage": 1057
+    },
+    "Log": {
+      "_source": "tournament-standard 268; pins the SpawnProjectile chain",
+      "elixir": 2,
+      "rarity": "Legendary",
+      "damage": 268
+    },
+    "Poison": {
+      "_source": "tournament-standard 92 damage/second over 8s; pins the buff DoT path",
+      "elixir": 4,
+      "rarity": "Epic",
+      "damage_per_second": 92
+    },
+    "IceWizard": {
+      "_source": "tournament-standard 688 HP / 89 damage; pins the same-name character fallback",
+      "elixir": 3,
+      "rarity": "Legendary",
+      "hitpoints": 688,
+      "damage": 89
+    },
+    "ElectroWizard": {
+      "_source": "tournament-standard 714 HP; same-name fallback",
+      "elixir": 4,
+      "rarity": "Legendary",
+      "hitpoints": 714
+    },
+    "GoblinGang": {
+      "_source": "3 Goblins + 3 Spear Goblins = 6 bodies",
+      "elixir": 3,
+      "rarity": "Common",
+      "count": 6
+    },
+    "ThreeMusketeers": {
+      "_source": "reworked card; 3 units from an explicit SummonCharactersList",
+      "elixir": 9,
+      "rarity": "Rare",
+      "count": 3
     }
   },
   "engine_constants": {
@@ -63,8 +112,16 @@
     "starting_elixir": 6,
     "regulation_seconds": 180,
     "overtime_seconds": 120,
-    "elixir_ms_per_unit": [2800, 1400, 930],
-    "elixir_phase_seconds": [120, 120, 60],
+    "elixir_ms_per_unit": [
+      2800,
+      1400,
+      930
+    ],
+    "elixir_phase_seconds": [
+      120,
+      120,
+      60
+    ],
     "max_elixir": 10,
     "princess_tower_hitpoints_level_1": 1400,
     "princess_tower_hit_speed": 800,

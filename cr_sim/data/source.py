@@ -44,9 +44,34 @@ _CSV_TO_NAMESPACE = {
     "spells_characters": "SPELL_CHARACTER",
     "spells_buildings": "SPELL_BUILDING",
     "spells_other": "SPELL_OTHER",
+    "spells_evolved": "SPELL_EVOLVED",
+    "spells_hero_form": "SPELL_HERO",
+}
+
+#: TOML-only files whose bare top-level sections belong to a known namespace.
+#: Without these their contents would be stranded -- ``spawn_groups`` in
+#: particular carries the arena's tower layout.
+_TOML_FILE_NAMESPACE = {
+    "actions": "ACTION",
+    "game_object_filters": "FILTER",
+    "spawn_groups": "SPAWN_GROUP",
+    "shapes": "SHAPE",
+    "damage_types": "DAMAGE_TYPE",
+    "target_resolvers": "TARGET_RESOLVER",
+    "variables": "VARIABLE",
 }
 
 _MAX_BASE_DEPTH = 16
+
+#: Where bare TOML sections go when the file is not an overlay for a CSV table.
+_LOOSE_NAMESPACE = "_LOOSE"
+
+
+def _is_namespace(key: str) -> bool:
+    """Namespaces are SHOUTED (``CHARACTER``, ``AEO``, ``SPELL_CHARACTER``);
+    entity names are CamelCase (``Archer``, ``DummyKingTower``)."""
+    stripped = key.replace("_", "").replace(".", "")
+    return bool(stripped) and stripped.isupper()
 
 
 class UnknownEntity(KeyError):
@@ -96,13 +121,29 @@ class LogicData:
 
         for path in sorted(root.rglob("*.toml")):
             parsed = tomllib.loads(path.read_text(encoding="utf-8"))
-            for namespace, entries in parsed.items():
+            # A TOML file named after a CSV table is an *overlay*: its top-level
+            # sections are bare entity names rather than namespaces, and they
+            # extend that table.  spells_characters.toml is where Three
+            # Musketeers' SummonCharactersList lives, for instance.
+            overlay_namespace = _CSV_TO_NAMESPACE.get(path.stem) or _TOML_FILE_NAMESPACE.get(
+                path.stem
+            )
+            for key, entries in parsed.items():
                 if not isinstance(entries, dict):
                     continue
-                bucket = data.sections.setdefault(namespace, {})
-                for name, body in entries.items():
-                    if isinstance(body, dict):
-                        bucket[name] = body
+                if _is_namespace(key):
+                    bucket = data.sections.setdefault(key, {})
+                    for name, body in entries.items():
+                        if isinstance(body, dict):
+                            bucket[name] = body
+                elif overlay_namespace is not None:
+                    bucket = data.sections.setdefault(overlay_namespace, {})
+                    # Merge rather than replace: several files may extend one entity.
+                    bucket.setdefault(key, {}).update(entries)
+                else:
+                    # A bare section in a non-overlay file; keep it addressable
+                    # under its own name so nothing is silently lost.
+                    data.sections.setdefault(_LOOSE_NAMESPACE, {})[key] = entries
         return data
 
     def _note_bad_table(self, path: Path, exc: Exception) -> None:
