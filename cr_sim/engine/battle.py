@@ -97,6 +97,7 @@ class Battle:
         "regenerate_elixir",
         "apply_commands",
         "advance_deploy_timers",
+        "advance_lifetimes",
         "update_buffs",
         "acquire_targets",
         "resolve_attacks",
@@ -127,6 +128,7 @@ class Battle:
         "_pending",
         "_phase_fns",
         "frames",
+        "_towers",
     )
 
     def __init__(
@@ -151,6 +153,10 @@ class Battle:
         self.entities: list[Entity] = []
         self._routes: dict[int, Route] = {}
         self._specs: dict[str, UnitSpec] = {}
+        #: Towers indexed by team. There are only ever three a side, and every
+        #: moving unit needs them each tick, so scanning the whole entity list
+        #: for them turns movement into an O(entities^2) phase.
+        self._towers: dict[Team, list[Entity]] = {Team.BLUE: [], Team.RED: []}
         self._pending: list[Command] = []
         self.frames: list[dict] = []
         self.tick = 0
@@ -207,6 +213,7 @@ class Battle:
                 mass=1000,
             )
             self.entities.append(tower)
+            self._towers[placement.team].append(tower)
 
     def _spec(self, name: str, *, rarity: str) -> UnitSpec:
         key = f"{name}@{rarity}"
@@ -272,6 +279,7 @@ class Battle:
                     mass=spec.mass,
                     flying=spec.flying,
                     shield=spec.shield_hitpoints,
+                    lifetime_ticks=spec.lifetime_ticks,
                 )
                 self.entities.append(unit)
                 index += 1
@@ -355,6 +363,19 @@ class Battle:
             if entity.deploy_ticks_left > 0:
                 entity.tick_deploy()
 
+    def _phase_advance_lifetimes(self) -> None:
+        """Expire temporary buildings.
+
+        Spawned buildings are on a clock independent of combat: a Cannon lives
+        30 seconds and a Goblin Drill 10, whether or not anything ever attacks
+        them. Placing a building is therefore always a trade of permanent
+        elixir for temporary board presence, which is why they can never
+        just be left down.
+        """
+        for entity in self.entities:
+            if not entity.dead and entity.lifetime_left > 0 and not entity.is_deploying:
+                entity.tick_lifetime()
+
     def _phase_update_buffs(self) -> None:
         """M5: tick rage/slow/freeze/stun durations and expire them."""
 
@@ -378,8 +399,18 @@ class Battle:
             if spec is None or spec.speed_per_tick <= 0:
                 continue
             route = self._routes.get(entity.id)
-            if route is None or route.finished:
-                goal = self._objective(entity)
+            if route is not None and route.finished:
+                # Arrived. Hold position rather than re-planning every tick --
+                # in M2 this is where the unit starts attacking. Only a target
+                # that has died is worth re-planning for.
+                target = self._by_id(entity.target_id)
+                if target is not None and not target.dead:
+                    entity.set_state(EntityState.IDLE)
+                    continue
+                route = None
+                self._routes.pop(entity.id, None)
+            if route is None:
+                goal = self._pick_objective(entity)
                 if goal is None:
                     continue
                 route = route_to(
@@ -415,26 +446,31 @@ class Battle:
 
     # ------------------------------------------------------------- helpers
 
-    def _objective(self, entity: Entity) -> tuple[int, int] | None:
-        """Where a unit walks when it has no target yet.
+    def _by_id(self, entity_id: int) -> Entity | None:
+        if not entity_id:
+            return None
+        for tower in self._towers[Team.BLUE] + self._towers[Team.RED]:
+            if tower.id == entity_id:
+                return tower
+        return None
+
+    def _pick_objective(self, entity: Entity) -> tuple[int, int] | None:
+        """Choose and remember where a unit is walking.
 
         Ground troops head for the enemy Princess Tower on their side of the
         board, which is what makes a unit's deployment x-position decide its
-        lane. The King Tower is only the objective once both Princess Towers on
-        that side are gone.
+        lane. The King Tower only becomes the objective once the Princess Tower
+        covering that side is gone.
         """
-        enemy = entity.team.opponent
-        candidates = [
-            e
-            for e in self.entities
-            if e.team is enemy and e.kind is EntityKind.TOWER and not e.dead
-        ]
+        candidates = [t for t in self._towers[entity.team.opponent] if not t.dead]
         if not candidates:
             return None
         princesses = [e for e in candidates if "King" not in getattr(e.spec, "name", "")]
         pool = princesses or candidates
-        # Nearest by x keeps a unit in the lane it was placed in.
+        # Nearest by x keeps a unit in the lane it was placed in; the id is a
+        # stable tiebreak so two equidistant units never disagree.
         best = min(pool, key=lambda e: (abs(e.x - entity.x), e.id))
+        entity.target_id = best.id
         return best.x, best.y
 
     def _king(self, team: Team) -> Entity | None:

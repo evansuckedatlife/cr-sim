@@ -106,6 +106,7 @@ class Entity:
         "mass",
         "flying",
         "dead",
+        "lifetime_left",
     )
 
     def __init__(
@@ -123,6 +124,7 @@ class Entity:
         mass: int = 0,
         flying: bool = False,
         shield: int = 0,
+        lifetime_ticks: int = 0,
     ) -> None:
         self.id = next_entity_id()
         self.kind = kind
@@ -142,6 +144,11 @@ class Entity:
         self.mass = mass
         self.flying = flying
         self.dead = False
+        #: Ticks until this entity expires on its own. Spawned buildings are
+        #: temporary -- a Cannon lives 30 seconds whether or not anything
+        #: attacks it -- so the timer is part of the entity, not of combat.
+        #: Zero means "permanent" (troops, towers).
+        self.lifetime_left = lifetime_ticks
 
     # ------------------------------------------------------------- lifecycle
 
@@ -166,6 +173,16 @@ class Entity:
         if self.deploy_ticks_left == 0:
             self.state = EntityState.IDLE
             self.state_ticks = 0
+            return True
+        return False
+
+    def tick_lifetime(self) -> bool:
+        """Count down an expiry timer. Returns True on the tick it runs out."""
+        if self.lifetime_left <= 0:
+            return False
+        self.lifetime_left -= 1
+        if self.lifetime_left == 0:
+            self.kill()
             return True
         return False
 

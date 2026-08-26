@@ -149,7 +149,7 @@ def cmd_battle(args) -> int:
     from .engine.battle import Battle, BattleConfig
     from .engine.entity import Team
     from .engine.fixed import SUBTILES_PER_TILE, to_tiles
-    from .render.web import render_ascii, render_replay
+    from .render.web import build_icon_map, render_ascii, render_replay
 
     data, levels, registry = _load(args.build)
     blue, red = _resolve_deck(args.blue), _resolve_deck(args.red)
@@ -178,27 +178,38 @@ def cmd_battle(args) -> int:
     print(f"red:  {', '.join(red)}")
     print(f"blue opening hand: {battle.players[Team.BLUE].hand}")
 
-    # Scripted deployments so there is something to watch. M2 replaces this
-    # with real agents; for now it exercises deploy, routing and the tick loop.
+    # A scripted opponent so there is something to watch. This is not an agent
+    # and makes no tactical decisions -- it spends elixir on whatever is in hand
+    # as soon as it can afford it, which is enough to exercise deployment, lane
+    # routing, building lifetimes and the tick loop. M2 replaces it.
     tile = SUBTILES_PER_TILE
-    script = [
-        (int(1.5 * args.tps), Team.BLUE, 0, 3.5, 12.0),
-        (int(4.0 * args.tps), Team.RED, 0, 14.5, 20.0),
-        (int(8.0 * args.tps), Team.BLUE, 1, 9.0, 10.0),
-        (int(12.0 * args.tps), Team.RED, 1, 3.5, 22.0),
-    ]
-    pending = list(script)
+    lanes = (3.5, 9.0, 14.5)
     played: list[str] = []
+    rng = battle.rng.stream("demo-script")
+    next_play = {Team.BLUE: int(1.5 * args.tps), Team.RED: int(3.0 * args.tps)}
+    interval = max(1, int(args.interval * args.tps))
 
     limit = args.ticks if args.ticks else battle.timeline.total_ticks
     while battle.tick < limit and not battle.finished:
-        while pending and pending[0][0] <= battle.tick:
-            _t, team, slot, tx, ty = pending.pop(0)
-            hand = battle.players[team].hand
-            if slot < len(hand):
-                card = hand[slot]
-                if battle.play_card(team, card, int(tx * tile), int(ty * tile)):
-                    played.append(f"t={battle.tick / args.tps:.1f}s {team.name} {card} @({tx},{ty})")
+        for team in (Team.BLUE, Team.RED):
+            if battle.tick < next_play[team]:
+                continue
+            player = battle.players[team]
+            affordable = []
+            for name in player.hand:
+                card = registry.get(name)
+                if card is not None and player.elixir.can_afford(card.mana_cost):
+                    affordable.append(name)
+            if not affordable:
+                continue
+            choice = affordable[rng.below(len(affordable))]
+            lane = lanes[rng.below(len(lanes))]
+            y = 11.0 + rng.below(4) if team is Team.BLUE else 21.0 - rng.below(4)
+            if battle.play_card(team, choice, int(lane * tile), int(y * tile)):
+                played.append(
+                    f"t={battle.tick / args.tps:>5.1f}s {team.name:5} {choice:12} @({lane}, {y})"
+                )
+                next_play[team] = battle.tick + interval
         battle.step()
 
     result = battle.result or battle._decide("time")
@@ -225,6 +236,7 @@ def cmd_battle(args) -> int:
             # playback advances one frame at a time; the clock still counts real ticks
             ticks_per_second=args.tps / max(1, args.frame_interval),
             real_tps=args.tps,
+            icons=build_icon_map(registry),
             meta=f"seed {args.seed} &middot; {args.tps} TPS &middot; level {args.level}",
         )
         print(f"\nwrote {out}  ({len(battle.frames)} frames) - open it in a browser")
@@ -299,6 +311,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--html", type=Path, help="write a standalone replay viewer here")
     p.add_argument("--ascii", action="store_true", help="print a terminal snapshot")
     p.add_argument("--frame-interval", type=int, default=3, help="record 1 viewer frame every N ticks")
+    p.add_argument("--interval", type=float, default=2.5, help="seconds between scripted deployments")
     p.set_defaults(func=cmd_battle)
 
     p = sub.add_parser("arena", help="print the arena geometry")

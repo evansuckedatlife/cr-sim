@@ -19,7 +19,44 @@ from typing import Any, Mapping, Sequence
 
 from ..engine.arena import Arena, Tile
 
-__all__ = ["render_replay"]
+__all__ = ["render_replay", "build_icon_map", "ICON_DIR"]
+
+ICON_DIR = Path(__file__).resolve().parents[2] / "data_cache" / "icons"
+
+
+def build_icon_map(registry, icon_dir: Path | None = None) -> dict[str, str]:
+    """Map each spawnable character name to its card's artwork file.
+
+    The frames record *character* names (``Goblin_Stab``) while the artwork is
+    keyed by *card* (``goblins.png``), so the mapping is built by walking each
+    card's summons. A card whose art is missing from the pack simply has no
+    entry and falls back to a plain circle.
+    """
+    icon_dir = icon_dir or ICON_DIR
+    if not icon_dir.is_dir():
+        return {}
+    available = {p.name: p for p in icon_dir.glob("*.png")}
+    mapping: dict[str, str] = {}
+    for card in registry.standard():
+        row = card.raw or {}
+        filename = row.get("HighresImageFilename")
+        if not filename and row.get("IconFile"):
+            filename = f"image/chr/{row['IconFile']}.png"
+        if not filename:
+            continue
+        path = available.get(Path(filename).name)
+        if path is None:
+            continue
+        for character, _count in card.summons():
+            mapping.setdefault(character, str(path))
+        mapping.setdefault(card.name, str(path))
+    return mapping
+
+
+def _data_uri(path: Path) -> str:
+    import base64
+
+    return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
 
 _PAGE = """<!doctype html>
 <meta charset="utf-8">
@@ -73,6 +110,8 @@ const FRAMES = {frames};
 const SCALE = {scale};
 const TPS = {tps};
 const REAL_TPS = {real_tps};
+const ICON_SRC = {icons};
+const ICONS = {{}};
 const HW = ARENA.half_width, HH = ARENA.half_height;
 const c = document.getElementById('c'), g = c.getContext('2d');
 const $ = id => document.getElementById(id);
@@ -104,9 +143,23 @@ function draw(i) {{
     const cx = px(x), cy = px(y);
     const tower = kind === 2;
     const r = tower ? SCALE * 1.5 : Math.max(4, SCALE * 0.55);
+    const img = ICONS[name];
+    g.globalAlpha = deploying ? 0.5 : 1;
+    // Team ring first, so the art sits on a coloured disc and ownership stays
+    // readable even for art that is mostly transparent.
     g.beginPath(); g.arc(cx, cy, r, 0, 7);
     g.fillStyle = team === 0 ? '#4c8dff' : '#ff5c6c';
-    g.globalAlpha = deploying ? 0.45 : 1; g.fill(); g.globalAlpha = 1;
+    g.fill();
+    if (img && img.complete && img.naturalWidth) {{
+      g.save();
+      g.beginPath(); g.arc(cx, cy, r - 1, 0, 7); g.clip();
+      const d = (r - 1) * 2;
+      g.drawImage(img, cx - r + 1, cy - r + 1, d, d);
+      g.restore();
+      g.lineWidth = 2; g.strokeStyle = team === 0 ? '#9dc2ff' : '#ffb0b8';
+      g.beginPath(); g.arc(cx, cy, r, 0, 7); g.stroke();
+    }}
+    g.globalAlpha = 1;
     if (deploying) {{
       g.setLineDash([3, 3]); g.strokeStyle = '#fff';
       g.beginPath(); g.arc(cx, cy, r + 3, 0, 7); g.stroke(); g.setLineDash([]);
@@ -145,7 +198,15 @@ slider.oninput = () => draw(+slider.value);
 $('play').onclick = e => {{ playing = !playing; e.target.textContent = playing ? 'pause' : 'play'; }};
 $('slow').onclick = () => speed = 0.5;
 $('fast').onclick = () => speed = 4;
-draw(0); requestAnimationFrame(loop);
+let pending = 0;
+for (const k in ICON_SRC) {{
+  const im = new Image(); pending++;
+  im.onload = im.onerror = () => {{ if (--pending === 0) draw(+slider.value); }};
+  im.src = ICON_SRC[k]; ICONS[k] = im;
+}}
+draw(0);
+if (pending === 0) draw(0);
+requestAnimationFrame(loop);
 </script>
 """
 
@@ -159,14 +220,27 @@ def render_replay(
     scale: int = 13,
     meta: str = "",
     real_tps: int | None = None,
+    icons: Mapping[str, str] | None = None,
 ) -> Path:
-    """Write a standalone HTML replay of ``frames``."""
+    """Write a standalone HTML replay of ``frames``.
+
+    ``icons`` maps a character name to a PNG path. Only names that actually
+    appear in ``frames`` are embedded, so a replay carries the handful of icons
+    it needs rather than the whole card set.
+    """
     arena_payload = {
         "half_width": arena.half_width,
         "half_height": arena.half_height,
         "cells": list(arena.cells),
     }
+    present = {e[8] for frame in frames for e in frame.get("e", ())}
+    embedded = {
+        name: _data_uri(Path(path))
+        for name, path in (icons or {}).items()
+        if name in present and Path(path).is_file()
+    }
     page = _PAGE.format(
+        icons=json.dumps(embedded, separators=(",", ":")),
         real_tps=real_tps or ticks_per_second,
         arena=json.dumps(arena_payload, separators=(",", ":")),
         frames=json.dumps(list(frames), separators=(",", ":")),

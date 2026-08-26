@@ -335,3 +335,81 @@ def test_battle_runs_to_time_without_crashing(data, levels, registry):
     result = battle.run(max_ticks=600)
     assert result.ticks == 600
     assert result.reason == "time"
+
+
+# ------------------------------------------------------- building lifetimes
+
+
+def test_spawned_buildings_expire_on_their_own(data, levels, registry):
+    """A Cannon lives 30 seconds whether or not anything attacks it.
+
+    This is independent of combat: placing a building always trades permanent
+    elixir for temporary board presence, which is why one can never simply be
+    left down. Caught because a 300-second run still had a full-health Cannon
+    standing at the end.
+    """
+    battle = make_battle(data, levels, registry, first_card="Cannon")
+    assert battle.play_card(Team.BLUE, "Cannon", tiles(3.5), tiles(12))
+    cannon = next(e for e in battle.entities if e.spec and e.spec.name == "Cannon")
+    assert cannon.spec.lifetime_ticks == 1800  # 30000ms at 60 TPS
+
+    for _ in range(cannon.spec.deploy_ticks + cannon.spec.lifetime_ticks - 5):
+        battle.step()
+    assert not cannon.dead, "expired early"
+    for _ in range(10):
+        battle.step()
+    assert cannon.dead, "outlived its lifetime"
+
+
+def test_towers_and_troops_have_no_lifetime(data, levels, registry):
+    battle = make_battle(data, levels, registry)
+    for tower in (e for e in battle.entities if e.kind is EntityKind.TOWER):
+        assert tower.lifetime_left == 0
+    battle.play_card(Team.BLUE, "Knight", tiles(3.5), tiles(12))
+    knight = next(e for e in battle.entities if e.spec and e.spec.name == "Knight")
+    assert knight.lifetime_left == 0
+
+
+def test_lifetime_does_not_run_during_deployment(data, levels, registry):
+    """The clock starts when the building is actually up, not when placed."""
+    battle = make_battle(data, levels, registry, first_card="Cannon")
+    battle.play_card(Team.BLUE, "Cannon", tiles(3.5), tiles(12))
+    cannon = next(e for e in battle.entities if e.spec and e.spec.name == "Cannon")
+    full = cannon.lifetime_left
+    for _ in range(cannon.spec.deploy_ticks - 1):
+        battle.step()
+    assert cannon.lifetime_left == full
+
+
+# ----------------------------------------------------------- scaling guard
+
+
+def test_movement_does_not_scale_quadratically(data, levels, registry):
+    """Arrived units must park, not re-plan every tick.
+
+    Re-planning meant scanning every entity for a target on every tick for
+    every idle unit, which turned a busy board into an O(n^2) stall. Guard it
+    by timing a crowded board against a sparse one.
+    """
+    import time
+
+    def run(units: int) -> float:
+        battle = make_battle(data, levels, registry, first_card="Skeletons")
+        battle.players[Team.BLUE].elixir.add(10)
+        for i in range(units):
+            battle.players[Team.BLUE].cycle = ["Skeletons"] + [
+                c for c in DECK if c != "Skeletons"
+            ]
+            battle.players[Team.BLUE].elixir.add(10)
+            battle.play_card(Team.BLUE, "Skeletons", tiles(3.5 + (i % 3)), tiles(12))
+        for _ in range(400):  # long enough for everything to arrive and park
+            battle.step()
+        start = time.perf_counter()
+        for _ in range(200):
+            battle.step()
+        return time.perf_counter() - start
+
+    sparse = run(2)
+    crowded = run(20)
+    # 10x the units must not cost anywhere near 100x the time.
+    assert crowded < sparse * 25 + 0.5, f"sparse={sparse:.4f}s crowded={crowded:.4f}s"
