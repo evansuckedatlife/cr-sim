@@ -185,7 +185,8 @@
       "question": "Arrows deals 122 per projectile across 3 waves of 10. How many waves actually land on one stationary unit, and does the in-game 'Damage' figure show per-wave or total?",
       "why_it_matters": "Decides whether Arrows clears 230 HP Minions, which is its defining use. Affects any spell with ProjectileWaves or MultipleProjectiles (Arrows, Hunter, Princess).",
       "how_to_resolve": "M5 models waves explicitly; then assert Arrows clears a Minion Horde and Hunter's point-blank burst kills what it should. Until then do not treat `damage` on these three as a single hit.",
-      "status": "open"
+      "status": "open",
+      "blocks": "M5"
     },
     {
       "id": "tower-hp-scaling",
@@ -204,7 +205,7 @@
       "evidence": "Every non-event tilemap in build 150535029 has 2-tile bridges (cells x5-8 and x27-30 across all four river rows), and 141 of 158 arena rows point at that one tilemap. Public descriptions say 2 tiles in Arenas 1-6 and 8-9 but 3 tiles in Arenas 7 and 10-23, which this build's data does not reproduce anywhere.",
       "how_to_resolve": "Likely the public figure describes the visual bridge art, or predates a geometry unification. If a future APK extraction shows a 3-tile tilemap, tests/test_arena_and_battle.py::test_bridges_are_two_tiles_wide_in_this_build will fail and flag it.",
       "status": "open",
-      "priority": "medium"
+      "priority": "low"
     },
     {
       "id": "building-collision-shape",
@@ -213,7 +214,8 @@
       "evidence": "The King Tower's blocked footprint in tilemap.csv is a clean 3.0x3.0 tile SQUARE (cells x15-20, y3-8), not a disc, and buildings are placed on tile centres. But the only per-entity extent in the data is CollisionRadius, a single scalar (KingTower 1400, PrincessTower 1000), which is circular by nature. PrincessTower has no blocked footprint at all. cr-sim's fixed.circles_overlap currently treats everything as a circle.",
       "how_to_resolve": "M3 (collision). Test by walking a troop diagonally at a Cannon's corner and comparing where it stops against the real game.",
       "status": "open",
-      "priority": "medium"
+      "priority": "high",
+      "blocks": "M3"
     }
   ]
 }
