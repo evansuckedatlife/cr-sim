@@ -53,13 +53,21 @@ class SpellPlan:
     #: Volleys, and the gap between them. One volley is the normal case.
     waves: int
     wave_interval_ticks: int
-    #: Radius the card itself advertises, used when the payload does not carry
-    #: one of its own.
+    #: Radius the card itself advertises. For a scattered spell this is the
+    #: area the volley covers, which is not the same as any one projectile's
+    #: splash: Arrows advertises 3.5 tiles and each of its arrows splashes 1.4.
     radius: int
+    #: Projectiles per volley. Arrows is ten, spread across ``radius``; firing
+    #: one leaves the card covering a third of the ground it should.
+    projectiles: int = 1
 
     @property
     def is_waved(self) -> bool:
         return self.waves > 1
+
+    @property
+    def is_scattered(self) -> bool:
+        return self.projectiles > 1
 
     @property
     def does_nothing(self) -> bool:
@@ -100,4 +108,5 @@ def plan_spell(card: Card, clock: TickClock | None = None) -> SpellPlan:
         waves=max(1, _int(row.get("ProjectileWaves"), 1)),
         wave_interval_ticks=clock.ticks(row.get("ProjectileWaveInterval")),
         radius=_int(row.get("Radius")),
+        projectiles=max(1, _int(row.get("MultipleProjectiles"), 1)),
     )

@@ -20,7 +20,7 @@ order.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Iterable, Sequence
 
 from ..data.cards import Card, CardKind, CardRegistry
@@ -845,7 +845,7 @@ class Battle:
         for entity in self.entities:
             if entity.buffs is None or entity.dead:
                 continue
-            owed = entity.buffs.tick()
+            owed = entity.buffs.tick(entity.kind is EntityKind.TOWER)
             if owed.damage:
                 dealt = entity.apply_damage(owed.damage)
                 if dealt:
@@ -1148,6 +1148,18 @@ class Battle:
         pspec = self._projectile_spec(plan.projectile, card.rarity, level)
         if pspec is None:
             return
+        if plan.is_scattered:
+            # A volley is ten arrows to look at and one area to be hit by. Each
+            # unit under it takes the listed damage once per wave, so it is
+            # fired as a single shot carrying the *card's* radius rather than
+            # the projectile's -- Arrows advertises 3.5 tiles and each arrow
+            # splashes 1.4.
+            #
+            # Ten overlapping shots was the first attempt and it covered the
+            # right ground for the wrong reason: anything near the centre was
+            # caught by several of them and took two or three times the card's
+            # damage.
+            pspec = replace(pspec, radius=max(pspec.radius, milli_tiles(plan.radius)))
         marker = Entity(
             kind=EntityKind.AREA_EFFECT, team=team, x=x, y=y, hitpoints=1, spawn_tick=self.tick
         )

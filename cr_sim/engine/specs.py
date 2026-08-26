@@ -20,7 +20,7 @@ from typing import Any, Mapping
 
 from ..data.cards import Card
 from ..data.leveling import LevelTable, TowerScale
-from ..data.source import LogicData
+from ..data.source import LogicData, UnknownEntity
 from .constants import TickClock
 from .entity import EntityKind
 from .fixed import SUBTILES_PER_TILE, milli_tiles
@@ -486,15 +486,30 @@ def _resolve_damage(data: LogicData, raw: Mapping[str, Any]) -> tuple[int, str]:
     return 0, "none"
 
 
-def _projectile_damage(data: LogicData, name: Any) -> int | None:
-    if not isinstance(name, str):
+def _projectile_damage(data: LogicData, name: Any, _depth: int = 0) -> int | None:
+    """Damage a named projectile delivers, following ``SpawnProjectile``.
+
+    A projectile may be pure delivery and keep its damage on what it turns
+    into. Firecracker is the clear case: ``FirecrackerProjectile`` carries no
+    damage at all and spawns ``FirecrackerExplosion``, which carries 25 -- so a
+    reader that stopped at the first projectile gave her a damage of zero and
+    made a card that fights into one that does not.
+
+    The same chain is already followed when building the projectile itself, for
+    the Log; this keeps the unit's own damage figure in step with it.
+
+    Bounded, because a chain is data and data can be circular.
+    """
+    if not isinstance(name, str) or _depth > 4:
         return None
     try:
         projectile = data.resolve(f"PROJECTILE.{name}")
-    except KeyError:
+    except (KeyError, UnknownEntity):
         return None
     damage = projectile.get("Damage")
-    return damage if isinstance(damage, int) else None
+    if isinstance(damage, int):
+        return damage
+    return _projectile_damage(data, projectile.get("SpawnProjectile"), _depth + 1)
 
 
 def spec_for_card(

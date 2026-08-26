@@ -456,19 +456,22 @@ class BuffState:
             )
         )
 
-    def tick(self) -> "BuffTick":
+    def tick(self, is_crown_tower: bool = False) -> "BuffTick":
         """Advance every active buff by one tick.
 
         Expired buffs (``ticks_left`` reaching zero on this call) are dropped
         here rather than left for a caller to sweep, the same way
         :meth:`cr_sim.engine.entity.Entity` and area effects retire themselves
         on their own countdown. Returns the total damage-over-time owed this
-        tick, summed across every active buff (including independent stacks
-        of the same buff, each on its own countdown) -- raw, unreduced for
-        crown towers, since that reduction can differ per buff and this
-        entity-level total no longer knows which buff contributed what; a
-        caller needing per-buff crown tower damage should read
-        ``active_names()`` and call ``BuffSpec.damage_to`` itself.
+        tick, summed across every active buff (including independent stacks of
+        the same buff, each on its own countdown).
+
+        Crown tower reduction is applied per buff *here*, because it differs
+        per buff and only this loop knows which contributed what. Leaving it to
+        the caller -- which is what this used to do -- meant nobody applied it:
+        Poison is ``CrownTowerDamagePercent: -77``, so a tower should take 23%
+        of it, and instead took a Poison's full 736. Every damage-over-time
+        spell was hitting towers between three and four times too hard.
 
         Healing rides the same countdown and is reported separately rather than
         netted off. A unit under a Poison cloud and a Battle Healer is being
@@ -488,7 +491,7 @@ class BuffState:
                 # over an 8-second cloud.
                 active.ticks_to_next_damage -= 1
                 if active.ticks_to_next_damage <= 0:
-                    damage += active.spec.damage_per_second
+                    damage += active.spec.damage_to(is_crown_tower)
                     heal += active.spec.heal_per_second
                     active.ticks_to_next_damage = active.spec.hit_frequency_ticks
             active.ticks_left -= 1
