@@ -23,7 +23,7 @@ from ..data.leveling import LevelTable, TowerScale
 from ..data.source import LogicData
 from .constants import TickClock
 from .entity import EntityKind
-from .fixed import milli_tiles
+from .fixed import SUBTILES_PER_TILE, milli_tiles
 
 __all__ = ["UnitSpec", "build_unit_spec", "SpecError"]
 
@@ -99,6 +99,63 @@ class UnitSpec:
     buff_on_damage: str | None = None
     buff_on_damage_ticks: int = 0
 
+    #: What this leaves behind when it dies. Golem's two Golemites, Lava
+    #: Hound's six Pups, a hut's last defender. For the big ones this is most
+    #: of what you are paying for -- a Golem that did not split would be a
+    #: worse Giant, and killing one would end the push rather than start the
+    #: second half of it.
+    death_spawn_character: str | None = None
+    #: A second, different unit spawned alongside the first (Goblin Party Hut).
+    death_spawn_character2: str | None = None
+    death_spawn_count: int = 0
+    #: Ring radius the corpses land on. Zero puts them all on one point, which
+    #: would let a single splash hit every one of them.
+    death_spawn_radius: int = 0
+    death_spawn_deploy_ticks: int = 0
+    #: A blast on death, independent of the spawn. Golem's 88 in a 2-tile
+    #: radius is why dropping a Golem on your own troops is a real cost, and
+    #: Giant Skeleton's bomb is the entire card.
+    death_damage: int = 0
+    death_damage_radius: int = 0
+    death_pushback: int = 0
+    #: An area effect left where it died -- Ice Golem's slow, for instance.
+    death_area_effect: str | None = None
+
+    #: Periodic spawning, for the huts and for Witch and Tombstone. The first
+    #: wave lands after ``spawn_start_ticks`` and then every
+    #: ``spawn_interval_ticks``.
+    spawn_character: str | None = None
+    spawn_count: int = 0
+    spawn_start_ticks: int = 0
+    spawn_interval_ticks: int = 0
+    #: How long spawning halts after the spawner is attacked or acts.
+    spawn_pause_ticks: int = 0
+    #: Cap on how many of its children may be alive at once.
+    spawn_limit: int = 0
+
+    #: Charge: a unit that has run far enough unobstructed hits once for
+    #: ``damage_special`` instead of ``damage``, and moves at
+    #: ``charge_speed_multiplier`` while winding up. Prince, Dark Prince,
+    #: Battle Ram and Ram Rider all live on this.
+    charge_range: int = 0
+    charge_speed_multiplier: int = 0
+    damage_special: int = 0
+
+    #: Inferno ramp. Damage steps up the longer it holds one target, which is
+    #: why breaking line of sight (or a stun) resets it and is the only real
+    #: answer to an Inferno Tower.
+    variable_damage: tuple[int, ...] = ()
+    variable_damage_ticks: tuple[int, ...] = ()
+    #: Sparky: the windup is not restarted from zero when she retargets.
+    load_first_hit: bool = False
+
+    #: A timed explosive rather than a unit: Giant Skeleton's bomb, Balloon's,
+    #: Bomb Tower's. They carry no hitpoints at all -- they cannot be attacked
+    #: or destroyed, they simply sit for their fuse and then go off. Modelled
+    #: as an entity so the blast reuses the ordinary death payload, but flagged
+    #: so nothing can target one.
+    is_fuse: bool = False
+
     @property
     def is_melee(self) -> bool:
         # 1900 milli-tiles is the game's own MELEE_RANGE_LIMIT.
@@ -136,6 +193,47 @@ def _opt_str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+#: ``ChargeRange`` is the one distance in this file that is NOT milli-tiles.
+#: Read that way every charger sits at 0.25-0.30 tiles, which is meaningless as
+#: a run-up distance, and the value is near-identical across units whose speed,
+#: reach and damage all differ -- so it is not scaling with anything. Read as
+#: hundredths of a tile it is 2.5 tiles for the Prince, which is exactly the
+#: charge-up distance the card is known for, and 3.0 for Dark Prince and Battle
+#: Ram. See `charge-range-unit` in reference/anchors.json.
+_CHARGE_RANGE_PER_TILE = 100
+
+
+def _charge_range(value: Any) -> int:
+    raw = _int(value)
+    return raw * SUBTILES_PER_TILE // _CHARGE_RANGE_PER_TILE if raw else 0
+
+
+def _variable_damage(raw: Mapping[str, Any], scale: Any, level: int) -> tuple[int, ...]:
+    """The Inferno ramp, as an ordered damage ladder.
+
+    Stage one is the unit's ordinary ``Damage``; ``VariableDamage2`` and
+    ``VariableDamage3`` are the steps above it. Inferno Tower reads 17 / 62 /
+    331, which is the 20x escalation that makes it the answer to a tank and
+    useless against a swarm.
+    """
+    steps = [_int(raw.get("Damage"))]
+    for key in ("VariableDamage2", "VariableDamage3"):
+        if key in raw:
+            steps.append(_int(raw.get(key)))
+    if len(steps) == 1:
+        return ()
+    return tuple(scale.scale(step, level) for step in steps)
+
+
+def _variable_damage_ticks(raw: Mapping[str, Any], clock: TickClock) -> tuple[int, ...]:
+    """How long each ramp stage lasts before the next one takes over."""
+    times = []
+    for key in ("VariableDamageTime1", "VariableDamageTime2"):
+        if key in raw:
+            times.append(clock.ticks(raw.get(key)))
+    return tuple(times)
+
+
 def build_unit_spec(
     data: LogicData,
     levels: LevelTable,
@@ -160,7 +258,20 @@ def build_unit_spec(
 
     scale = levels.get(rarity)
     hitpoints = _int(raw.get("Hitpoints"))
-    if hitpoints <= 0:
+    # A bomb has no hitpoints because there is nothing to shoot. It is a fuse:
+    # ``DeployTime`` is how long it sits before going off -- 3000ms for Giant
+    # Skeleton's, which is the three-second delay the card is known for. Left
+    # to the guard below it would raise, `_spawn_units` would swallow the
+    # error, and the Giant Skeleton would die leaving nothing, deleting the
+    # entire card.
+    is_fuse = hitpoints <= 0 and bool(
+        _int(raw.get("DeathDamage"))
+        or raw.get("DeathAreaEffect")
+        or raw.get("DeathSpawnCharacter")
+    )
+    if is_fuse:
+        hitpoints = 1
+    elif hitpoints <= 0:
         raise SpecError(f"{name!r} has no hitpoints; not a spawnable unit")
 
     damage, source = _resolve_damage(data, raw)
@@ -186,9 +297,15 @@ def build_unit_spec(
         shield_hitpoints=scale.scale(_int(raw.get("ShieldHitpoints")), level),
         hit_speed_ticks=clock.ticks(raw.get("HitSpeed")),
         load_time_ticks=clock.ticks(raw.get("LoadTime")),
-        deploy_ticks=clock.ticks(raw.get("DeployTime")),
+        # A fuse spends its DeployTime counting down to its own death rather
+        # than waiting to become active, so the time goes to lifetime instead.
+        deploy_ticks=0 if is_fuse else clock.ticks(raw.get("DeployTime")),
         deploy_delay_ticks=clock.ticks(raw.get("DeployDelay")),
-        lifetime_ticks=clock.ticks(raw.get("LifeTime")),
+        lifetime_ticks=(
+            clock.ticks(raw.get("DeployTime")) if is_fuse
+            else clock.ticks(raw.get("LifeTime"))
+        ),
+        is_fuse=is_fuse,
         attack_range=milli_tiles(_int(raw.get("Range"))),
         minimum_range=milli_tiles(_int(raw.get("MinimumRange"))),
         sight_range=milli_tiles(_int(raw.get("SightRange"))),
@@ -210,6 +327,27 @@ def build_unit_spec(
         buff_when_not_attacking_ticks=clock.ticks(raw.get("BuffWhenNotAttackingTime")),
         buff_on_damage=_opt_str(raw.get("BuffOnDamage")),
         buff_on_damage_ticks=clock.ticks(raw.get("BuffOnDamageTime")),
+        death_spawn_character=_opt_str(raw.get("DeathSpawnCharacter")) or None,
+        death_spawn_character2=_opt_str(raw.get("DeathSpawnCharacter2")) or None,
+        death_spawn_count=_int(raw.get("DeathSpawnCount"), 1),
+        death_spawn_radius=milli_tiles(_int(raw.get("DeathSpawnRadius"))),
+        death_spawn_deploy_ticks=clock.ticks(raw.get("DeathSpawnDeployTime")),
+        death_damage=scale.scale(_int(raw.get("DeathDamage")), level),
+        death_damage_radius=milli_tiles(_int(raw.get("DeathDamageRadius"))),
+        death_pushback=milli_tiles(_int(raw.get("DeathPushBack"))),
+        death_area_effect=_opt_str(raw.get("DeathAreaEffect")) or None,
+        spawn_character=_opt_str(raw.get("SpawnCharacter")) or None,
+        spawn_count=_int(raw.get("SpawnNumber"), 1),
+        spawn_start_ticks=clock.ticks(raw.get("SpawnStartTime")),
+        spawn_interval_ticks=clock.ticks(raw.get("SpawnInterval")),
+        spawn_pause_ticks=clock.ticks(raw.get("SpawnPauseTime")),
+        spawn_limit=_int(raw.get("SpawnLimit")),
+        charge_range=_charge_range(raw.get("ChargeRange")),
+        charge_speed_multiplier=_int(raw.get("ChargeSpeedMultiplier")),
+        damage_special=scale.scale(_int(raw.get("DamageSpecial")), level),
+        variable_damage=_variable_damage(raw, scale, level),
+        variable_damage_ticks=_variable_damage_ticks(raw, clock),
+        load_first_hit=_bool(raw.get("LoadFirstHit")),
         source_ref=ref,
         level=level,
         rarity=rarity,

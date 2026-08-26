@@ -259,20 +259,30 @@ def test_every_troop_and_building_card_builds_a_spec(data, levels, registry):
     assert failures == [], failures
 
 
-def test_spell_carriers_are_rejected_loudly(data, levels, registry):
-    """Rage and Royal Delivery deploy an invulnerable carrier, not a unit.
+def test_spell_carriers_build_as_fuses(data, levels, registry):
+    """Rage and Royal Delivery deploy a carrier, not a unit -- and that is a fuse.
 
-    These must fail as specs rather than silently become zero-hitpoint troops;
-    they get their own entity type in M5. Pinned so a *third* such card shows up
-    as a test failure rather than a mystery.
+    Both drop something with no hitpoints at all: nothing can shoot a Rage
+    bottle or a Royal Delivery crate out of the air. What they carry is a
+    ``DeployTime`` fuse and a death payload, which is the same shape as a Giant
+    Skeleton's bomb, so they build through the same path rather than being
+    rejected.
+
+    Pinned as an exhaustive set so a *third* such card shows up as a test
+    failure rather than a mystery.
     """
-    carriers = []
+    fuses = []
+    failures = []
     for card in registry.standard():
         try:
-            spec_for_card(data, levels, card)
-        except SpecError:
-            carriers.append(card.name)
-    assert set(carriers) == {"Rage", "RoyalDelivery"}, carriers
+            specs = spec_for_card(data, levels, card)
+        except SpecError as exc:
+            failures.append(f"{card.name}: {exc}")
+            continue
+        if any(spec.is_fuse for spec in specs):
+            fuses.append(card.name)
+    assert failures == [], failures
+    assert set(fuses) == {"Rage", "RoyalDelivery"}, fuses
 
 
 def test_crown_tower_damage_reduction_has_the_right_sign(data, levels, registry):

@@ -168,8 +168,13 @@ class Entity:
 
     @property
     def is_targetable(self) -> bool:
-        """A unit cannot be hit while still deploying."""
-        return not self.dead and self.deploy_ticks_left <= 0
+        """A unit cannot be hit while still deploying, and a bomb never can."""
+        if self.dead or self.deploy_ticks_left > 0:
+            return False
+        # A live bomb is scenery with a countdown. Nothing in the game can
+        # shoot a Giant Skeleton's bomb out of the air, and letting anything
+        # try would also let it be killed early, cancelling the blast.
+        return self.spec is None or not self.spec.is_fuse
 
     @property
     def is_acquirable(self) -> bool:

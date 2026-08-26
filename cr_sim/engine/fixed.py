@@ -38,6 +38,7 @@ __all__ = [
     "circles_overlap",
     "within_range",
     "point_along",
+    "push_away",
     "clamp",
     "ring_offsets",
     "pack_offsets",
@@ -119,6 +120,28 @@ def point_along(
         ax + (bx - ax) * travelled // segment_length,
         ay + (by - ay) * travelled // segment_length,
     )
+
+
+def push_away(
+    origin: tuple[int, int], point: tuple[int, int], amount: int
+) -> tuple[int, int]:
+    """Shove ``point`` ``amount`` further from ``origin``, along the line between them.
+
+    Used by every knockback in the game: a Golem's death nova, a Bowler's
+    boulder, a Log rolling through. Derived from the running total the same way
+    :func:`point_along` is, so a push and a walk of the same length land on
+    exactly the same subtile rather than differing by a rounding step.
+
+    A point sitting exactly on the origin has no direction to be pushed in, so
+    it stays put. Picking an arbitrary direction there would make the outcome
+    depend on nothing, which a deterministic engine cannot afford.
+    """
+    ax, ay = origin
+    bx, by = point
+    span = distance(ax, ay, bx, by)
+    if span <= 0 or amount == 0:
+        return bx, by
+    return point_along(ax, ay, bx, by, span + amount, span)
 
 
 def clamp(value: int, low: int, high: int) -> int:

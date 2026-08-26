@@ -31,7 +31,14 @@ from .arena import Arena, load_arena
 from .constants import TickClock
 from .elixir import BattleTimeline, ElixirBar, build_timeline
 from .entity import Entity, EntityKind, EntityState, Team, reset_entity_ids
-from .fixed import SUBTILES_PER_TILE, distance, milli_tiles, pack_offsets, ring_offsets
+from .fixed import (
+    SUBTILES_PER_TILE,
+    distance,
+    milli_tiles,
+    pack_offsets,
+    push_away,
+    ring_offsets,
+)
 from .combat import (
     AttackState,
     DamageEvent,
@@ -50,7 +57,7 @@ from .projectiles import (
     build_projectile_spec,
 )
 from .spells import SpellPlan, plan_spell
-from .targeting import acquire_target, in_attack_range, should_keep_target
+from .targeting import UNTARGETABLE_KINDS, acquire_target, in_attack_range, should_keep_target
 from .movement import resolve_collisions
 from .rng import Rng
 from .spatial import SpatialIndex
@@ -127,6 +134,7 @@ class Battle:
         "fire_pending_waves",
         "advance_deploy_timers",
         "advance_lifetimes",
+        "run_spawners",
         "update_buffs",
         "update_conditional_buffs",
         "acquire_targets",
@@ -179,6 +187,8 @@ class Battle:
         "_spell_plans",
         "_pending_waves",
         "_last_attack",
+        "_spawn_timers",
+        "_spawn_children",
         "_buff_specs",
     )
 
@@ -234,6 +244,10 @@ class Battle:
         #: Tick of each entity's most recent swing, for the buffs that
         #: depend on how long it has been since one.
         self._last_attack: dict[int, int] = {}
+        #: Ticks until each spawner's next wave.
+        self._spawn_timers: dict[int, int] = {}
+        #: Children of the spawners that cap how many may live at once.
+        self._spawn_children: dict[int, list[int]] = {}
         _globals = self.data.globals_map()
         # Grace band that stops a unit flickering between two equidistant enemies.
         _ext = _globals.get('LOGIC_RANGE_EXTENSION_TO_KEEP_TARGET', 0)
@@ -578,6 +592,66 @@ class Battle:
         for entity in self.entities:
             if not entity.dead and entity.lifetime_left > 0 and not entity.is_deploying:
                 entity.tick_lifetime()
+
+    def _phase_run_spawners(self) -> None:
+        """Buildings and units that produce troops on a timer.
+
+        Goblin Hut, Barbarian Hut, Tombstone, Furnace and Witch are all one
+        mechanism. Three fields drive it and the data settles what each means:
+
+        ``SpawnPauseTime``
+            The gap between waves. Witch reads 7000ms and produces four
+            Skeletons, which is exactly the seven-second cycle the card is
+            known for -- that is what pins this field down rather than
+            ``SpawnInterval``.
+        ``SpawnNumber``
+            Units per wave.
+        ``SpawnInterval``
+            The stagger *within* a wave, 500ms where present. Witch carries no
+            ``SpawnInterval`` at all, which is why her Skeletons arrive
+            together while a hut's trickle out.
+
+        ``SpawnStartTime`` delays only the first wave; where it is absent the
+        first wave waits a full cycle like every one after it.
+        """
+        for entity in self.entities:
+            spec = entity.spec
+            if spec is None or entity.dead or not spec.spawn_character:
+                continue
+            if entity.is_deploying:
+                # A hut that has not finished landing is not producing yet.
+                continue
+            due = self._spawn_timers.get(entity.id)
+            if due is None:
+                due = spec.spawn_start_ticks or spec.spawn_pause_ticks
+            if due > 0:
+                self._spawn_timers[entity.id] = due - 1
+                continue
+
+            self._spawn_timers[entity.id] = max(1, spec.spawn_pause_ticks)
+            if spec.spawn_limit:
+                living = [
+                    cid for cid in self._spawn_children.get(entity.id, ())
+                    if (child := self._entity(cid)) is not None and not child.dead
+                ]
+                self._spawn_children[entity.id] = living
+                room = spec.spawn_limit - len(living)
+                if room <= 0:
+                    continue
+            else:
+                room = spec.spawn_count
+
+            born = self._spawn_units(
+                team=entity.team,
+                character=spec.spawn_character,
+                count=min(spec.spawn_count, room),
+                x=entity.x,
+                y=entity.y,
+                stagger_ticks=spec.spawn_interval_ticks,
+                rarity=spec.rarity,
+            )
+            if spec.spawn_limit and born:
+                self._spawn_children.setdefault(entity.id, []).extend(u.id for u in born)
 
     def _phase_update_buffs(self) -> None:
         """Expire buff durations and deliver damage-over-time.
@@ -963,6 +1037,41 @@ class Battle:
                 # the lane rather than scattering it sideways.
                 victim.y += pspec.pushback * roll.direction
 
+    def _spawn_from_area(self, effect: AreaEffect) -> None:
+        """One unit from a spawning area effect. Graveyard, essentially.
+
+        Graveyard needs no action-graph interpreter: it is an ordinary area
+        effect that reads ``SpawnCharacter: Skeleton``, ``SpawnInitialDelay:
+        2200`` and ``SpawnInterval: 500`` over a 9000ms life. Skeletons land in
+        an annulus 3 to 4 tiles from the centre rather than at the point cast,
+        which is why the card surrounds a tower instead of stacking on it.
+
+        The position is drawn from the battle's seeded stream, so a replay of
+        the same seed puts every skeleton on the same tile.
+        """
+        aspec = effect.aspec
+        if not aspec.spawn_character:
+            return
+        low = aspec.spawn_min_radius
+        high = max(aspec.spawn_max_radius, low)
+        rng = self.rng.stream(f"aeospawn:{effect.id}")
+        if aspec.spawn_randomize and high > 0:
+            span = max(1, high - low)
+            radius = low + rng.below(span)
+            eighth = rng.below(8)
+        else:
+            radius, eighth = high, effect.spawned % 8
+        offset = ring_offsets(8, radius)[eighth]
+        self._spawn_units(
+            team=effect.team,
+            character=aspec.spawn_character,
+            count=max(1, aspec.spawn_count),
+            x=effect.x + offset[0],
+            y=effect.y + offset[1],
+            deploy_ticks=aspec.spawn_deploy_ticks,
+            rarity="Common",
+        )
+
     def _strike(self, effect: AreaEffect) -> None:
         """Fire an area effect's own projectile at what is inside it.
 
@@ -1076,6 +1185,8 @@ class Battle:
                 continue
             if not isinstance(entity, AreaEffect):
                 continue
+            if entity.tick_spawn():
+                self._spawn_from_area(entity)
             if not entity.tick():
                 continue
             aspec = entity.aspec
@@ -1279,9 +1390,15 @@ class Battle:
                 entity.state = EntityState.DEAD
                 self._routes.pop(entity.id, None)
                 self._attacks.pop(entity.id, None)
+                self._last_attack.pop(entity.id, None)
+                self._spawn_timers.pop(entity.id, None)
+                self._spawn_children.pop(entity.id, None)
                 died = True
                 if entity.kind is EntityKind.TOWER:
                     self.players[entity.team.opponent].crowns += 1
+                else:
+                    # Towers leave nothing behind; everything else might.
+                    self._resolve_death_payload(entity)
         if died:
             alive: list[Entity] = []
             for entity in self.entities:
@@ -1290,6 +1407,138 @@ class Battle:
                 else:
                     alive.append(entity)
             self.entities = alive
+
+    def _resolve_death_payload(self, entity: Entity) -> None:
+        """Everything a unit leaves behind when it dies.
+
+        Three separate things, and a card can carry any combination. Golem has
+        the first two, Ice Golem the second and third, a hut only the first.
+
+        This is most of what you pay for on the expensive cards. A Golem that
+        did not split would be a worse Giant, and killing one would end a push
+        rather than begin the second half of it -- so a death that produces
+        nothing is not a neutral simplification, it deletes the card.
+        """
+        spec = entity.spec
+        if spec is None:
+            return
+
+        if spec.death_damage and spec.death_damage_radius:
+            self._death_blast(entity, spec)
+
+        if spec.death_area_effect:
+            self._place_area(
+                entity.team, spec.death_area_effect, spec.rarity, spec.level,
+                entity.x, entity.y, owner_id=entity.id,
+            )
+
+        for character in (spec.death_spawn_character, spec.death_spawn_character2):
+            if not character:
+                continue
+            self._spawn_units(
+                team=entity.team,
+                character=character,
+                count=max(1, spec.death_spawn_count),
+                x=entity.x,
+                y=entity.y,
+                radius=spec.death_spawn_radius,
+                deploy_ticks=spec.death_spawn_deploy_ticks,
+                rarity=spec.rarity,
+            )
+
+    def _death_blast(self, entity: Entity, spec: UnitSpec) -> None:
+        """A unit's parting explosion.
+
+        Hits both sides. Golem's 88 landing on your own support is a real cost
+        of the card, and filtering it to enemies only would quietly make every
+        big death spawn strictly better than it is.
+        """
+        for victim in list(self._index.near(entity.x, entity.y, spec.death_damage_radius)):
+            if victim.dead or victim.id == entity.id:
+                continue
+            if victim.kind in UNTARGETABLE_KINDS or not victim.is_targetable:
+                continue
+            if distance(entity.x, entity.y, victim.x, victim.y) > (
+                spec.death_damage_radius + victim.collision_radius
+            ):
+                continue
+            dealt = victim.apply_damage(
+                spec.death_damage
+                * (100 + spec.crown_tower_damage_percent) // 100
+                if victim.kind is EntityKind.TOWER and spec.crown_tower_damage_percent
+                else spec.death_damage
+            )
+            if dealt:
+                self.damage_log.append(
+                    DamageEvent(
+                        tick=self.tick, attacker_id=entity.id, target_id=victim.id,
+                        amount=dealt, lethal=victim.hitpoints <= 0,
+                    )
+                )
+            if spec.death_pushback and victim.kind is EntityKind.TROOP:
+                victim.x, victim.y = push_away(
+                    (entity.x, entity.y), (victim.x, victim.y), spec.death_pushback
+                )
+
+    def _spawn_units(
+        self,
+        *,
+        team: Team,
+        character: str,
+        count: int,
+        x: int,
+        y: int,
+        radius: int = 0,
+        deploy_ticks: int = 0,
+        stagger_ticks: int = 0,
+        rarity: str = "Common",
+    ) -> list[Entity]:
+        """Put ``count`` copies of one character on the board around a point.
+
+        Shared by death spawns and by the huts, because they are the same
+        operation: the only differences are where the point comes from and how
+        long the arrivals are staggered.
+
+        A group with no radius of its own is packed rather than stacked. Units
+        on one exact point are perfectly overlapped, so any splash catches all
+        of them -- a Tombstone's four Skeletons would die to a single Zap.
+        """
+        try:
+            spec = self._spec(character, rarity=rarity)
+        except Exception:
+            # A renamed or event-only character is not worth aborting a death
+            # over; it simply leaves nothing behind.
+            return []
+        if count > 1:
+            offsets = (
+                ring_offsets(count, radius)
+                if radius
+                else pack_offsets(count, spec.collision_radius)
+            )
+        else:
+            offsets = ((0, 0),)
+
+        spawned: list[Entity] = []
+        for index in range(count):
+            ox, oy = offsets[index] if index < len(offsets) else (0, 0)
+            unit = Entity(
+                kind=spec.kind,
+                team=team,
+                x=x + ox,
+                y=y + oy,
+                hitpoints=spec.hitpoints,
+                spec=spec,
+                spawn_tick=self.tick,
+                deploy_ticks=(deploy_ticks or spec.deploy_ticks) + index * stagger_ticks,
+                collision_radius=spec.collision_radius,
+                mass=spec.mass,
+                flying=spec.flying,
+                shield=spec.shield_hitpoints,
+                lifetime_ticks=spec.lifetime_ticks,
+            )
+            self._register(unit)
+            spawned.append(unit)
+        return spawned
 
     def _phase_check_tower_activation(self) -> None:
         """Wake a King Tower once it is provoked.

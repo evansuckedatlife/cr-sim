@@ -64,6 +64,22 @@ class AreaEffectSpec:
     hit_biggest: bool
     spawn_character: str | None
     spawn_count: int
+    #: Graveyard's trickle. The card is not a burst of skeletons but a stream:
+    #: one every ``SpawnInterval`` from ``SpawnInitialDelay`` until the effect
+    #: expires, which is why it has to be answered over time rather than
+    #: swatted once.
+    spawn_initial_delay_ticks: int
+    spawn_interval_ticks: int
+    #: Skeletons appear in an annulus, not at the centre -- 3 to 4 tiles out for
+    #: Graveyard. They surround a tower rather than piling on one tile.
+    spawn_min_radius: int
+    spawn_max_radius: int
+    spawn_deploy_ticks: int
+    spawn_randomize: bool
+
+    @property
+    def spawns_over_time(self) -> bool:
+        return bool(self.spawn_character and self.spawn_interval_ticks > 0)
     #: Named ACTION driving it, for the effects defined entirely in the action
     #: graph (Graveyard, Vines, Clone). Recorded so they are visible rather
     #: than silently inert; the interpreter lands in M6.
@@ -148,6 +164,14 @@ def build_area_effect_spec(
         hit_biggest=_bool(raw.get("HitBiggestTargets")),
         spawn_character=_str(raw.get("SpawnCharacter")),
         spawn_count=_int(raw.get("SpawnCharacterCount"), 1),
+        spawn_initial_delay_ticks=clock.ticks(raw.get("SpawnInitialDelay")),
+        spawn_interval_ticks=clock.ticks(raw.get("SpawnInterval")),
+        spawn_min_radius=milli_tiles(_int(raw.get("SpawnMinRadius"))),
+        spawn_max_radius=milli_tiles(
+            _int(raw.get("SpawnMaxRadius")) or _int(raw.get("Radius"))
+        ),
+        spawn_deploy_ticks=clock.ticks(raw.get("SpawnTime")),
+        spawn_randomize=_bool(raw.get("SpawnRandomizeSequence")),
         action=_str(raw.get("OnStartingAction")) or _str(raw.get("OnHitAction")),
     )
 
@@ -162,6 +186,7 @@ class AreaEffect(Entity):
 
     __slots__ = (
         "aspec", "ticks_left", "ticks_to_next", "owner_id", "applications", "struck",
+        "ticks_to_next_spawn", "spawned",
     )
 
     def __init__(
@@ -195,6 +220,12 @@ class AreaEffect(Entity):
         #: would make it a single-target nuke rather than the answer to a tank
         #: and its support.
         self.struck: set[int] = set()
+        #: Graveyard's first skeleton is late on purpose -- 2200ms after the
+        #: cast, which is the window a defender has to answer before any of it
+        #: arrives. Seeding from the delay rather than the interval is what
+        #: preserves that.
+        self.ticks_to_next_spawn = aspec.spawn_initial_delay_ticks
+        self.spawned = 0
 
     def tick(self) -> bool:
         """Advance one tick. Returns True if the effect applies this tick."""
@@ -214,6 +245,17 @@ class AreaEffect(Entity):
         if self.ticks_left <= 0:
             self.kill()
         return applies
+
+    def tick_spawn(self) -> bool:
+        """Whether this effect should produce a unit on this tick."""
+        if not self.aspec.spawns_over_time:
+            return False
+        if self.ticks_to_next_spawn > 0:
+            self.ticks_to_next_spawn -= 1
+            return False
+        self.ticks_to_next_spawn = self.aspec.spawn_interval_ticks
+        self.spawned += 1
+        return True
 
     @property
     def life_guard(self) -> int:
