@@ -112,6 +112,9 @@ class PlaySession:
     _log: list[dict[str, Any]] = field(init=False, default_factory=list)
     paused: bool = field(init=False, default=False)
     speed: float = field(init=False, default=1.0)
+    #: Set when the controller raised and was retired, so the page can say so
+    #: rather than silently facing an opponent that stopped playing.
+    controller_error: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         self.reset()
@@ -200,7 +203,16 @@ class PlaySession:
         if self.controller is None or self.battle.tick < self._next_ai_tick:
             return
         self._next_ai_tick = self.battle.tick + self.config.ai_interval_ticks
-        choice = self.controller(self.battle, self.ai_team)
+        try:
+            choice = self.controller(self.battle, self.ai_team)
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            # An opponent that fails mid-match costs you an opponent, not the
+            # match. Raising here reaches the caller through whatever is
+            # driving the clock -- for the web server, that is every poll, so
+            # one bad move would turn into a stream of tracebacks.
+            self.controller = None
+            self.controller_error = f"{type(exc).__name__}: {exc}"
+            return
         if choice is None:
             return
         card, x, y = choice

@@ -46,6 +46,21 @@ DEFAULT_DECK = (
 )
 
 
+def _resolve(path: Path | None) -> Path | None:
+    """Find a checkpoint given relative to the project rather than the shell.
+
+    ``runs/dense-reward/final.pt`` is how the path is written down and how the
+    trainer prints it, and it only resolves from the project root. Started from
+    anywhere else it misses, so the project root is tried as well before giving
+    up -- the alternative is a correct-looking command that silently plays a
+    random opponent.
+    """
+    if path is None or path.is_file():
+        return path
+    candidate = ROOT / path
+    return candidate if candidate.is_file() else path
+
+
 class PlayServer:
     """Holds the one live session and the data every page load needs."""
 
@@ -99,6 +114,8 @@ class PlayServer:
                 self.session.advance()
                 snapshot = self.session.snapshot()
             snapshot["opponent"] = getattr(self.session, "opponent_label", "random")
+            if self.session.controller_error:
+                snapshot["opponent"] += f" (stopped: {self.session.controller_error})"
             return snapshot
         if path == "/api/play":
             with self.lock:
@@ -224,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
-    serve(args.build, args.port, args.policy, open_browser=not args.no_browser)
+    serve(args.build, args.port, _resolve(args.policy), open_browser=not args.no_browser)
     return 0
 
 

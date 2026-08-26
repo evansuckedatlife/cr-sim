@@ -49,6 +49,17 @@ class PolicyOpponent:
         self.server = server
         self.rng = np.random.default_rng(seed)
         self.checkpoint = Path(checkpoint)
+        if not self.checkpoint.is_file():
+            # Raised here, at construction, because that is where the caller's
+            # fallback to random play can catch it. Deferring the file open to
+            # the first move -- which is what this used to do, since the
+            # network's shapes need a live match -- meant a bad path surfaced
+            # inside a request handler instead, crashing every poll rather than
+            # quietly playing a weaker opponent.
+            raise FileNotFoundError(f"no checkpoint at {self.checkpoint}")
+        # Loaded eagerly for the same reason. The weights are small; only the
+        # network they go into has to wait for a match.
+        self._payload = torch.load(self.checkpoint, map_location="cpu", weights_only=False)
         self._config: Any = None
         self._net: ActorCritic | None = None
         self._net_cls = ActorCritic
@@ -81,8 +92,7 @@ class PolicyOpponent:
                 num_actions=int(np.prod(nvec)),
             )
         )
-        payload = self.torch.load(self.checkpoint, map_location="cpu", weights_only=False)
-        state = payload.get("state_dict", payload)
+        state = self._payload.get("state_dict", self._payload)
         # Loaded strictly. A checkpoint whose shapes disagree with the current
         # encoding was trained on a different observation, and letting it load
         # partially would produce an opponent that looks trained and is not.

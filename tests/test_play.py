@@ -225,3 +225,56 @@ def test_a_snapshot_is_json_serialisable(server):
 
 def test_an_unknown_route_is_reported_rather_than_raising(server):
     assert not server.handle("/api/nope", {})["ok"]
+
+
+# ------------------------------------------------------- opponent failures
+
+
+def test_a_missing_checkpoint_falls_back_instead_of_crashing():
+    """The page is worth having before any policy is.
+
+    The failure has to happen where the fallback can catch it. Deferring the
+    file open to the opponent's first move -- which is tempting, because the
+    network's shapes need a live match -- surfaces it inside a request handler
+    instead, and every poll then returns a traceback rather than a match.
+    """
+    server = PlayServer(Path(BUILD), Path("runs/definitely-not-here/final.pt"))
+    label = getattr(server.session, "opponent_label", "")
+    assert label.startswith("random"), label
+    assert "policy failed" in label
+    assert server.handle("/api/state", {})["tick"] >= 0, "the server stopped serving"
+
+
+def test_a_controller_that_raises_retires_rather_than_killing_the_match(session):
+    """An opponent that fails costs you an opponent, not the match.
+
+    Raising reaches the caller through whatever drives the clock, and for the
+    web server that is every poll -- one bad move would become a stream of
+    tracebacks.
+    """
+    def broken(battle, team):
+        raise RuntimeError("no")
+
+    session.controller = broken
+    session._next_ai_tick = 0
+    session._last_wall = 0.0
+    session.advance(1.0)
+
+    assert session.controller is None, "the broken controller was kept"
+    assert "RuntimeError" in (session.controller_error or "")
+    session.advance(2.0)  # and the match keeps running
+    assert session.battle.tick > 0
+
+
+def test_a_checkpoint_path_resolves_against_the_project_root():
+    """``runs/...`` is how the trainer prints it, and only resolves from there.
+
+    Started from anywhere else a correct-looking command would silently play a
+    random opponent.
+    """
+    from cr_sim.play.server import ROOT, _resolve
+
+    assert _resolve(None) is None
+    existing = Path("pyproject.toml")
+    assert _resolve(existing) in (existing, ROOT / existing)
+    assert _resolve(Path("nope/nope.pt")) == Path("nope/nope.pt")
