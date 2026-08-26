@@ -21,12 +21,15 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from ..data.cards import build_card_registry
 from ..data.leveling import build_level_table
 from ..data.source import LogicData
+from ..api.encoding import NOOP_SLOT
 from ..api.env import CRSimEnv
+from ..api.reward import RewardWeights
 from .ppo import PPOConfig, train
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,6 +43,24 @@ DEFAULT_DECK = (
     "Knight", "Musketeer", "Cannon", "Skeletons",
     "IceSpirits", "Log", "Fireball", "Goblins",
 )
+
+
+def _random_opponent(seed: int):
+    """An opponent that spends its elixir on legal placements.
+
+    Weak, but not passive, and the difference matters: against an opponent that
+    never plays a card there is nothing to kite and almost nothing to destroy,
+    so two of the five reward terms measure a board that never exists.
+    """
+    rng = np.random.default_rng(seed)
+
+    def policy(observation, mask):
+        legal = np.argwhere(mask)
+        if not len(legal):
+            return (NOOP_SLOT, 0, 0)
+        return tuple(int(v) for v in legal[rng.integers(len(legal))])
+
+    return policy
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,6 +84,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--name", default="ppo")
     parser.add_argument("--build", type=Path, default=DEFAULT_BUILD)
     parser.add_argument("--save-every", type=int, default=10, help="updates between checkpoints")
+    parser.add_argument(
+        "--reward", choices=("simple", "five-term"), default="five-term",
+        help="'simple' is crowns plus a tower-health difference, kept as a control; "
+             "'five-term' adds tower damage, elixir trade, counterpush and kites.",
+    )
+    parser.add_argument(
+        "--opponent", choices=("idle", "random"), default="random",
+        help="'idle' never plays a card, which leaves the kite and trade terms with "
+             "nothing to measure. 'random' spends its elixir on legal placements.",
+    )
     return parser
 
 
@@ -78,13 +109,18 @@ def main(argv: list[str] | None = None) -> int:
     registry = build_card_registry(data)
 
     def make_env(index: int) -> CRSimEnv:
-        del index  # seeded by the trainer, not here
+        # Each environment gets its own opponent stream, so eight parallel
+        # battles do not face the identical sequence of placements and report
+        # a smoother result than the policy has earned.
+        opponent = _random_opponent(args.seed * 1000 + index) if args.opponent == "random" else None
         return CRSimEnv(
             data, levels, registry, DEFAULT_DECK, DEFAULT_DECK,
             ticks_per_second=args.tps,
             frame_skip=args.frame_skip,
             max_ticks=args.tps * args.match_seconds,
             reward_shaping_weight=args.shaping,
+            reward_weights=RewardWeights() if args.reward == "five-term" else None,
+            opponent_policy=opponent,
         )
 
     config = PPOConfig(
@@ -98,7 +134,8 @@ def main(argv: list[str] | None = None) -> int:
     (out / "config.json").write_text(
         json.dumps({**asdict(config), "deck": list(DEFAULT_DECK), "tps": args.tps,
                     "frame_skip": args.frame_skip, "match_seconds": args.match_seconds,
-                    "shaping": args.shaping}, indent=2),
+                    "shaping": args.shaping, "reward": args.reward,
+                    "opponent": args.opponent}, indent=2),
         encoding="utf-8",
     )
 
