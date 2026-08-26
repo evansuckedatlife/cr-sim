@@ -378,18 +378,34 @@ function renderTiles(s,S){
 function chart(title,note,series,opts){
   opts=opts||{};
   var all=[]; series.forEach(function(s){(s.points||[]).forEach(function(p){all.push(p);});});
-  if(all.length<2){
+  if(all.length<1){
     return '<div class="chart"><h3>'+title+'</h3><p>'+note+'</p>'
       +'<div class="empty">'+(opts.emptyText||'no evaluations yet')+'</div></div>';
   }
-  var w=640,h=200,padL=46,padR=64,padT=14,padB=26;
+  // A single reading is not nothing, and saying "no evaluations yet" over the
+  // top of one is a lie the page told for its first hour. It cannot be drawn
+  // as a line, so it is stated as a value instead.
+  if(all.length<2 || series.every(function(s){return (s.points||[]).length<2;})){
+    var only = series.filter(function(s){return (s.points||[]).length;}).map(function(s){
+      var pt=s.points[s.points.length-1];
+      return '<span style="color:'+s.color+'"><b>'+(opts.asPct?pct(pt[1]):num(pt[1],3))+'</b> '+s.name+'</span>';
+    }).join('<span style="color:var(--muted)"> &nbsp;/&nbsp; </span>');
+    return '<div class="chart"><h3>'+title+'</h3><p>'+note+'</p>'
+      +'<div class="empty" style="font-size:15px">'+only
+      +'<div style="margin-top:7px;font-size:13px;color:var(--muted)">one reading so far &mdash; a trend needs at least two</div>'
+      +'</div></div>';
+  }
+  var longest=0; series.forEach(function(s){ if((s.points||[]).length) longest=Math.max(longest,s.name.length); });
+  // Right padding sized to the longest series label, which was clipping the
+  // legend to "rollout wc" at a fixed 64px.
+  var w=640,h=200,padL=46,padR=Math.max(52, 20+longest*6.3),padT=14,padB=26;
   var xs=all.map(function(p){return p[0];}), ys=all.map(function(p){return p[1];});
   var x0=Math.min.apply(null,xs), x1=Math.max.apply(null,xs);
   var lo=Math.min.apply(null,ys), hi=Math.max.apply(null,ys);
   if(opts.zero){lo=Math.min(lo,0);hi=Math.max(hi,0);}
   if(hi-lo<1e-9){hi+=0.5;lo-=0.5;}
   var pd=(hi-lo)*0.12; hi+=pd; lo-=pd;
-  var X=function(v){return padL+(x1===x0?0:(v-x0)/(x1-x0))*(w-padL-padR);};
+  var X=function(v){return padL+(x1===x0?0.5:(v-x0)/(x1-x0))*(w-padL-padR);};
   var Y=function(v){return padT+(1-(v-lo)/(hi-lo))*(h-padT-padB);};
   var body='';
   [0.25,0.5,0.75].forEach(function(f){
@@ -414,8 +430,12 @@ function chart(title,note,series,opts){
   body+='<line class="axis" x1="'+padL+'" x2="'+(w-padR)+'" y1="'+(h-padB)+'" y2="'+(h-padB)+'"/>';
   body+='<text class="lbl-s" x="4" y="'+(Y(hi)+9).toFixed(1)+'">'+hi.toFixed(2)+'</text>';
   body+='<text class="lbl-s" x="4" y="'+Y(lo).toFixed(1)+'">'+lo.toFixed(2)+'</text>';
-  body+='<text class="lbl-s" x="'+padL+'" y="'+(h-7)+'">'+(x0/1000).toFixed(0)+'k</text>';
-  body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(h-7)+'" text-anchor="end">'+(x1/1000).toFixed(0)+'k decisions</text>';
+  if(x1>x0){
+    body+='<text class="lbl-s" x="'+padL+'" y="'+(h-7)+'">'+(x0/1000).toFixed(0)+'k</text>';
+    body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(h-7)+'" text-anchor="end">'+(x1/1000).toFixed(0)+'k decisions</text>';
+  } else {
+    body+='<text class="lbl-s" x="'+((padL+w-padR)/2)+'" y="'+(h-7)+'" text-anchor="middle">'+(x0/1000).toFixed(0)+'k decisions</text>';
+  }
   return '<div class="chart"><h3>'+title+'</h3><p>'+note+'</p>'
     +'<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="'+esc(title)+'">'+body+'</svg></div>';
 }
@@ -438,10 +458,10 @@ function chart(title,note,series,opts){
     + '<div class="grid2">'
     + chart('Win rate, agent against the random control',
         'Both are low because most matches end 0-0, and a draw is not a win.',
-        [{name:'agent',color:A,points:S.win},{name:'random',color:G,points:S.control}])
+        [{name:'agent',color:A,points:S.win},{name:'random',color:G,points:S.control}], {asPct:true})
     + chart('Rollout win rate',
         'Measured while exploring, and about eighteen points optimistic on this project.',
-        [{name:'rollout win',color:B,points:S.rollout_win}], {emptyText:'not enough updates yet'})
+        [{name:'rollout win',color:B,points:S.rollout_win}], {asPct:true, emptyText:'not enough updates yet'})
     + '</div>';
 
   document.getElementById('charts2').innerHTML =

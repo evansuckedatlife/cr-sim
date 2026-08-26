@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from cr_sim.train.watch import read_metrics, render, summarise
 
 
@@ -197,3 +199,75 @@ def test_the_page_carries_the_critic_series_it_now_leads_on():
         render(rows, "run").split("const DATA = ", 1)[1].split(";\n", 1)[0])
     assert payload["series"]["explained_variance"] == [[1000, -0.02], [2000, 0.31]]
     assert payload["series"]["ret_std"] == [[1000, 0.5], [2000, 0.6]]
+
+
+# ---------------------------------------------------- charts with thin data
+#
+# The page renders in JavaScript, so asserting on the HTML string tests the
+# template rather than the behaviour -- `no evaluations yet` appears in the
+# script source whatever the data is, which is why the test that looked for it
+# passed for a year without checking anything. These run the page's own
+# functions under node and assert on what they actually return.
+
+import shutil
+import subprocess
+
+node = shutil.which("node")
+needs_node = pytest.mark.skipif(node is None, reason="needs node to run the page's JS")
+
+
+def _call(rows, expression):
+    """Evaluate `expression` against the page's own chart code."""
+    page = render(rows, "run")
+    script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+    # Everything up to the start-up block is pure functions; the block itself
+    # touches the DOM and is not what is under test here.
+    body = script.split("(function start()", 1)[0]
+    result = subprocess.run(
+        [node, "-e", body + chr(10) + "process.stdout.write(String(" + expression + "));"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+@needs_node
+def test_one_evaluation_is_reported_rather_than_called_none():
+    """A single reading cannot be drawn as a line, but it is not nothing.
+
+    The page printed "no evaluations yet" over the top of a real evaluation
+    for the first hour of a run -- the one thing a progress view must never
+    do, which is deny a measurement it is holding.
+    """
+    rows = [_row(1, 15360, eval_lift_sd=0.118, eval_win=0.32, control_win=0.30)]
+    out = _call(rows, "chart('t','n',[{name:'lift',color:'#000',points:DATA.series.lift}],{zero:true})")
+    assert "no evaluations yet" not in out, "denied an evaluation it was given"
+    assert "0.118" in out, "the single reading is not shown"
+    assert "one reading so far" in out
+
+
+@needs_node
+def test_no_evaluations_still_reads_as_none():
+    out = _call([_row(1, 1000)], "chart('t','n',[{name:'lift',color:'#000',points:DATA.series.lift}],{})")
+    assert "no evaluations yet" in out
+
+
+@needs_node
+def test_two_readings_at_the_same_step_do_not_produce_a_degenerate_axis():
+    """Identical endpoints rendered as "15k -> 15k", which reads as a bug."""
+    rows = [_row(1, 15360, eval_lift_sd=0.1), _row(2, 15360, eval_lift_sd=0.2)]
+    out = _call(rows, "chart('t','n',[{name:'lift',color:'#000',points:DATA.series.lift}],{})")
+    assert out.count("15k</text>") == 0
+    assert "15k decisions" in out
+
+
+@needs_node
+def test_the_legend_is_not_clipped_by_a_long_series_name():
+    """Fixed right padding cut "rollout win" down to "rollout wc"."""
+    rows = [_row(i, i * 1000, win_rate=0.2 + i / 100) for i in range(1, 5)]
+    out = _call(rows, "chart('t','n',[{name:'rollout win',color:'#000',points:DATA.series.rollout_win}],{})")
+    assert "rollout win</text>" in out, "series label truncated"
+    # the label starts inside the viewBox and its text has room to the edge
+    import re
+    x = float(re.search(r'x="([0-9.]+)"[^>]*>rollout win</text>', out).group(1))
+    assert x + len("rollout win") * 6.3 <= 640, "label runs past the right edge"
