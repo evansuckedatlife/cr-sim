@@ -304,7 +304,7 @@ def test_every_icon_url_resolves_to_a_real_file(server):
 
 def test_icons_are_looked_up_by_name_not_by_joining_a_path(server):
     """So a crafted name cannot reach outside the icon pack."""
-    for hostile in ("../pyproject.toml", "..\pyproject.toml", "/etc/passwd"):
+    for hostile in ("../pyproject.toml", r"..\pyproject.toml", "/etc/passwd"):
         assert server._icon_files.get(hostile) is None
 
 
@@ -314,3 +314,49 @@ def test_a_hand_card_carries_its_placement_rules(server):
     assert hand
     for card in hand:
         assert set(card) >= {"name", "cost", "kind", "evo", "hasEvo", "anywhere", "water"}
+
+
+# ------------------------------------------------------------- evolutions
+
+
+def test_evolution_slots_are_capped_at_two(server):
+    """Matching the game. Silently dropping a third would leave the page
+    showing an evolution that never fires."""
+    deck = list(DEFAULT_DECK)
+    result = server.handle("/api/new", {
+        "human": deck, "ai": deck, "humanEvolutions": deck[:3],
+    })
+    assert not result["ok"] and "2 evolution slots" in result["reason"]
+
+
+def test_a_slot_must_name_a_card_that_has_an_evolution(server):
+    deck = list(DEFAULT_DECK)
+    result = server.handle("/api/new", {
+        "human": deck, "ai": deck, "humanEvolutions": ["Fireball"],
+    })
+    assert not result["ok"] and "Fireball" in result["reason"]
+
+
+def test_a_slot_must_name_a_card_in_the_deck(server):
+    deck = list(DEFAULT_DECK)
+    result = server.handle("/api/new", {
+        "human": deck, "ai": deck, "humanEvolutions": ["Barbarians"],
+    })
+    assert not result["ok"] and "not in the deck" in result["reason"]
+
+
+def test_a_slotted_card_reaches_the_battle(server):
+    deck = list(DEFAULT_DECK)
+    assert server.handle("/api/new", {
+        "human": deck, "ai": deck, "humanEvolutions": ["Knight"],
+    })["ok"]
+    assert "Knight" in server.session.battle.players[Team.BLUE].evolutions
+    # And the opponent gets none, because slots are a deck-building choice
+    # per side rather than a property of the card.
+    assert not server.session.battle.players[Team.RED].evolutions
+
+
+def test_the_card_pool_says_which_cards_have_an_evolution(server):
+    cards = server.setup()["cards"]
+    assert any(c["hasEvo"] for c in cards), "no card reports an evolution"
+    assert not all(c["hasEvo"] for c in cards), "every card reports one"

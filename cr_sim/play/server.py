@@ -40,6 +40,9 @@ from .session import PlaySession, SessionConfig, random_controller
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BUILD = ROOT / "data_cache" / "csv_logic"
 
+#: Evolution slots a deck may carry, matching the game.
+MAX_EVOLUTION_SLOTS = 2
+
 DEFAULT_DECK = (
     "Knight", "Musketeer", "Cannon", "Skeletons",
     "IceSpirits", "Log", "Fireball", "Goblins",
@@ -103,13 +106,22 @@ class PlayServer:
         except Exception as exc:  # noqa: BLE001 - reported to the page
             return random_controller(seed), f"random (policy failed: {exc})"
 
-    def _new_session(self, human: tuple[str, ...], ai: tuple[str, ...], seed: int) -> PlaySession:
+    def _new_session(
+        self,
+        human: tuple[str, ...],
+        ai: tuple[str, ...],
+        seed: int,
+        human_evolutions: tuple[str, ...] = (),
+    ) -> PlaySession:
         controller, label = self._controller(seed)
         session = PlaySession(
             data=self.data,
             levels=self.levels,
             registry=self.registry,
-            config=SessionConfig(human_deck=tuple(human), ai_deck=tuple(ai), seed=seed),
+            config=SessionConfig(
+                human_deck=tuple(human), ai_deck=tuple(ai), seed=seed,
+                human_evolutions=tuple(human_evolutions),
+            ),
             controller=controller,
         )
         session.opponent_label = label  # type: ignore[attr-defined]
@@ -139,13 +151,29 @@ class PlayServer:
             human = tuple(body.get("human") or DEFAULT_DECK)
             ai = tuple(body.get("ai") or DEFAULT_DECK)
             seed = int(body.get("seed", 0))
+            # Two slots, matching the game. Silently dropping a third would
+            # leave the page showing an evolution that never fires.
+            wanted = tuple(body.get("humanEvolutions") or ())
+            if len(wanted) > MAX_EVOLUTION_SLOTS:
+                return {"ok": False,
+                        "reason": f"at most {MAX_EVOLUTION_SLOTS} evolution slots"}
+            no_evo = [
+                name for name in wanted
+                if (card := self.registry.get(name)) is None or not card.evolution
+            ]
+            if no_evo:
+                return {"ok": False, "reason": f"no evolution for: {', '.join(no_evo)}"}
+            not_in_deck = [name for name in wanted if name not in human]
+            if not_in_deck:
+                return {"ok": False,
+                        "reason": f"not in the deck: {', '.join(not_in_deck)}"}
             invalid = [c for c in human + ai if self.registry.get(c) is None]
             if invalid:
                 return {"ok": False, "reason": f"unknown cards: {', '.join(sorted(set(invalid)))}"}
             if len(set(human)) != 8 or len(set(ai)) != 8:
                 return {"ok": False, "reason": "each deck needs eight different cards"}
             with self.lock:
-                self.session = self._new_session(human, ai, seed)
+                self.session = self._new_session(human, ai, seed, wanted)
             return {"ok": True}
         if path == "/api/control":
             with self.lock:
@@ -179,6 +207,7 @@ class PlayServer:
                     "cost": card.mana_cost,
                     "kind": card.kind.value,
                     "rarity": card.rarity,
+                    "hasEvo": bool(card.evolution),
                 }
                 for card in self.registry.standard()
             ),
@@ -193,6 +222,7 @@ class PlayServer:
             "icons": self.icons,
             "cards": cards,
             "deck": list(DEFAULT_DECK),
+            "evolutions": list(self.session.config.human_evolutions),
             "riverBand": [round(v / 18000, 2) for v in arena.river_band()],
         }
 

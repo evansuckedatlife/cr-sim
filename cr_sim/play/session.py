@@ -47,6 +47,10 @@ MAX_CATCHUP_SECONDS = 1.0
 class SessionConfig:
     human_deck: tuple[str, ...]
     ai_deck: tuple[str, ...]
+    #: Cards the human side slotted as evolutions. Empty means nothing evolves,
+    #: which is the correct default: most of the roster *has* an evolution and
+    #: a deck carries at most two.
+    human_evolutions: tuple[str, ...] = ()
     seed: int = 0
     ticks_per_second: int = 60
     level: int = 11
@@ -133,6 +137,12 @@ class PlaySession:
                 ticks_per_second=self.config.ticks_per_second,
                 blue_deck=blue,
                 red_deck=red,
+                blue_evolutions=(
+                    self.config.human_evolutions if self.human_team is Team.BLUE else ()
+                ),
+                red_evolutions=(
+                    self.config.human_evolutions if self.human_team is Team.RED else ()
+                ),
                 level=self.config.level,
                 tower_level=self.config.tower_level,
             ),
