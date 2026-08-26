@@ -118,3 +118,32 @@ def test_multi_projectile_damage_is_flagged(stats, card_name):
     summary = stats(card_name)
     assert summary.get("damage_is_per_projectile") is True
     assert summary.get("multiple_projectiles") or summary.get("projectile_waves")
+
+
+# ------------------------------------------------------------- Arrows' waves
+
+
+def test_arrows_clears_swarms_only_across_all_three_waves(stats):
+    """Arrows' listed damage is one wave of three, fired 200ms apart.
+
+    This is what makes the card's damage look inconsistent in play: a unit that
+    walks out of the area, or dies to an earlier wave, simply takes fewer of
+    them. The reading is settled by what Arrows is *for* -- one wave clears
+    nothing but Skeletons and Bats, while all three clear the swarms the card
+    exists to answer.
+    """
+    summary = stats("Arrows")
+    per_wave = summary["damage"]
+    waves = summary["projectile_waves"]
+    assert waves == 3
+    total = per_wave * waves
+
+    # The card's canonical kills need every wave.
+    for victim in ("Minions", "MinionHorde", "Goblins", "SpearGoblins", "Princess"):
+        health = hp(stats, victim)
+        assert per_wave < health, f"one wave should not kill {victim}"
+        assert total >= health, f"three waves should kill {victim}"
+
+    # One-hitpoint swarms die to the first wave, as they should.
+    for victim in ("Skeletons", "Bats"):
+        assert per_wave >= hp(stats, victim)

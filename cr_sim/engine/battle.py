@@ -750,8 +750,9 @@ class Battle:
                     # Building a route here would mean rebuilding it every tick,
                     # since the destination moves.
                     self._routes.pop(entity.id, None)
-                    entity.x, entity.y = step_towards(
-                        (entity.x, entity.y), goal, spec.speed_per_tick
+                    self._place(
+                        entity,
+                        *step_towards((entity.x, entity.y), goal, spec.speed_per_tick),
                     )
                 else:
                     # Across the water: this genuinely needs a bridge, and the
@@ -762,8 +763,9 @@ class Battle:
                             self.arena, (entity.x, entity.y), goal, flying=entity.flying
                         )
                         self._routes[entity.id] = route
-                    entity.x, entity.y = route.advance(
-                        (entity.x, entity.y), spec.speed_per_tick
+                    self._place(
+                        entity,
+                        *route.advance((entity.x, entity.y), spec.speed_per_tick),
                     )
                 entity.set_state(EntityState.MOVING)
                 continue
@@ -787,8 +789,31 @@ class Battle:
                     self.arena, (entity.x, entity.y), goal, flying=entity.flying
                 )
                 self._routes[entity.id] = route
-            entity.x, entity.y = route.advance((entity.x, entity.y), spec.speed_per_tick)
+            self._place(entity, *route.advance((entity.x, entity.y), spec.speed_per_tick))
             entity.set_state(EntityState.MOVING)
+
+    def _place(self, entity: Entity, x: int, y: int) -> None:
+        """Move an entity, refusing any step that would put it in terrain.
+
+        This is the last line of defence rather than the only one: routing is
+        supposed to keep ground units on bridges, and mostly does. But movement
+        has several sources -- a route, a straight chase, a shove from a crowd --
+        and any one of them getting it wrong puts a troop in the river. Checking
+        once, here, where every move lands, makes "ground units do not stand on
+        water" an invariant of the engine instead of a property each caller has
+        to remember.
+
+        A blocked diagonal falls back to whichever single axis is legal, so a
+        unit slides along a bank rather than sticking to it.
+        """
+        if self.arena.is_walkable(x, y, flying=entity.flying):
+            entity.x, entity.y = x, y
+            return
+        if self.arena.is_walkable(x, entity.y, flying=entity.flying):
+            entity.x = x
+            return
+        if self.arena.is_walkable(entity.x, y, flying=entity.flying):
+            entity.y = y
 
     def _phase_resolve_collisions(self) -> None:
         """Separate overlapping units.

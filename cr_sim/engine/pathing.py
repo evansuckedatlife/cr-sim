@@ -143,7 +143,20 @@ def crosses_river(arena: Arena, start_y: int, goal_y: int) -> bool:
 
 
 def _crosses_river(arena: Arena, start_y: int, goal_y: int) -> bool:
+    """Whether getting from ``start_y`` to ``goal_y`` involves the water.
+
+    Note the third case. Asking only whether the two *ends* sit on opposite
+    banks silently excuses a unit that is already **on a bridge**: mid-crossing
+    its own y is inside the band, so every target reads as "same side", it
+    abandons the route, steers straight -- and walks diagonally off the edge of
+    the bridge into the river. That is exactly how ground troops ended up
+    swimming.
+    """
     top, bottom = arena.river_band()
     if top == bottom:
         return False
+    start_inside = top <= start_y <= bottom
+    goal_inside = top <= goal_y <= bottom
+    if start_inside and not goal_inside:
+        return True
     return (start_y < top and goal_y > bottom) or (start_y > bottom and goal_y < top)

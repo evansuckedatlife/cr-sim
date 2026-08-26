@@ -384,3 +384,66 @@ def test_lifetime_does_not_run_during_deployment(data, levels, registry):
 # Scaling is guarded in tests/test_collision.py by counting broad-phase pair
 # checks, which is deterministic. The wall-clock version that used to live here
 # passed alone and failed under load -- a flaky test is worse than no test.
+
+
+# ------------------------------------------------------- terrain invariants
+
+
+def test_no_ground_unit_ever_stands_on_water(data, levels, registry):
+    """The invariant, checked across a whole busy battle rather than one path.
+
+    This regressed once and the cause was subtle: a unit part-way across a
+    bridge has its own y *inside* the river band, so a naive "are the two ends
+    on opposite banks" test said no crossing was needed. The unit abandoned its
+    route mid-bridge, steered straight at its target, and walked diagonally off
+    the edge into the river. A single scripted path would not have caught it --
+    only watching every unit on a contested board does.
+    """
+    from cr_sim.engine.entity import EntityKind
+
+    deck = ("Knight", "Musketeer", "Giant", "Barbarians", "Archer", "Bomber",
+            "Skeletons", "Valkyrie")
+    battle = Battle(
+        data, levels, registry,
+        BattleConfig(seed=5, blue_deck=deck, red_deck=deck),
+    )
+    rng = battle.rng.stream("water-test")
+    next_play = {Team.BLUE: 60, Team.RED: 150}
+    offenders: list[str] = []
+    crossings = 0
+
+    for _ in range(1500):
+        for team in (Team.BLUE, Team.RED):
+            if battle.tick < next_play[team]:
+                continue
+            player = battle.players[team]
+            affordable = [
+                c for c in player.hand
+                if (card := registry.get(c)) and player.elixir.can_afford(card.mana_cost)
+            ]
+            if not affordable:
+                continue
+            lane = (3.5, 9.0, 14.5)[rng.below(3)]
+            y = 11.0 + rng.below(4) if team is Team.BLUE else 21.0 - rng.below(4)
+            if battle.play_card(team, affordable[rng.below(len(affordable))], tiles(lane), tiles(y)):
+                next_play[team] = battle.tick + 150
+        battle.step()
+
+        for entity in battle.entities:
+            if entity.kind is not EntityKind.TROOP or entity.dead or entity.flying:
+                continue
+            if entity.is_deploying:
+                continue
+            if battle.arena.is_water(entity.x, entity.y):
+                offenders.append(
+                    f"{entity.spec.name} at ({to_tiles(entity.x):.2f}, "
+                    f"{to_tiles(entity.y):.2f}) on tick {battle.tick}"
+                )
+            if entity.team is Team.BLUE and to_tiles(entity.y) > 17.5:
+                crossings += 1
+        if battle.finished:
+            break
+
+    assert offenders == [], f"{len(offenders)} water violations, first: {offenders[:3]}"
+    # And the fix must not have simply stopped units from crossing at all.
+    assert crossings > 0, "no ground unit ever got across the river"

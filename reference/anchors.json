@@ -40,7 +40,7 @@
       "damage": 1484
     },
     "Arrows": {
-      "_source": "122 is PER PROJECTILE. Arrows lands 3 waves of 10 projectiles 200ms apart, so a stationary target takes more than this.",
+      "_source": "122 is PER WAVE; 3 waves of 10 projectiles 200ms apart, so 366 against a target that stays put",
       "elixir": 3,
       "rarity": "Common",
       "damage": 122,
@@ -185,8 +185,10 @@
       "question": "Arrows deals 122 per projectile across 3 waves of 10. How many waves actually land on one stationary unit, and does the in-game 'Damage' figure show per-wave or total?",
       "why_it_matters": "Decides whether Arrows clears 230 HP Minions, which is its defining use. Affects any spell with ProjectileWaves or MultipleProjectiles (Arrows, Hunter, Princess).",
       "how_to_resolve": "M5 models waves explicitly; then assert Arrows clears a Minion Horde and Hunter's point-blank burst kills what it should. Until then do not treat `damage` on these three as a single hit.",
-      "status": "open",
-      "blocks": "M5"
+      "status": "resolved",
+      "blocks": "M5",
+      "resolution": "Per wave. Arrows fires 3 waves of 10 projectiles 200ms apart, and the 122 figure is one projectile, so a target that stays in the area takes 3 x 122 = 366. Confirmed by the card's canonical kills: 366 clears Minions and Minion Horde (230), Goblins (202), Spear Goblins (133) and Princess (261), while a single wave would only clear Skeletons and Bats (81) - which is plainly not what Arrows does. The wave structure is also why observed damage looks inconsistent: a unit that leaves the area, or dies to an early wave, takes fewer than three.",
+      "still_to_implement": "Waves are not simulated yet - Arrows is a spell and spells land in M5. Hunter's 10 pellets and Princess' 5 are a different mechanic (one shot, spread by distance) and remain unresolved."
     },
     {
       "id": "tower-hp-scaling",

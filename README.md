@@ -10,7 +10,7 @@ Full plan: `../.claude/plans/i-want-to-build-purrfect-kernighan.md`.
 
 ## Status
 
-**220 tests.** Battles run end to end: units deploy, route, fight, die, towers
+**222 tests.** Battles run end to end: units deploy, route, fight, die, towers
 fall, and matches resolve on crowns, sudden death or a tiebreaker.
 
 | Milestone | State | What landed |
@@ -67,15 +67,15 @@ punishes a clump when its intended target dies mid-flight.
 
 ### Open questions
 
-Tracked in `reference/anchors.json` and printed by `cr-sim validate`. Two have
-been closed with evidence; three remain:
+Tracked in `reference/anchors.json` and printed by `cr-sim validate`. Three have
+been closed with evidence; two remain:
 
 | id | status | why it matters |
 |---|---|---|
 | `pekka-damage` | ✅ resolved | 842, not the 510 public sources list — settled by the one-shot breakpoint against a 721 hitpoint Musketeer |
 | `tower-hp-scaling` | ✅ resolved | Towers use their own progression, not the card ladder; 39% error avoided |
 | `building-collision-shape` | open, **high** | Blocks M3. The King Tower's footprint is a 3×3 square but the only per-entity extent in the data is a scalar `CollisionRadius` |
-| `arrows-effective-damage` | open | Blocks M5. Whether Arrows' 122 is per-wave or total decides if it clears Minions |
+| `arrows-effective-damage` | ✅ resolved | Per wave. 3 waves x 122 = 366, which is exactly what clears Minions, Goblins and Princess |
 | `bridge-width` | open, low | This build says 2 tiles everywhere; public sources say 3 for some arenas |
 
 ## What M0 established
@@ -235,7 +235,7 @@ python -m cr_sim.cli card Knight         # full resolved stats for one card
 python -m cr_sim.cli validate            # the stat gate + open questions
 python -m cr_sim.cli arena --map         # terrain, towers, deploy zones
 python -m cr_sim.cli battle --html r.html   # run a match, write a replay
-python -m pytest                         # 220 tests
+python -m pytest                         # 222 tests
 ```
 
 `freeze` re-cuts the regression baseline (`reference/card_stats.json`). Note the
