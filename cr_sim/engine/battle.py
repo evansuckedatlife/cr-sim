@@ -105,6 +105,10 @@ class Player:
     crowns: int = 0
     #: Card names in draw order; the hand is the first four.
     cycle: list[str] = field(default_factory=list)
+    #: Card names this deck slotted as evolutions. Empty by default: having an
+    #: evolution available is a deck-building choice, not a property of owning
+    #: the card.
+    evolutions: tuple[str, ...] = ()
     #: Plays of each evolution card since it last came out evolved. A slot
     #: starts charged, which is how a match begins: the first play of an
     #: evolution card is the evolved one.
@@ -113,11 +117,17 @@ class Player:
     def evolution_ready(self, card: "Card") -> bool:
         """Whether this card's next play is its evolved form.
 
+        Only for cards the deck actually slotted as evolutions. Most of the
+        roster *has* an evolution -- 42 of 122 cards -- but a deck carries at
+        most a couple, and treating every card as evolved because one exists
+        would quietly change the stats of half the game.
+
         One cycle means every second play is evolved, two means every third.
-        Counted in plays of the card itself rather than in deck rotations,
-        which is the same thing: a card returns to hand once per rotation, so
-        one play is one cycle.
+        Counted in plays of the card rather than deck rotations, which is the
+        same thing: a card returns to hand once per rotation.
         """
+        if card.name not in self.evolutions:
+            return False
         if not card.evolution or card.evolution_cycles <= 0:
             return False
         return self.evolution_charge.get(card.name, card.evolution_cycles) >= card.evolution_cycles
@@ -126,7 +136,7 @@ class Player:
         self.evolution_charge[card.name] = 0
 
     def cycle_evolution(self, card: "Card") -> None:
-        if card.evolution and card.evolution_cycles > 0:
+        if card.name in self.evolutions and card.evolution and card.evolution_cycles > 0:
             charge = self.evolution_charge.get(card.name, card.evolution_cycles)
             self.evolution_charge[card.name] = charge + 1
 
@@ -153,6 +163,12 @@ class BattleConfig:
     ticks_per_second: int = 60
     blue_deck: tuple[str, ...] = ()
     red_deck: tuple[str, ...] = ()
+    #: Cards each side slotted as evolutions. Empty by default: most of the
+    #: roster has an evolution available, but a deck carries at most a couple,
+    #: and evolving every card that could would change the stats of half the
+    #: game without anyone asking for it.
+    blue_evolutions: tuple[str, ...] = ()
+    red_evolutions: tuple[str, ...] = ()
     level: int = 11
     #: Crown Towers level independently of cards, on their own progression.
     tower_level: int = 11
@@ -354,12 +370,16 @@ class Battle:
         cycle = list(deck)
         # The opening hand is shuffled; the cycle order after that is fixed.
         self.rng.stream(f"deck:{team.name}").shuffle(cycle)
+        slotted = (
+            self.config.blue_evolutions if team is Team.BLUE else self.config.red_evolutions
+        )
         return Player(
             team=team,
             deck=tuple(deck),
             elixir=ElixirBar(self.timeline),
             level=self.config.level,
             cycle=cycle,
+            evolutions=tuple(name for name in slotted if name in deck),
         )
 
     def _spawn_towers(self) -> None:

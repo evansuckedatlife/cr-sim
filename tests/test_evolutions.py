@@ -49,7 +49,10 @@ def _battle(world, deck=DECK):
     data, levels, registry = world
     battle = Battle(
         data, levels, registry,
-        BattleConfig(seed=1, blue_deck=deck, red_deck=("Knight",) * 8),
+        BattleConfig(
+            seed=1, blue_deck=deck, red_deck=("Knight",) * 8,
+            blue_evolutions=(deck[0],),
+        ),
     )
     battle.entities = [e for e in battle.entities if e.kind is not EntityKind.TOWER]
     battle._towers = {Team.BLUE: [], Team.RED: []}
@@ -175,6 +178,7 @@ def test_a_card_with_no_evolution_is_never_ready(world):
     player = battle.players[Team.BLUE]
     bowler = battle.registry.get("Bowler")
     assert bowler.evolution is None and bowler.evolution_cycles == 0
+    assert "Bowler" in player.evolutions, "the slot itself must be granted"
     assert not player.evolution_ready(bowler)
     assert _play(battle, "Bowler"), "an ordinary card stopped deploying"
 
@@ -184,7 +188,10 @@ def test_each_side_charges_its_own_evolutions(world):
     data, levels, registry = world
     battle = Battle(
         data, levels, registry,
-        BattleConfig(seed=1, blue_deck=DECK, red_deck=DECK),
+        BattleConfig(
+            seed=1, blue_deck=DECK, red_deck=DECK,
+            blue_evolutions=("Barbarians",), red_evolutions=("Barbarians",),
+        ),
     )
     card = registry.get("Barbarians")
     blue, red = battle.players[Team.BLUE], battle.players[Team.RED]
