@@ -842,6 +842,8 @@ class Battle:
                 if entity.spec is not None and entity.spec.charge_range:
                     self._charge[entity.id] = 0
                 stunned = self._attacks.get(entity.id)
+                if stunned is not None and spec.load_first_hit:
+                    stunned.reset_load(spec)
                 if stunned is not None:
                     # And a stun sends a ramping attacker back to its first
                     # stage. An Inferno Tower does not forget its target, it

@@ -77,15 +77,33 @@ class AttackState:
         """
         if target_id != self.target_id:
             self.target_id = target_id
-            self.loaded = False
-            self.cooldown = max(1, spec.load_time_ticks)
             self.locked_ticks = 0
+            if spec.load_first_hit and self.loaded:
+                # Sparky. ``LoadFirstHit`` says the load is paid once, for the
+                # first hit, and not again on every retarget -- which is why
+                # switching her onto a new target does not buy you another
+                # three seconds. It is the difference between a card you answer
+                # by distracting it and a card you answer by stunning it.
+                self.cooldown = max(1, spec.hit_speed_ticks)
+            else:
+                self.loaded = False
+                self.cooldown = max(1, spec.load_time_ticks)
 
     def disengage(self) -> None:
         self.target_id = 0
         self.loaded = False
         self.cooldown = 0
         self.locked_ticks = 0
+
+    def reset_load(self, spec: UnitSpec) -> None:
+        """Send a charging attacker back to a full windup.
+
+        For Sparky this is the whole counterplay: her charge survives being
+        distracted but not being stunned, so a Zap costs her the three seconds
+        that a new target does not.
+        """
+        self.loaded = False
+        self.cooldown = max(1, spec.load_time_ticks)
 
     def break_lock(self) -> None:
         """Send the ramp back to its first stage without dropping the target.

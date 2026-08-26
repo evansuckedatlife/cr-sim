@@ -225,9 +225,11 @@
       "why_it_matters": "For every other unit LoadTime is a one-time windup before the first hit. LoadFirstHit makes the unit pay that charge before EVERY shot, and three globals govern it: LOGIC_LOAD_FIRST_HIT_RESET_TIMER_AFTER_ATTACK, ..._RESET_TIMER_WHEN_ZAPPED and ..._KEEP_LOADED_AFTER_DISCARD (all true). The middle one is the famous 'a stun resets Sparky's charge' interaction, which is most of how the card is countered.",
       "evidence": "Exactly one entity in the build sets it: ZapMachine, LoadTime=3000, HitSpeed=4000. Because HitSpeed exceeds LoadTime the firing rhythm happens to look similar without it - what is missing is the reset-on-stun, not the cadence. LoadAfterRetarget is a schema column no entity uses.",
       "how_to_resolve": "Implement alongside stun buffs: a LoadFirstHit unit re-pays LoadTime before each shot, keeps its progress when it loses a target, and loses all of it when stunned.",
-      "status": "open",
+      "status": "resolved",
       "priority": "low",
-      "blocks": "M6"
+      "blocks": "M6",
+      "resolution": "LoadFirstHit means the windup is paid once, for the unit's first hit, and not again on every retarget. Sparky is the only entity in the build that sets it, and the reading matches the card: her charge survives being distracted onto a new target but not being stunned. Implemented as retarget keeping the charge (next shot at HitSpeed, 4.0s) while a stun resets it (next shot after LoadTime, 3.0s), which is exactly why Sparky is answered with a Zap rather than with a cheap distraction.",
+      "caveat": "This is an interpretation of the field name plus the card's documented behaviour, not a measured value. The engine's general first-hit model (LoadTime before the first swing, HitSpeed after) was separately verified across the whole roster and is unchanged; only the retarget case differs, and only for this one unit. Worth confirming by distracting a charged Sparky in-game and timing her next shot."
     },
     {
       "id": "lightning-bolt-count",

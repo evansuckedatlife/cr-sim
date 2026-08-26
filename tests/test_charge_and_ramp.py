@@ -341,3 +341,77 @@ def test_a_single_value_field_reads_as_a_one_entry_ladder(world):
     spec = build_unit_spec(data, levels, "Barbarian_EV1", level=11, rarity="Common")
     assert len(spec.buff_after_hits) == 1
     assert len(spec.buff_after_hits_count) == 1
+
+
+# ------------------------------------------------------------------ sparky
+
+
+def _sparky(world):
+    battle = _battle(world, "Knight")
+    data, levels, _ = world
+    spec = build_unit_spec(data, levels, "ZapMachine", level=11, rarity="Legendary",
+                           clock=battle.clock)
+    unit = Entity(
+        kind=spec.kind, team=Team.BLUE, x=tiles(9), y=tiles(12),
+        hitpoints=spec.hitpoints, spec=spec,
+        collision_radius=spec.collision_radius, mass=spec.mass, flying=spec.flying,
+    )
+    unit.max_hitpoints = unit.hitpoints
+    unit.deploy_ticks_left = 0
+    battle._register(unit)
+    return battle, unit
+
+
+def _shots_after(battle, shooter, mark, ticks):
+    out = []
+    for _ in range(ticks):
+        battle.step()
+        for event in battle.damage_log:
+            if event.attacker_id == shooter.id and event.tick == battle.tick - 1 and event.tick > mark:
+                out.append(event.tick - mark)
+    return out
+
+
+def test_sparky_charges_once_then_fires_on_her_hit_speed(world):
+    """LoadTime 3000 then HitSpeed 4000, not 3000 every time."""
+    battle, sparky = _sparky(world)
+    _dummy(battle, world, 9, 15)
+    shots = _shots_after(battle, sparky, 0, 60 * 20)
+    assert len(shots) >= 3
+    assert 180 <= shots[0] <= 190, f"first shot at {shots[0] / 60:.2f}s, expected 3.0s"
+    gaps = [b - a for a, b in zip(shots, shots[1:])]
+    assert all(238 <= g <= 242 for g in gaps), f"gaps were {gaps}"
+
+
+def test_being_distracted_does_not_cost_sparky_her_charge(world):
+    """``LoadFirstHit``: the windup is paid once, not on every retarget.
+
+    It is the difference between a card you answer by distracting it and one
+    you answer by stunning it.
+    """
+    battle, sparky = _sparky(world)
+    first = _dummy(battle, world, 9, 15)
+    for _ in range(240):
+        battle.step()
+    _dummy(battle, world, 9, 13)
+    first.kill()
+
+    mark = battle.tick
+    shots = _shots_after(battle, sparky, mark, 60 * 8)
+    assert shots, "never fired again after retargeting"
+    assert shots[0] <= 250, f"re-paid her windup: {shots[0] / 60:.2f}s"
+
+
+def test_a_stun_does_cost_sparky_her_charge(world):
+    """Which is why she is answered with a Zap."""
+    battle, sparky = _sparky(world)
+    _dummy(battle, world, 9, 15)
+    for _ in range(240):
+        battle.step()
+
+    stun = battle._buff_spec("ZapFreeze", "Common", 11)
+    battle._apply_buff(sparky, stun, 30, source=0)
+    mark = battle.tick
+    shots = _shots_after(battle, sparky, mark, 60 * 10)
+    assert shots, "never fired again after the stun"
+    assert shots[0] >= 200, f"kept her charge through a stun: {shots[0] / 60:.2f}s"
