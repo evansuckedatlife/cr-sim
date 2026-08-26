@@ -229,6 +229,37 @@ def test_switching_target_restarts_the_windup(world):
     assert state.cooldown == knight.spec.load_time_ticks
 
 
+def test_stop_time_after_attack_holds_movement_after_a_swing(world):
+    """``StopTimeAfterAttack`` is unpopulated for every unit in this build --
+    the CSV column is blank for the whole roster (its sibling
+    ``StopTimeAfterSpecialAttack`` is the one populated field, and only for
+    the Fisherman's barrel), so nothing currently on the card ladder exercises
+    it. Exercised here with a synthetic spec, because the historical bug was
+    plausible without any real card ever revealing it: ``advance_attack`` used
+    to hard-code ``state.stop_ticks = 0`` on every swing regardless of what the
+    spec said, so the field was parsed nowhere and had no way to take effect
+    even if a future extraction populated it.
+    """
+    import dataclasses
+
+    from cr_sim.engine.combat import advance_attack
+
+    battle = _empty_battle(world)
+    attacker = _spawn(battle, world, "Knight", Team.BLUE, 9, 10.0)
+    target = _spawn(battle, world, "Knight", Team.RED, 9, 10.9)
+    stalled = dataclasses.replace(attacker.spec, stop_time_after_attack_ticks=30)
+
+    state = AttackState()
+    hit = None
+    for _ in range(stalled.load_time_ticks + 2):
+        hit = advance_attack(state, stalled, attacker, target)
+        if hit is not None:
+            break
+    assert hit is not None, "never swung"
+    assert state.stop_ticks == 30, "the spec's stop time was not loaded onto the cooldown"
+    assert not state.can_move, "a unit that just swung should be held in place"
+
+
 def test_a_unit_killed_mid_tick_does_not_keep_fighting(world):
     """Death must survive the rest of the tick.
 
@@ -650,4 +681,233 @@ def test_switching_target_makes_a_unit_pay_the_windup_again(world):
     delay = battle.tick - switched_at
     assert delay >= knight.spec.load_time_ticks - 4, (
         f"hit the new target after {delay} ticks, windup is {knight.spec.load_time_ticks}"
+    )
+
+
+# --------------------------------------------------- the RL training deck (M2)
+
+# cr_sim.train.run.DEFAULT_DECK. These are the only six troops/buildings the RL
+# agent ever actually fights with, so their pairwise outcomes matter more than
+# roster breadth: a targeting or attack-cycle bug here silently teaches the
+# wrong policy rather than merely failing a stat check.
+
+
+def _card_vs_lone_unit(world, card, opponent, *, opponent_rarity="Common", drop=2.0, limit=3000):
+    """Deploy a full card against a single stationary defender.
+
+    The defender is placed directly rather than played as a card so its side
+    of the fight is exactly one unit, whatever the attacking card's count is.
+
+    Returns the attackers *as spawned*, not re-queried afterwards: a dead unit
+    leaves ``battle.entities`` for the graveyard (see
+    ``test_dead_units_leave_the_live_list`` in test_collision.py), so asking
+    "which Goblins died" by filtering the live list at the end would just find
+    an empty list once they all had.
+    """
+    data, levels, registry = world
+    battle = Battle(
+        data, levels, registry,
+        BattleConfig(seed=1, blue_deck=(card,) * 8, red_deck=(opponent,) * 8),
+    )
+    battle.entities = [e for e in battle.entities if e.kind is not EntityKind.TOWER]
+    battle._towers = {Team.BLUE: [], Team.RED: []}
+    battle.players[Team.BLUE].elixir.add(10)
+    assert battle.play_card(Team.BLUE, card, tiles(9), tiles(10))
+    attackers = [e for e in battle.entities if e.team is Team.BLUE]
+
+    scale = levels.get(opponent_rarity)
+    spec = build_unit_spec(
+        data, levels, opponent,
+        level=scale.internal_level(11), rarity=opponent_rarity, clock=battle.clock,
+    )
+    defender = Entity(
+        kind=spec.kind, team=Team.RED, x=tiles(9), y=tiles(10 + drop), hitpoints=spec.hitpoints,
+        spec=spec, collision_radius=spec.collision_radius, mass=spec.mass, flying=spec.flying,
+    )
+    battle._register(defender)
+
+    for _ in range(limit):
+        battle.step()
+        if all(e.dead for e in attackers) or defender.dead:
+            break
+    return defender, attackers, battle
+
+
+def test_knight_one_shots_a_goblin(world):
+    """202 damage against 202 hitpoints at level 11 -- an exact breakpoint.
+
+    It is why a lone Knight is a real answer to Goblins dropped on him one at a
+    time, rather than something four bodies simply overwhelm.
+    """
+    data, levels, _registry = world
+    knight = build_unit_spec(data, levels, "Knight", level=levels.get("Common").internal_level(11),
+                              rarity="Common")
+    goblin = build_unit_spec(data, levels, "Goblin_Stab", level=levels.get("Common").internal_level(11),
+                              rarity="Common")
+    assert knight.damage >= goblin.hitpoints
+
+    blue, red, _battle = duel(world, "Knight", "Goblin_Stab")
+    assert red.dead and not blue.dead
+    assert blue.hitpoints == blue.max_hitpoints, "took damage from a unit that should never connect"
+
+
+def test_knight_survives_a_full_goblins_drop(world):
+    """Four Goblins land on a Knight together; he kills all four and keeps most of his health.
+
+    Their ring SummonRadius means they do not all reach melee range on the
+    same tick, so the Knight -- who one-shots each of them -- picks them off
+    faster than their combined DPS can equal his hitpoints.
+    """
+    knight, goblins, _battle = _card_vs_lone_unit(world, "Goblins", "Knight", drop=0.0)
+    assert knight.hitpoints > 0 and not knight.dead
+    assert len(goblins) == 4
+    assert all(g.dead for g in goblins), "a Knight should clear a full Goblins drop"
+    assert knight.hitpoints > knight.max_hitpoints // 2, "took more damage than expected"
+
+
+def test_knight_survives_a_full_skeletons_drop(world):
+    """Three Skeletons is an even easier trade for the Knight than Goblins is."""
+    knight, skeletons, _battle = _card_vs_lone_unit(world, "Skeletons", "Knight", drop=0.0)
+    assert not knight.dead
+    assert len(skeletons) == 3
+    assert all(s.dead for s in skeletons)
+    assert knight.hitpoints > knight.max_hitpoints * 3 // 4
+
+
+def test_musketeer_beats_a_full_goblins_drop(world):
+    """Her range lets her shoot Goblins down before most of them ever swing.
+
+    217 damage one-shots each Goblin (202 hp), and 6 tiles of range means she
+    is already firing while they are still closing the gap.
+    """
+    musketeer, goblins, _battle = _card_vs_lone_unit(
+        world, "Goblins", "Musketeer", opponent_rarity="Rare", drop=2.0
+    )
+    assert not musketeer.dead
+    assert all(g.dead for g in goblins)
+
+
+def test_musketeer_takes_no_damage_from_a_full_skeletons_drop(world):
+    """The clearest case of her range advantage: she kills all three for free."""
+    musketeer, skeletons, _battle = _card_vs_lone_unit(
+        world, "Skeletons", "Musketeer", opponent_rarity="Rare", drop=2.0
+    )
+    assert not musketeer.dead
+    assert musketeer.hitpoints == musketeer.max_hitpoints, "a Skeleton landed a hit on her"
+    assert all(s.dead for s in skeletons)
+
+
+def test_goblins_pack_around_a_knight_without_their_collision_radii_crowding_them_out(world):
+    """Small hitboxes are the whole reason a swarm can surround a target.
+
+    All four Goblins have room to be in melee range of the Knight at once --
+    if their 0.5-tile collision radii were too large relative to his to fit,
+    collision would shove some of them back out of range and Goblins would
+    never be able to land more than one or two hits at a time. The Knight's
+    hitpoints are inflated so he outlasts the whole approach; the point of the
+    test is the geometry, not who wins.
+    """
+    data, levels, registry = world
+    battle = Battle(
+        data, levels, registry,
+        BattleConfig(seed=1, blue_deck=("Goblins",) * 8, red_deck=("Knight",) * 8),
+    )
+    battle.entities = [e for e in battle.entities if e.kind is not EntityKind.TOWER]
+    battle._towers = {Team.BLUE: [], Team.RED: []}
+    knight = _spawn(battle, world, "Knight", Team.RED, 9, 10.0)
+    knight.hitpoints = knight.max_hitpoints = 999_999
+    battle.players[Team.BLUE].elixir.add(10)
+    assert battle.play_card(Team.BLUE, "Goblins", tiles(9), tiles(10.6))  # dropped almost on him
+
+    most_simultaneous = 0
+    for _ in range(200):
+        battle.step()
+        goblins = [e for e in battle.entities if e.spec and e.spec.name == "Goblin_Stab" and not e.dead]
+        in_range = sum(1 for g in goblins if in_attack_range(g.spec, g, knight))
+        most_simultaneous = max(most_simultaneous, in_range)
+    assert most_simultaneous == 4, (
+        f"only {most_simultaneous} of 4 Goblins ever got into melee range at once"
+    )
+
+
+def test_cannon_cannot_target_flying_units(world):
+    """Cannon is ground-only -- a Minion overhead is simply invisible to it."""
+    battle = _empty_battle(world)
+    cannon = _spawn(battle, world, "Cannon", Team.BLUE, 9, 10.0)
+    minion = _spawn(battle, world, "Minion", Team.RED, 9, 11.0)
+    assert cannon.spec.attacks_ground and not cannon.spec.attacks_air
+    assert not can_target(cannon.spec, cannon, minion)
+    for _ in range(200):
+        battle.step()
+    assert minion.hitpoints == minion.max_hitpoints
+
+
+def test_cannon_holds_its_target_even_when_a_closer_enemy_arrives(world):
+    """Sticky targeting: acquiring a target is not re-run every tick.
+
+    Without this a Cannon would flicker onto whatever is nearest right now,
+    which would make it trivial to tank its damage by feeding it a fresh unit
+    every tick instead of trading a whole one into it.
+    """
+    battle = _empty_battle(world)
+    cannon = _spawn(battle, world, "Cannon", Team.BLUE, 9, 10.0)
+    far = _spawn(battle, world, "Skeleton", Team.RED, 9, 14.0)
+    far.hitpoints = far.max_hitpoints = 999_999  # outlast the test, not the point of it
+    battle.step()
+    assert cannon.target_id == far.id
+
+    near = _spawn(battle, world, "Skeleton", Team.RED, 9, 10.5)
+    for _ in range(30):
+        battle.step()
+    assert cannon.target_id == far.id, "switched off a valid target for a merely closer one"
+    assert near.hitpoints == near.max_hitpoints, "attacked the unit it should not have switched to"
+
+
+def test_cannon_does_not_fire_during_its_own_deploy_time(world):
+    """Cannon's LoadTime is only 100ms -- far shorter than its 1000ms DeployTime.
+
+    A gate implemented on the attack cycle alone (rather than on deployment)
+    would let a fast LoadTime race ahead of DeployTime and have the Cannon
+    firing while it is still supposed to be inert on the ground.
+    """
+    battle = _empty_battle(world)
+    cannon = _spawn(battle, world, "Cannon", Team.BLUE, 9, 10.0)
+    cannon.deploy_ticks_left = cannon.spec.deploy_ticks
+    knight = _spawn(battle, world, "Knight", Team.RED, 9, 12.0)
+    assert cannon.spec.load_time_ticks < cannon.spec.deploy_ticks
+
+    for _ in range(cannon.spec.deploy_ticks - 1):
+        battle.step()
+    assert knight.hitpoints == knight.max_hitpoints, "Cannon fired before finishing deployment"
+
+
+def test_a_knight_routes_around_a_friendly_cannon_rather_than_through_it(world):
+    """A building bends a push; it does not merely sit there decoratively.
+
+    The Cannon here is on the Knight's own team, so it can never be his
+    target -- the only thing that can make him detour around it is the
+    pathing grid's occupancy, driven by the Cannon's real ``CollisionRadius``.
+    A Knight that instead walked the straight line would have to shove
+    through (or get stuck on) an immovable building.
+    """
+    data, levels, _registry = world
+    battle = _empty_battle(world)
+    cannon = _spawn(battle, world, "Cannon", Team.BLUE, 9, 12.0)
+    knight = _spawn(battle, world, "Knight", Team.BLUE, 9, 10.0)
+    musketeer = _spawn(battle, world, "Musketeer", Team.RED, 9, 14.0)
+
+    max_deviation = 0
+    closest_approach = 1 << 30
+    for _ in range(1200):
+        battle.step()
+        max_deviation = max(max_deviation, abs(to_tiles(knight.x) - 9.0))
+        from cr_sim.engine.fixed import distance
+
+        closest_approach = min(closest_approach, distance(knight.x, knight.y, cannon.x, cannon.y))
+        if knight.dead or musketeer.dead:
+            break
+    assert musketeer.dead, "the Knight never got past the Cannon to reach her"
+    assert max_deviation > 0.5, "walked the straight line instead of detouring"
+    assert closest_approach >= knight.collision_radius + cannon.collision_radius, (
+        "clipped into the Cannon's own hitbox while routing around it"
     )

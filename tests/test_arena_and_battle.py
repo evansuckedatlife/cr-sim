@@ -138,6 +138,62 @@ def test_tower_footprints_block_movement(arena):
     assert arena.is_walkable(tiles(9), tiles(10))  # open court
 
 
+# ---------------------------------------------------- building collision shape
+
+
+def test_king_tower_footprint_is_a_square_not_a_circle(arena):
+    """Settles ``building-collision-shape`` for the one building the data can settle.
+
+    A building's only per-entity extent is the scalar ``CollisionRadius`` --
+    circular by construction. But the King Tower's ``BLOCKED`` cells in the
+    shipped tilemap trace a clean 3x3 tile square centred on its placement
+    line (9.0, 3.0), not a circle: this point sits 2.05 tiles from the centre,
+    outside any circle CollisionRadius could plausibly describe (the tower's
+    own is 1.4 tiles), yet it is still inside the square and still blocked.
+    A circular model would call it walkable; the tilemap says it is not.
+    """
+    king = arena.king_tower(Team.BLUE)
+    assert king is not None
+    cx, cy = to_tiles(king.x), to_tiles(king.y)
+    assert (cx, cy) == (9.0, 3.0)
+
+    # Just inside each face of the square, including the corners.
+    for dx, dy in ((-1.49, 0), (1.49, 0), (0, -1.49), (0, 1.49), (-1.49, -1.49), (1.49, 1.49)):
+        point = (tiles(cx + dx), tiles(cy + dy))
+        assert not arena.is_walkable(*point), f"({dx}, {dy}) should be inside the footprint"
+
+    # Just outside each face, including the corners -- proving the boundary is
+    # a straight edge at +/-1.5 tiles, not a circular falloff.
+    for dx, dy in ((-1.51, 0), (1.51, 0), (0, -1.51), (0, 1.51), (-1.51, -1.51), (1.51, 1.51)):
+        point = (tiles(cx + dx), tiles(cy + dy))
+        assert arena.is_walkable(*point), f"({dx}, {dy}) should be outside the footprint"
+
+
+def test_princess_towers_have_no_baked_footprint_at_all(arena):
+    """Unlike the King Tower, a Princess Tower is not drawn into the tilemap.
+
+    Scanning a 2-tile box around every Princess Tower on the board (both
+    teams) finds no ``BLOCKED`` cell anywhere. Whatever keeps a troop from
+    standing inside one is therefore not terrain -- it can only be the
+    runtime circle-collision in :mod:`cr_sim.engine.movement`, driven by the
+    tower's ``CollisionRadius``. Buildings are not uniformly square; the King
+    Tower is the documented exception, not the rule.
+    """
+    towers = arena.princess_towers(Team.BLUE) + arena.princess_towers(Team.RED)
+    assert len(towers) == 4  # two per side
+    steps = [i / 10 for i in range(-20, 21)]
+    for tower in towers:
+        cx, cy = to_tiles(tower.x), to_tiles(tower.y)
+        for dx in steps:
+            for dy in steps:
+                x, y = tiles(cx + dx), tiles(cy + dy)
+                if not (0 <= x < arena.width and 0 <= y < arena.height):
+                    continue
+                assert not arena.is_blocked(x, y), (
+                    f"unexpected blocked cell {dx:+.1f},{dy:+.1f} tiles from a Princess Tower"
+                )
+
+
 def test_out_of_bounds_reads_as_blocked(arena):
     assert not arena.is_walkable(-1, tiles(5))
     assert not arena.is_walkable(tiles(5), arena.height + 1)

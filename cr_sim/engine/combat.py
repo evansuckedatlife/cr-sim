@@ -222,7 +222,7 @@ def advance_attack(
     # The windup finished on this tick, so this unit swings.
     state.loaded = True
     state.cooldown = max(1, spec.hit_speed_ticks)
-    state.stop_ticks = 0
+    state.stop_ticks = spec.stop_time_after_attack_ticks
     return PendingHit(
         attacker=attacker,
         spec=spec,

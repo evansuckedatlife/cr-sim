@@ -149,6 +149,12 @@ class UnitSpec:
     #: Sparky: the windup is not restarted from zero when she retargets.
     load_first_hit: bool = False
 
+    #: How long a unit stands still after a swing lands, on top of the normal
+    #: hit-speed cooldown. Zero for every troop and building in this build --
+    #: the field exists in the schema but nothing currently ships a nonzero
+    #: value -- so this only matters if a future extraction populates it.
+    stop_time_after_attack_ticks: int = 0
+
     #: A timed explosive rather than a unit: Giant Skeleton's bomb, Balloon's,
     #: Bomb Tower's. They carry no hitpoints at all -- they cannot be attacked
     #: or destroyed, they simply sit for their fuse and then go off. Modelled
@@ -391,6 +397,7 @@ def build_unit_spec(
         variable_damage=_variable_damage(raw, scale, level),
         variable_damage_ticks=_variable_damage_ticks(raw, clock),
         load_first_hit=_bool(raw.get("LoadFirstHit")),
+        stop_time_after_attack_ticks=clock.ticks(raw.get("StopTimeAfterAttack")),
         source_ref=ref,
         level=level,
         rarity=rarity,
@@ -448,6 +455,7 @@ def build_tower_spec(
         retarget_each_tick=_bool(raw.get("RetargetEachTick")),
         crown_tower_damage_percent=_int(raw.get("CrownTowerDamagePercent")),
         projectile=projectile if isinstance(projectile, str) else None,
+        stop_time_after_attack_ticks=clock.ticks(raw.get("StopTimeAfterAttack")),
         source_ref=str(raw.get("__ref__", name)),
         level=level,
         rarity="Common",
