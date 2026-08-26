@@ -138,11 +138,39 @@ def test_episode_terminates_and_reward_stays_finite(world):
 
 
 def test_legal_action_mask_matches_declared_shape(world):
+    """The mask is indexed exactly like an action tuple, ``(slot, x, y)``.
+
+    It has to agree with ``action_space`` axis for axis. Shaping the mask like
+    an image while the action space reads ``(slot, x, y)`` silently transposes
+    every placement sampled from it, and on a 9x16 grid that is a legal-looking
+    cell in the wrong place rather than an error anyone would notice.
+    """
     env = _env(world)
     env.reset(seed=1)
     mask = env.legal_action_mask()
-    assert mask.shape == (NUM_CARD_SLOTS, env._config.action_height, env._config.action_width)
-    assert mask[NOOP_SLOT].all()
+    assert mask.shape == (NUM_CARD_SLOTS, env._config.action_width, env._config.action_height)
+    assert tuple(mask.shape) == tuple(env.action_space.nvec)
+    assert mask[NOOP_SLOT, 0, 0]
+
+
+def test_every_action_sampled_from_the_mask_is_accepted(world):
+    """The mask's whole job. Sampling it must never produce a rejected action.
+
+    This is what catches an axis-order mismatch: a transposed index is still a
+    valid-looking tuple, so it fails as a decode error or a bad placement
+    rather than as a shape error.
+    """
+    import numpy as np
+
+    env = _env(world)
+    env.reset(seed=3)
+    for _ in range(40):
+        legal = np.argwhere(env.legal_action_mask())
+        assert len(legal), "no legal action, not even the no-op"
+        action = tuple(int(v) for v in legal[len(legal) // 2])
+        _, _, terminated, truncated, _ = env.step(action)
+        if terminated or truncated:
+            break
 
 
 def test_render_returns_a_board_sized_ascii_grid(world):

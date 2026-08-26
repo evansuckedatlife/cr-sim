@@ -212,7 +212,10 @@ def test_legal_mask_matches_actual_play_card_legality(world):
 
     mask_battle = _battle(world, seed=5, hand=HAND)
     mask = legal_action_mask(mask_battle, Team.BLUE, registry, config)
-    assert mask[NOOP_SLOT].all(), "the no-op slot must always be legal"
+    # One cell, not the whole slot: passing has no position, so the other
+    # 143 cells would be duplicates competing for probability mass.
+    assert mask[NOOP_SLOT].sum() == 1, "passing should be exactly one action"
+    assert mask[NOOP_SLOT, 0, 0], "passing must always be legal"
 
     sample = [(gx, gy) for gx in range(0, width, 3) for gy in range(0, height, 4)]
     legal_checked = illegal_checked = 0
@@ -222,7 +225,7 @@ def test_legal_mask_matches_actual_play_card_legality(world):
             assert fresh.players[Team.BLUE].hand[slot] == card_name
             x, y = cell_to_world(gx, gy, Team.BLUE, arena, span=PLACEMENT_TILE_SPAN)
             played = fresh.play_card(Team.BLUE, card_name, x, y)
-            is_legal = bool(mask[slot, gy, gx])
+            is_legal = bool(mask[slot, gx, gy])
             if is_legal:
                 assert played, (
                     f"mask marked {card_name} legal at cell ({gx},{gy}) "
@@ -253,7 +256,7 @@ def test_legal_mask_respects_affordability(world):
 
     mask = legal_action_mask(battle, Team.BLUE, registry, config)
     assert not mask[:NOOP_SLOT].any(), "no elixir: nothing should be affordable"
-    assert mask[NOOP_SLOT].all(), "passing never costs elixir"
+    assert mask[NOOP_SLOT, 0, 0], "passing never costs elixir"
 
 
 def test_legal_mask_shape_matches_action_grid(world):
@@ -262,5 +265,7 @@ def test_legal_mask_shape_matches_action_grid(world):
     config = build_encoding_config(arena, DECK, DECK)
     battle = _battle(world, seed=5, hand=HAND)
     mask = legal_action_mask(battle, Team.BLUE, registry, config)
-    assert mask.shape == (NUM_CARD_SLOTS, config.action_height, config.action_width)
+    # (slot, x, y) -- the same order an action tuple is written, so a mask
+    # index can be used as an action without transposing.
+    assert mask.shape == (NUM_CARD_SLOTS, config.action_width, config.action_height)
     assert mask.dtype == np.bool_

@@ -358,8 +358,15 @@ def _can_deploy_cached(
 def legal_action_mask(
     battle: Battle, team: Team, registry: CardRegistry, config: EncodingConfig
 ) -> np.ndarray:
-    """Boolean ``(5, action_height, action_width)`` mask of currently legal
+    """Boolean ``(5, action_width, action_height)`` mask of currently legal
     actions for ``team``.
+
+    Indexed as ``mask[slot, x, y]``, in exactly the order an action tuple is
+    written. That matters more than it looks: shaping this like an image
+    ``(slot, y, x)`` while the action space is ``(slot, x, y)`` reads fine in
+    both places and silently transposes every placement an agent picks from
+    the mask, which on a 9x16 grid is a legal-looking cell in the wrong half of
+    the board rather than an error.
 
     An action is legal exactly when three things all hold: the slot holds a
     real card, the player can afford it, and ``Arena.can_deploy`` accepts the
@@ -374,8 +381,15 @@ def legal_action_mask(
     learn anything about which of the *legal* actions is good.
     """
     width, height = config.action_width, config.action_height
-    mask = np.zeros((NUM_CARD_SLOTS, height, width), dtype=bool)
-    mask[NOOP_SLOT, :, :] = True
+    mask = np.zeros((NUM_CARD_SLOTS, width, height), dtype=bool)
+    # Exactly one cell, not the whole slot. Passing has no position, so every
+    # (NOOP, x, y) decodes to the same thing -- marking all 144 legal would
+    # spend a fifth of the policy's output on duplicates of one action and
+    # hand "do nothing" a fifth of the probability mass before the network has
+    # learned anything. That matters here more than it usually would: passing
+    # is the only action that is never punished, so it is already the
+    # comfortable local optimum for this task.
+    mask[NOOP_SLOT, 0, 0] = True
 
     player = battle.players[team]
     hand = player.hand
@@ -392,7 +406,7 @@ def legal_action_mask(
                     card.can_deploy_on_enemy_side,
                     card.can_place_on_water,
                 ):
-                    mask[slot, gy, gx] = True
+                    mask[slot, gx, gy] = True
     return mask
 
 

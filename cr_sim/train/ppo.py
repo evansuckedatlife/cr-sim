@@ -1,0 +1,326 @@
+"""PPO against the battle simulator.
+
+Chosen over a value-based method for one reason that is specific to this game:
+the action space is 720 wide and the *legal* subset changes every decision, as
+elixir accrues and the hand cycles. A policy-gradient method takes that mask
+natively -- illegal actions get zero probability and zero gradient -- whereas
+Q-learning would have to either learn values for actions it can never take or
+carry the same masking through a target network as well.
+
+Two things here are not stock PPO and are worth saying why.
+
+**Rollouts are collected per environment with the mask stored alongside.** The
+mask at decision time is part of the transition, not something recoverable
+later: by the time an update runs, that battle has moved on and the elixir and
+hand that made an action legal are gone. Recomputing it would score the stored
+action against a different action set than the one it was sampled from, which
+quietly corrupts the ratio PPO is built on.
+
+**Reward is already a difference.** The environment returns the change in
+(crowns + shaped tower health) each step, so an episode's rewards telescope to
+the final crown difference. That means the discount is doing much less work
+than it usually does, and a value function that is merely adequate still gives
+usable advantages.
+
+This module is deliberately dependency-light: torch and numpy, no RL framework.
+The environment is not a standard Gymnasium install here (there is a shim), and
+wiring a framework around a shimmed env is more fragile than writing the ~200
+lines of PPO that are actually needed.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Sequence
+
+import numpy as np
+import torch
+import torch.nn as nn
+
+from ..api.encoding import NOOP_SLOT
+from ..api.env import CRSimEnv
+from .nets import ActorCritic, NetConfig
+
+__all__ = ["PPOConfig", "Rollout", "train", "compute_gae"]
+
+
+@dataclass(frozen=True, slots=True)
+class PPOConfig:
+    total_steps: int = 100_000
+    #: Decisions collected per environment before each update.
+    horizon: int = 256
+    num_envs: int = 4
+    epochs: int = 4
+    minibatches: int = 4
+    learning_rate: float = 3e-4
+    gamma: float = 0.997
+    gae_lambda: float = 0.95
+    clip_coefficient: float = 0.2
+    value_coefficient: float = 0.5
+    #: Entropy bonus. Higher than the usual 0.01 because the legal action set
+    #: is large and a placement policy collapses onto one tile early if it is
+    #: not pushed to keep exploring where to put things.
+    entropy_coefficient: float = 0.02
+    max_grad_norm: float = 0.5
+    seed: int = 0
+    log_every: int = 1
+
+
+@dataclass(slots=True)
+class Rollout:
+    """One batch of transitions, with the masks that produced them."""
+
+    grid: torch.Tensor
+    vector: torch.Tensor
+    mask: torch.Tensor
+    action: torch.Tensor
+    log_prob: torch.Tensor
+    value: torch.Tensor
+    reward: torch.Tensor
+    done: torch.Tensor
+    advantage: torch.Tensor = field(default=None)  # type: ignore[assignment]
+    ret: torch.Tensor = field(default=None)  # type: ignore[assignment]
+
+
+def compute_gae(
+    reward: torch.Tensor,
+    value: torch.Tensor,
+    done: torch.Tensor,
+    last_value: torch.Tensor,
+    gamma: float,
+    lam: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Generalised advantage estimation over ``(horizon, num_envs)`` tensors.
+
+    ``done`` masks the bootstrap across an episode boundary. Without it the
+    advantage at the last step of a won match would be carried into the first
+    step of the next one, teaching the policy that whatever it happened to do
+    on the opening tick was worth a crown.
+    """
+    horizon = reward.shape[0]
+    advantage = torch.zeros_like(reward)
+    running = torch.zeros_like(last_value)
+    for step in reversed(range(horizon)):
+        if step == horizon - 1:
+            next_value = last_value
+        else:
+            next_value = value[step + 1]
+        not_done = 1.0 - done[step]
+        delta = reward[step] + gamma * next_value * not_done - value[step]
+        running = delta + gamma * lam * not_done * running
+        advantage[step] = running
+    return advantage, advantage + value
+
+
+def _stack_obs(observations: Sequence[dict]) -> tuple[torch.Tensor, torch.Tensor]:
+    grid = torch.from_numpy(np.stack([o["grid"] for o in observations]))
+    vector = torch.from_numpy(np.stack([o["vector"] for o in observations]))
+    return grid, vector
+
+
+def _flat_mask(masks: Sequence[np.ndarray]) -> torch.Tensor:
+    return torch.from_numpy(np.stack([m.reshape(-1) for m in masks]))
+
+
+def _unflatten_action(index: int, nvec: Sequence[int]) -> tuple[int, int, int]:
+    """Turn a flat categorical sample back into ``(slot, x, y)``.
+
+    The inverse of the C-order flatten used on the mask, so the two agree axis
+    for axis. Getting this wrong transposes placements without erroring.
+    """
+    slots, width, height = int(nvec[0]), int(nvec[1]), int(nvec[2])
+    slot, remainder = divmod(int(index), width * height)
+    gx, gy = divmod(remainder, height)
+    assert slot < slots
+    return slot, gx, gy
+
+
+def train(
+    make_env: Callable[[int], CRSimEnv],
+    config: PPOConfig = PPOConfig(),
+    *,
+    device: str = "cpu",
+    on_update: Callable[[dict], None] | None = None,
+) -> ActorCritic:
+    """Run PPO and return the trained network.
+
+    ``make_env`` takes an index so each environment can be seeded differently;
+    identical seeds across the batch would collect the same battle several
+    times over and report a misleadingly smooth return.
+    """
+    torch.manual_seed(config.seed)
+    rng = np.random.default_rng(config.seed)
+
+    envs = [make_env(i) for i in range(config.num_envs)]
+    nvec = [int(v) for v in envs[0].action_space.nvec]
+    num_actions = int(np.prod(nvec))
+
+    observations = []
+    for index, env in enumerate(envs):
+        obs, _ = env.reset(seed=config.seed * 1000 + index)
+        observations.append(obs)
+    masks = [env.legal_action_mask() for env in envs]
+
+    sample_grid = observations[0]["grid"]
+    net = ActorCritic(
+        NetConfig(
+            grid_channels=sample_grid.shape[0],
+            grid_height=sample_grid.shape[1],
+            grid_width=sample_grid.shape[2],
+            vector_size=observations[0]["vector"].shape[0],
+            num_actions=num_actions,
+        )
+    ).to(device)
+    optimiser = torch.optim.Adam(net.parameters(), lr=config.learning_rate, eps=1e-5)
+
+    steps_done = 0
+    episode_returns: list[float] = []
+    running_return = np.zeros(config.num_envs, dtype=np.float64)
+    started = time.perf_counter()
+    update_index = 0
+
+    while steps_done < config.total_steps:
+        buffers: dict[str, list[torch.Tensor]] = {
+            key: [] for key in ("grid", "vector", "mask", "action", "log_prob", "value", "reward", "done")
+        }
+
+        for _ in range(config.horizon):
+            grid, vector = _stack_obs(observations)
+            mask = _flat_mask(masks)
+            action, log_prob, value = net.act(grid.to(device), vector.to(device), mask.to(device))
+
+            rewards = np.zeros(config.num_envs, dtype=np.float32)
+            dones = np.zeros(config.num_envs, dtype=np.float32)
+            for index, env in enumerate(envs):
+                decoded = _unflatten_action(int(action[index]), nvec)
+                obs, reward, terminated, truncated, _ = env.step(decoded)
+                rewards[index] = reward
+                running_return[index] += reward
+                if terminated or truncated:
+                    dones[index] = 1.0
+                    episode_returns.append(float(running_return[index]))
+                    running_return[index] = 0.0
+                    obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
+                observations[index] = obs
+                masks[index] = env.legal_action_mask()
+
+            buffers["grid"].append(grid)
+            buffers["vector"].append(vector)
+            buffers["mask"].append(mask)
+            buffers["action"].append(action.cpu())
+            buffers["log_prob"].append(log_prob.cpu())
+            buffers["value"].append(value.cpu())
+            buffers["reward"].append(torch.from_numpy(rewards))
+            buffers["done"].append(torch.from_numpy(dones))
+            steps_done += config.num_envs
+
+        rollout = Rollout(**{key: torch.stack(value) for key, value in buffers.items()})
+        with torch.no_grad():
+            grid, vector = _stack_obs(observations)
+            _, last_value = net(grid.to(device), vector.to(device), _flat_mask(masks).to(device))
+        rollout.advantage, rollout.ret = compute_gae(
+            rollout.reward, rollout.value, rollout.done,
+            last_value.cpu(), config.gamma, config.gae_lambda,
+        )
+
+        stats = _update(net, optimiser, rollout, config, device)
+        update_index += 1
+
+        # How often the policy chose to spend nothing. Worth watching rather
+        # than inferring from the return: "always pass" is the comfortable
+        # local optimum here, because passing is the only action that is never
+        # punished, and a run that has collapsed into it looks stable on every
+        # other metric.
+        slot_size = nvec[1] * nvec[2]
+        chosen_slots = rollout.action.reshape(-1) // slot_size
+        stats["noop_fraction"] = float((chosen_slots == NOOP_SLOT).float().mean())
+
+        elapsed = time.perf_counter() - started
+        stats.update(
+            steps=steps_done,
+            updates=update_index,
+            steps_per_second=steps_done / max(elapsed, 1e-9),
+            episodes=len(episode_returns),
+            mean_return=float(np.mean(episode_returns[-20:])) if episode_returns else float("nan"),
+        )
+        if on_update is not None:
+            on_update(stats)
+        elif update_index % config.log_every == 0:
+            print(
+                f"update {update_index:4d}  steps {steps_done:>8d}  "
+                f"{stats['steps_per_second']:6.0f}/s  "
+                f"return {stats['mean_return']:+7.3f}  "
+                f"loss {stats['policy_loss']:+.4f}/{stats['value_loss']:.4f}  "
+                f"entropy {stats['entropy']:.3f}  "
+                f"pass {stats['noop_fraction']:.0%}"
+            )
+
+    for env in envs:
+        env.close()
+    return net
+
+
+def _update(
+    net: ActorCritic,
+    optimiser: torch.optim.Optimizer,
+    rollout: Rollout,
+    config: PPOConfig,
+    device: str,
+) -> dict:
+    """One PPO update over the collected rollout."""
+    flat = {
+        "grid": rollout.grid.reshape(-1, *rollout.grid.shape[2:]),
+        "vector": rollout.vector.reshape(-1, rollout.vector.shape[-1]),
+        "mask": rollout.mask.reshape(-1, rollout.mask.shape[-1]),
+        "action": rollout.action.reshape(-1),
+        "log_prob": rollout.log_prob.reshape(-1),
+        "advantage": rollout.advantage.reshape(-1),
+        "ret": rollout.ret.reshape(-1),
+    }
+    total = flat["action"].shape[0]
+    batch_size = max(1, total // config.minibatches)
+    indices = np.arange(total)
+
+    policy_loss = value_loss = entropy_value = 0.0
+    for _ in range(config.epochs):
+        np.random.shuffle(indices)
+        for start in range(0, total, batch_size):
+            batch = torch.from_numpy(indices[start : start + batch_size])
+            advantage = flat["advantage"][batch].to(device)
+            # Normalised per minibatch: the shaped reward's scale drifts as
+            # tower health does, and an unnormalised advantage makes the
+            # effective learning rate drift with it.
+            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+
+            log_prob, entropy, value = net.evaluate(
+                flat["grid"][batch].to(device),
+                flat["vector"][batch].to(device),
+                flat["mask"][batch].to(device),
+                flat["action"][batch].to(device),
+            )
+            ratio = (log_prob - flat["log_prob"][batch].to(device)).exp()
+            unclipped = ratio * advantage
+            clipped = ratio.clamp(1 - config.clip_coefficient, 1 + config.clip_coefficient) * advantage
+            p_loss = -torch.min(unclipped, clipped).mean()
+            v_loss = nn.functional.mse_loss(value, flat["ret"][batch].to(device))
+            loss = (
+                p_loss
+                + config.value_coefficient * v_loss
+                - config.entropy_coefficient * entropy.mean()
+            )
+
+            optimiser.zero_grad(set_to_none=True)
+            loss.backward()
+            nn.utils.clip_grad_norm_(net.parameters(), config.max_grad_norm)
+            optimiser.step()
+
+            policy_loss, value_loss, entropy_value = (
+                p_loss.item(), v_loss.item(), entropy.mean().item()
+            )
+
+    return {
+        "policy_loss": policy_loss,
+        "value_loss": value_loss,
+        "entropy": entropy_value,
+    }
