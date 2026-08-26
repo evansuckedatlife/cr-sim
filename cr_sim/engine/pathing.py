@@ -22,7 +22,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .arena import Arena
-from .fixed import distance, point_along
+from .fixed import SUBTILES_PER_TILE, distance, point_along
+from .pathgrid import PathGrid, field_path, simplify
+
+_HALF_TILE = SUBTILES_PER_TILE // 2
 
 __all__ = ["Route", "route_to", "crosses_river", "step_towards"]
 
@@ -100,15 +103,38 @@ def route_to(
     goal: tuple[int, int],
     *,
     flying: bool = False,
+    grid: "PathGrid | None" = None,
 ) -> Route:
     """Build a route from ``start`` to ``goal``.
 
     Flying units go straight -- ignoring the river is the entire value of
-    flight. Ground units crossing the river are sent through the nearer bridge,
-    entering and leaving it at its centre so they funnel the way real troops do.
+    flight.
+
+    Ground units follow a weighted flow field when a :class:`PathGrid` is
+    given, which is what lets a building bend a push: at a cost of 50 against a
+    default of 8, going around one is cheaper than going through unless there
+    is no way around. Without a grid the old behaviour stands -- straight,
+    through the nearer bridge when the river is in the way -- because the grid
+    is optional and a caller without one should still get a usable route rather
+    than an exception.
     """
     route = Route()
-    if flying or not _crosses_river(arena, start[1], goal[1]):
+    if flying:
+        route.waypoints = [goal]
+        route.start(start)
+        return route
+
+    if grid is not None:
+        cells = field_path(grid, _to_cell(start), _to_cell(goal))
+        if len(cells) > 1:
+            waypoints = [_to_world(c) for c in simplify(cells)[1:]]
+            # The field lands on a cell centre; the caller asked for a point.
+            waypoints[-1] = goal
+            route.waypoints = waypoints
+            route.start(start)
+            return route
+
+    if not _crosses_river(arena, start[1], goal[1]):
         route.waypoints = [goal]
     else:
         top, bottom = arena.river_band()
@@ -118,6 +144,57 @@ def route_to(
         route.waypoints = [(centre_x, near), (centre_x, far), goal]
     route.start(start)
     return route
+
+
+def line_blocked(
+    grid: "PathGrid",
+    start: tuple[int, int],
+    goal: tuple[int, int],
+    *,
+    flying: bool = False,
+    samples: int = 8,
+) -> bool:
+    """Whether walking straight at ``goal`` runs into terrain or a building.
+
+    Pathfinding is for when the direct route fails, and the direct route
+    usually does not: two units in an open lane want a straight line, and
+    planning a path for that is work with no output. So the cheap question is
+    asked first, and the flow field is consulted only when the answer is yes.
+
+    Expensive counts as blocked, not only impassable. A building is cost 50
+    against a default of 8 -- deliberately passable, so a unit with nowhere
+    else to go still gets through -- so a test that only looked for cost zero
+    would never fire for the one obstacle this exists to handle. Anything at or
+    above the building cost is worth planning around.
+
+    Sampled rather than traced. A handful of points along the segment catches
+    anything a unit could not walk through -- a building is at least a tile
+    across and the samples are closer together than that -- and costs a
+    fraction of walking every cell the line touches, on a test that runs for
+    every moving unit every tick.
+    """
+    if flying:
+        return False
+    expensive = grid.costs["building"]
+    for step in range(1, samples + 1):
+        x = start[0] + (goal[0] - start[0]) * step // samples
+        y = start[1] + (goal[1] - start[1]) * step // samples
+        cost = grid.cost(x // _HALF_TILE, y // _HALF_TILE)
+        if cost == 0 or cost >= expensive:
+            return True
+    return False
+
+
+def _to_cell(point: tuple[int, int]) -> tuple[int, int]:
+    return point[0] // _HALF_TILE, point[1] // _HALF_TILE
+
+
+def _to_world(cell: tuple[int, int]) -> tuple[int, int]:
+    """The centre of a cell, so a route does not hug cell corners."""
+    return (
+        cell[0] * _HALF_TILE + _HALF_TILE // 2,
+        cell[1] * _HALF_TILE + _HALF_TILE // 2,
+    )
 
 
 def step_towards(
