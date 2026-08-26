@@ -42,6 +42,9 @@ IMMOVABLE_MASS = 1_000_000
 #: tolerance stops jitter between units that are merely touching.
 _TOUCH_TOLERANCE = 60  # subtiles, ~1/300 tile
 
+#: Entity kinds with no physical presence: nothing collides with them.
+_INCORPOREAL = (EntityKind.PROJECTILE, EntityKind.AREA_EFFECT)
+
 
 def _effective_mass(entity: Entity) -> int:
     """How strongly an entity resists being displaced."""
@@ -149,8 +152,8 @@ def resolve_collisions(
             # single most expensive thing in the tick.
             if a.dead or b.dead:
                 continue
-            if a.kind is EntityKind.PROJECTILE or b.kind is EntityKind.PROJECTILE:
-                continue  # shots pass over everything
+            if a.kind in _INCORPOREAL or b.kind in _INCORPOREAL:
+                continue  # shots and clouds pass over everything
             if a.flying != b.flying:
                 # Air and ground occupy different layers and never collide.
                 continue

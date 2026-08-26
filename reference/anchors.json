@@ -228,6 +228,16 @@
       "status": "open",
       "priority": "low",
       "blocks": "M6"
+    },
+    {
+      "id": "lightning-bolt-count",
+      "question": "Lightning fires 4 bolts in cr-sim where the real card fires 3.",
+      "why_it_matters": "A fourth bolt is a third more damage from a 6-elixir spell, and changes which pushes it answers.",
+      "evidence": "AEO.Lightning has LifeDuration=1500 and HitSpeed=460. With the first application landing immediately (which Poison requires - it produces exactly the documented 736 damage, and delaying it gives 7 ticks instead of 8) that window fits applications at 0, 460, 920 and 1380 = four. Delaying the first application gives three but breaks Poison. So the two spells disagree about the first-application rule under any single interpretation.",
+      "how_to_resolve": "Either the engine caps bolts by a count not present in this data, or the AEO lifetime is measured differently from how cr-sim reads it. Count the bolts and time the cloud in-game. Note Lightning has no OneHitPerTarget flag, so distinct-target selection is also inferred from the card's known behaviour rather than stated.",
+      "status": "open",
+      "priority": "medium",
+      "blocks": "M5 accuracy"
     }
   ]
 }

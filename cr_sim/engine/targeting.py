@@ -40,10 +40,14 @@ __all__ = [
     "acquire_target",
     "should_keep_target",
     "STRUCTURE_KINDS",
+    "UNTARGETABLE_KINDS",
 ]
 
 #: Kinds a building-targeting troop is allowed to see.
 STRUCTURE_KINDS = (EntityKind.BUILDING, EntityKind.TOWER)
+
+#: Kinds that exist on the board but are not valid targets for anything.
+UNTARGETABLE_KINDS = (EntityKind.PROJECTILE, EntityKind.AREA_EFFECT)
 
 
 def gap_between(attacker: Entity, target: Entity) -> int:
@@ -66,8 +70,12 @@ def can_target(spec: UnitSpec, attacker: Entity, target: Entity) -> bool:
     """
     if target.dead or target.team is attacker.team:
         return False
-    if target.kind is EntityKind.PROJECTILE:
-        return False  # shots in flight are not things you can shoot at
+    if target.kind in UNTARGETABLE_KINDS:
+        # A shot in flight and a spell's cloud are both entities so they get
+        # hashed, replayed and drawn -- but neither is a thing you can attack.
+        # Leaving them targetable let a Knight kill a Poison cloud, which has
+        # one hitpoint, and cut the spell short.
+        return False
     if not target.is_targetable:  # still deploying
         return False
     if target.flying:

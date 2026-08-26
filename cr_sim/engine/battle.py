@@ -42,6 +42,7 @@ from .combat import (
 )
 from .pathing import Route, crosses_river, route_to, step_towards
 from .areaeffects import AreaEffect, AreaEffectSpec, build_area_effect_spec
+from .buffs import BuffSpec, BuffState, apply_multiplier, build_buff_spec
 from .projectiles import Projectile, ProjectileSpec, build_projectile_spec
 from .spells import SpellPlan, plan_spell
 from .targeting import acquire_target, in_attack_range, should_keep_target
@@ -170,6 +171,7 @@ class Battle:
         "_area_specs",
         "_spell_plans",
         "_pending_waves",
+        "_buff_specs",
     )
 
     def __init__(
@@ -217,6 +219,7 @@ class Battle:
         self._projectile_specs: dict[str, ProjectileSpec | None] = {}
         self._area_specs: dict[str, AreaEffectSpec | None] = {}
         self._spell_plans: dict[str, SpellPlan] = {}
+        self._buff_specs: dict[str, BuffSpec | None] = {}
         #: Volleys still to fire, as (tick, card, team, x, y). Arrows is the
         #: only card that uses this, and it is why its damage looks uneven.
         self._pending_waves: list[tuple[int, str, Team, int, int]] = []
@@ -556,7 +559,32 @@ class Battle:
                 entity.tick_lifetime()
 
     def _phase_update_buffs(self) -> None:
-        """M5: tick rage/slow/freeze/stun durations and expire them."""
+        """Expire buff durations and deliver damage-over-time.
+
+        Poison and Tornado carry no damage of their own -- all of it lives in
+        the buff they leave behind, ticking on the buff's own ``HitFrequency``
+        rather than the cloud's scan rate. Ticking here rather than inside the
+        area effect is what lets the damage keep landing on a unit that has
+        already walked out of the cloud but is still poisoned.
+        """
+        for entity in self.entities:
+            if entity.buffs is None or entity.dead:
+                continue
+            owed = entity.buffs.tick()
+            if owed:
+                dealt = entity.apply_damage(owed)
+                if dealt:
+                    self.damage_log.append(
+                        DamageEvent(
+                            tick=self.tick,
+                            attacker_id=0,
+                            target_id=entity.id,
+                            amount=dealt,
+                            lethal=entity.hitpoints <= 0,
+                        )
+                    )
+            if not entity.buffs:
+                entity.buffs = None
 
     def _phase_acquire_targets(self) -> None:
         """Choose each unit's target, keeping the current one where possible.
@@ -614,6 +642,10 @@ class Battle:
                 # Out of reach the windup does not run at all, which is why
                 # kiting a melee unit prevents its damage rather than delaying it.
                 continue
+            if entity.buffs is not None and entity.buffs.is_frozen():
+                # Frozen means frozen: no windup progress, no swing. This is
+                # why Freeze buys time rather than merely reducing damage.
+                continue
             state = self._attacks.get(entity.id)
             if state is None:
                 state = self._attacks[entity.id] = AttackState()
@@ -653,6 +685,23 @@ class Battle:
                         self.tick,
                     )
                 )
+
+    def _buff_spec(self, name: str, rarity: str, level: int) -> BuffSpec | None:
+        key = f"{name}@{rarity}@{level}"
+        if key not in self._buff_specs:
+            self._buff_specs[key] = build_buff_spec(
+                self.data, name, self.levels.get(rarity), level=level, clock=self.clock
+            )
+        return self._buff_specs[key]
+
+    def _apply_buff(
+        self, victim: Entity, spec: BuffSpec, duration: int, source: int = 0
+    ) -> None:
+        if duration <= 0:
+            return
+        if victim.buffs is None:
+            victim.buffs = BuffState()
+        victim.buffs.apply(spec, duration, source)
 
     def _plan(self, card: Card) -> SpellPlan:
         plan = self._spell_plans.get(card.name)
@@ -789,6 +838,42 @@ class Battle:
             self._impact(shot)
             shot.kill()
 
+    def _strike(self, effect: AreaEffect) -> None:
+        """Fire an area effect's own projectile at what is inside it.
+
+        Lightning works this way: the cast places a short-lived effect that
+        looses a bolt every 460ms, and ``HitBiggestTargets`` sends each bolt at
+        the largest thing in range. That is the whole character of the card --
+        it answers a tank and its support, and is wasted on a swarm.
+        """
+        aspec = effect.aspec
+        candidates = [
+            v
+            for v in self._index.near(effect.x, effect.y, aspec.radius)
+            if effect.affects(v)
+            and distance(effect.x, effect.y, v.x, v.y) <= aspec.radius + v.collision_radius
+            and v.id not in effect.struck
+        ]
+        if not candidates:
+            return
+        if aspec.hit_biggest:
+            # Largest by maximum hitpoints, with the id as a stable tiebreak.
+            candidates.sort(key=lambda v: (-v.max_hitpoints, v.id))
+        else:
+            candidates.sort(key=lambda v: (distance(effect.x, effect.y, v.x, v.y), v.id))
+
+        pspec = self._projectile_spec(aspec.projectile, "Common", 11)
+        if pspec is None:
+            return
+        target = candidates[0]
+        effect.struck.add(target.id)
+        shot = Projectile(
+            pspec=pspec, team=effect.team, x=effect.x, y=effect.y,
+            target=target, owner_id=effect.owner_id, spawn_tick=self.tick,
+        )
+        self.entities.append(shot)
+        self._by_id_map[shot.id] = shot
+
     def _impact(self, shot: Projectile) -> None:
         """Deliver a projectile's payload where it landed."""
         pspec = shot.pspec
@@ -853,11 +938,27 @@ class Battle:
             if not entity.tick():
                 continue
             aspec = entity.aspec
+            if aspec.projectile:
+                self._strike(entity)
+                continue
             for victim in list(self._index.near(entity.x, entity.y, aspec.radius)):
                 if not entity.affects(victim):
                     continue
                 if distance(entity.x, entity.y, victim.x, victim.y) > aspec.radius + victim.collision_radius:
                     continue
+                if aspec.buff:
+                    # Keyed by the effect's own id, so re-touching a unit every
+                    # scan refreshes its status instead of stacking a new copy
+                    # -- BuffNumber is 1 on every area effect in the build. Two
+                    # separate clouds remain two sources and do stack.
+                    bspec = self._buff_spec(aspec.buff, "Common", 11)
+                    if bspec is not None:
+                        self._apply_buff(
+                            victim,
+                            bspec,
+                            aspec.buff_ticks or aspec.life_ticks,
+                            source=entity.id,
+                        )
                 if aspec.damage:
                     dealt = victim.apply_damage(
                         aspec.damage_to(victim.kind is EntityKind.TOWER)
@@ -887,6 +988,15 @@ class Battle:
             if state is not None and not state.can_move:
                 continue
 
+            step = spec.speed_per_tick
+            if entity.buffs is not None:
+                # A frozen unit does not move at all; a slowed or raged one
+                # moves at its adjusted rate.
+                step = apply_multiplier(step, entity.buffs.speed_multiplier())
+                if step <= 0:
+                    entity.set_state(EntityState.IDLE)
+                    continue
+
             target = self._entity(entity.target_id)
             if target is not None and not target.dead:
                 if in_attack_range(spec, entity, target):
@@ -902,7 +1012,7 @@ class Battle:
                     self._routes.pop(entity.id, None)
                     self._place(
                         entity,
-                        *step_towards((entity.x, entity.y), goal, spec.speed_per_tick),
+                        *step_towards((entity.x, entity.y), goal, step),
                     )
                 else:
                     # Across the water: this genuinely needs a bridge, and the
@@ -915,7 +1025,7 @@ class Battle:
                         self._routes[entity.id] = route
                     self._place(
                         entity,
-                        *route.advance((entity.x, entity.y), spec.speed_per_tick),
+                        *route.advance((entity.x, entity.y), step),
                     )
                 entity.set_state(EntityState.MOVING)
                 continue
@@ -939,7 +1049,7 @@ class Battle:
                     self.arena, (entity.x, entity.y), goal, flying=entity.flying
                 )
                 self._routes[entity.id] = route
-            self._place(entity, *route.advance((entity.x, entity.y), spec.speed_per_tick))
+            self._place(entity, *route.advance((entity.x, entity.y), step))
             entity.set_state(EntityState.MOVING)
 
     def _place(self, entity: Entity, x: int, y: int) -> None:

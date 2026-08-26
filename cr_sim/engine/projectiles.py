@@ -103,6 +103,25 @@ def build_projectile_spec(
 
     speed = _int(raw.get("Speed"))
     damage = _int(raw.get("Damage"))
+
+    # A projectile can be pure delivery, carrying no damage of its own and
+    # spawning the thing that does. The Log is thrown, lands, and *becomes* a
+    # rolling log; Barbarian Log does the same before dropping a Barbarian.
+    # Follow the chain for the payload rather than reporting zero damage.
+    #
+    # NOTE: the roll itself is not simulated -- the damage is delivered where
+    # the throw lands rather than swept along the lane behind it. That
+    # understates the Log against a spread-out push and is recorded as a known
+    # limitation rather than passed off as complete.
+    spawned = raw.get("SpawnProjectile")
+    if not damage and isinstance(spawned, str):
+        try:
+            follow: Mapping[str, Any] = data.resolve(f"PROJECTILE.{spawned}")
+        except (UnknownEntity, KeyError):
+            follow = {}
+        damage = _int(follow.get("Damage"))
+        if damage:
+            raw = {**raw, **{k: v for k, v in follow.items() if k != "Name"}}
     return ProjectileSpec(
         name=str(raw.get("Name", name)),
         speed=speed,

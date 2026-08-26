@@ -58,6 +58,10 @@ class AreaEffectSpec:
     ignore_buildings: bool
     crown_tower_damage_percent: int
     projectile: str | None
+    #: Strike the largest targets rather than everything in range. Lightning
+    #: uses this: three bolts at the three biggest things, which is why it
+    #: answers a tank-plus-support push and not a swarm.
+    hit_biggest: bool
     spawn_character: str | None
     spawn_count: int
     #: Named ACTION driving it, for the effects defined entirely in the action
@@ -88,6 +92,29 @@ def _str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _layers(raw: Mapping[str, Any]) -> dict[str, bool]:
+    """Which layers an area effect touches.
+
+    The absent key is meaningful, not permissive. Across the build 115 area
+    effects declare both ``HitsAir`` and ``HitsGround``, **none** declares air
+    without ground, and four declare ground *without* air -- one of which is
+    Earthquake, a spell whose defining property is that it does not hit air.
+    So an omitted layer is an excluded layer.
+
+    The exception is an effect declaring neither, which is an orchestrator with
+    no hit-test of its own (Graveyard, Vines); those carry no damage or buff, so
+    a permissive default costs nothing and avoids special-casing them.
+    """
+    has_air = "HitsAir" in raw
+    has_ground = "HitsGround" in raw
+    if not has_air and not has_ground:
+        return {"hits_air": True, "hits_ground": True}
+    return {
+        "hits_air": raw.get("HitsAir") is True,
+        "hits_ground": raw.get("HitsGround") is True,
+    }
+
+
 def build_area_effect_spec(
     data: LogicData,
     name: str,
@@ -112,16 +139,13 @@ def build_area_effect_spec(
         interval_ticks=clock.ticks(raw.get("HitSpeed")),
         buff=_str(raw.get("Buff")),
         buff_ticks=clock.ticks(raw.get("BuffTime")),
-        # A field that is absent means "no restriction"; only an explicit false
-        # excludes a layer. Defaulting these to False would make most spells
-        # hit nothing at all.
-        hits_air=raw.get("HitsAir", True) is not False,
-        hits_ground=raw.get("HitsGround", True) is not False,
+        **_layers(raw),
         only_enemies=_bool(raw.get("OnlyEnemies")),
         only_own_troops=_bool(raw.get("OnlyOwnTroops")),
         ignore_buildings=_bool(raw.get("IgnoreBuildings")),
         crown_tower_damage_percent=_int(raw.get("CrownTowerDamagePercent")),
         projectile=_str(raw.get("Projectile")),
+        hit_biggest=_bool(raw.get("HitBiggestTargets")),
         spawn_character=_str(raw.get("SpawnCharacter")),
         spawn_count=_int(raw.get("SpawnCharacterCount"), 1),
         action=_str(raw.get("OnStartingAction")) or _str(raw.get("OnHitAction")),
@@ -136,7 +160,9 @@ class AreaEffect(Entity):
     shoot or walk into.
     """
 
-    __slots__ = ("aspec", "ticks_left", "ticks_to_next", "owner_id", "applications")
+    __slots__ = (
+        "aspec", "ticks_left", "ticks_to_next", "owner_id", "applications", "struck",
+    )
 
     def __init__(
         self,
@@ -164,6 +190,11 @@ class AreaEffect(Entity):
         self.ticks_to_next = 0
         self.owner_id = owner_id
         self.applications = 0
+        #: Targets this effect has already fired a projectile at. Lightning's
+        #: bolts go to different units -- striking the same one repeatedly
+        #: would make it a single-target nuke rather than the answer to a tank
+        #: and its support.
+        self.struck: set[int] = set()
 
     def tick(self) -> bool:
         """Advance one tick. Returns True if the effect applies this tick."""

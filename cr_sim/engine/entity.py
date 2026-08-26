@@ -107,6 +107,7 @@ class Entity:
         "flying",
         "dead",
         "lifetime_left",
+        "buffs",
     )
 
     def __init__(
@@ -149,6 +150,9 @@ class Entity:
         #: attacks it -- so the timer is part of the entity, not of combat.
         #: Zero means "permanent" (troops, towers).
         self.lifetime_left = lifetime_ticks
+        #: Timed status effects. Created lazily -- most entities never carry
+        #: one, and a battle holds hundreds of entities.
+        self.buffs = None
 
     # ------------------------------------------------------------- lifecycle
 

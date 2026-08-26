@@ -10,7 +10,7 @@ Full plan: `../.claude/plans/i-want-to-build-purrfect-kernighan.md`.
 
 ## Status
 
-**235 tests.** Battles run end to end: units deploy, route, fight, die, towers
+**255 tests.** Battles run end to end: units deploy, route, fight, die, towers
 fall, and matches resolve on crowns, sudden death or a tiebreaker.
 
 | Milestone | State | What landed |
@@ -20,7 +20,7 @@ fall, and matches resolve on crowns, sudden death or a tiebreaker.
 | **M2 — combat** | ✅ | Targeting (sight, filters, sticky targets), attack cycle (load/hit-speed, simultaneous resolution), damage, Crown Towers with their own scaling, King activation with its 3300ms delay, kamikaze units, swarm spread, and projectiles that actually fly. |
 | **M3 — collision & pathing** | 🟡 | Circle collision, mass-weighted pushback, immovable tanks, derived swarm packing, and a spatial index. Weighted-grid pathfinding (the `PATHFINDING_*` costs) is still waypoint-only. |
 | **M4 — match rules** | ✅ | Elixir, deck cycle, deploy legality, crowns, king-destruction, regulation end, overtime sudden death, and a percentage-based tiebreaker. |
-| **M5 — spells & buffs** | ⬜ | Area effects, damage-over-time, freeze/rage/slow, projectile waves |
+| **M5 — spells & buffs** | 🟡 | Spells cast and land, area effects tick, buffs slow/freeze/rage, damage-over-time, Arrows' waves. The ACTION-driven spells (Graveyard, Clone, Vines, Mirror) still do nothing. |
 | **M6 — the full roster** | ⬜ | Charge/dash, death spawns, spawners, shields, ramp damage — plus an **ACTION interpreter** |
 | **M7 — champions & evolutions** | ⬜ | Abilities, Evolutions, Mirror/Clone/Graveyard |
 | **M8 — ML interface** | ⬜ | Gymnasium env, observation/action encoding, self-play, multiprocess vec env |
@@ -32,15 +32,17 @@ These are things the engine does **not** do yet. None are bugs; all are
 scheduled, and each is listed because a simulator that hides its gaps is worse
 than one that names them.
 
-- **No spells.** They cost elixir and do nothing. Ice Spirit dies on impact and
-  its bomb lands, but it does not freeze. This is the largest remaining gap.
+- **Five spells still do nothing**: Graveyard, Clone, Vines, Mirror, Merge
+  Maiden. Every one is defined in the ACTION graph rather than in stat fields,
+  so they need the interpreter that M6 brings.
+- **The Log does not roll.** Its damage lands where the throw lands rather than
+  sweeping down the lane, which understates it against a spread push.
 - **Pathfinding is waypoints, not a search.** Ground units route through the
   nearer bridge and otherwise steer straight. The `PATHFINDING_*` costs the
   game ships (`DEFAULT=8`, `ROAD=5`, `WATER=7`, `BLOCKED=50`, `BUILDING=50`)
   are not used, so units do not flow around a building the way they should.
-- **No buffs.** Rage, freeze, slow, stun, shields beyond the flat hitpoint pool.
-  Poison and Tornado therefore deal no damage at all: theirs lives entirely in
-  the buff they apply.
+- **Shields, invisibility and damage reduction** are read from the data but not
+  applied.
 - **Sparky's `LoadFirstHit` is not implemented.** One entity in the build sets
   it, and it is why a stun resets her charge.
 - **Area-effect objects are inert.** The `AEO` layer (Poison's cloud, Tornado's
@@ -239,7 +241,7 @@ python -m cr_sim.cli card Knight         # full resolved stats for one card
 python -m cr_sim.cli validate            # the stat gate + open questions
 python -m cr_sim.cli arena --map         # terrain, towers, deploy zones
 python -m cr_sim.cli battle --html r.html   # run a match, write a replay
-python -m pytest                         # 235 tests
+python -m pytest                         # 255 tests
 ```
 
 `freeze` re-cuts the regression baseline (`reference/card_stats.json`). Note the
