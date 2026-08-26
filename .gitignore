@@ -5,3 +5,9 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# Training output. Checkpoints are binary blobs and metrics are per-run
+# artifacts; neither belongs in the history. Results worth keeping get
+# summarised into reference/ or the README instead.
+runs/
+*.log
