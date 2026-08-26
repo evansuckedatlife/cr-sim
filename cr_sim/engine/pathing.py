@@ -27,6 +27,11 @@ from .pathgrid import PathGrid, field_path, simplify
 
 _HALF_TILE = SUBTILES_PER_TILE // 2
 
+#: How much of the approach is exempt from the blocked test, in subtiles. Wide
+#: enough to clear a tower's own footprint, which is what a unit attacking one
+#: is walking into on purpose.
+_GOAL_SLACK = SUBTILES_PER_TILE * 2
+
 __all__ = ["Route", "route_to", "crosses_river", "step_towards"]
 
 
@@ -124,6 +129,14 @@ def route_to(
         route.start(start)
         return route
 
+    # A clear line needs no plan. Checked here as well as by the caller,
+    # because a route asked for over open ground would otherwise be walked as
+    # a chain of cell-centre waypoints -- longer to follow, and no straighter.
+    if grid is not None and not line_blocked(grid, start, goal):
+        route.waypoints = [goal]
+        route.start(start)
+        return route
+
     if grid is not None:
         cells = field_path(grid, _to_cell(start), _to_cell(goal))
         if len(cells) > 1:
@@ -176,7 +189,16 @@ def line_blocked(
     if flying:
         return False
     expensive = grid.costs["building"]
-    for step in range(1, samples + 1):
+    span = distance(*start, *goal)
+    if span <= 0:
+        return False
+    # The last stretch is not sampled. A unit walking at a building has that
+    # building in the occupancy map, so sampling all the way in makes every
+    # target its own obstacle -- which had Knights curving around the tower
+    # they were attacking and walking 4.79 tiles in the five seconds their
+    # speed says is exactly five.
+    reach = min(samples - 1, max(1, int(samples * (1 - _GOAL_SLACK / max(span, 1)))))
+    for step in range(1, reach + 1):
         x = start[0] + (goal[0] - start[0]) * step // samples
         y = start[1] + (goal[1] - start[1]) * step // samples
         cost = grid.cost(x // _HALF_TILE, y // _HALF_TILE)

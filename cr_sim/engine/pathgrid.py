@@ -91,6 +91,7 @@ class PathGrid:
 
     __slots__ = (
         "arena", "costs", "_ground", "_air", "_occupied", "version", "_fields",
+        "_combined",
     )
 
     def __init__(self, arena: Arena, costs: Mapping[str, int] | None = None) -> None:
@@ -102,6 +103,8 @@ class PathGrid:
         self._air = self._terrain(flying=True)
         #: Cached distance fields, keyed by (goal, flying, version).
         self._fields: dict[tuple[tuple[int, int], bool, int], list[int]] = {}
+        #: Terrain and occupancy folded together, per (flying, version).
+        self._combined: dict[tuple[bool, int], list[int]] = {}
 
     def _terrain(self, *, flying: bool) -> list[int]:
         """Cost to enter each cell, or 0 for cells that cannot be entered."""
@@ -136,8 +139,29 @@ class PathGrid:
             return
         self._occupied = dict(cells)
         self.version += 1
-        # Every field describes a board that no longer exists.
+        # Every field and every folded cost array describes a board that no
+        # longer exists.
         self._fields.clear()
+        self._combined.clear()
+
+    def combined(self, flying: bool = False) -> list[int]:
+        """Terrain plus occupancy as one flat array, cached per version.
+
+        The search asked ``cost()`` once per neighbour per cell, which came to
+        thirty million calls in a short training run -- a Python call and two
+        dict lookups where an array index would do. Folding the two layers
+        together once per version turns the inner loop into indexing.
+        """
+        key = (flying, self.version)
+        found = self._combined.get(key)
+        if found is None:
+            base = list(self._air if flying else self._ground)
+            for index, extra in self._occupied.items():
+                if 0 <= index < len(base) and base[index]:
+                    base[index] += extra
+            self._combined[key] = base
+            found = base
+        return found
 
     def index_of(self, cx: int, cy: int) -> int:
         return cy * self.arena.half_width + cx
@@ -248,6 +272,24 @@ def simplify(path: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 UNREACHABLE = 1 << 30
 
+#: Cells a flow field's goal is rounded to. The field was designed around a
+#: handful of fixed goals -- everything walks at one of three towers -- but a
+#: route is asked for a *target entity's* position, and a moving target crosses
+#: a cell every few ticks. Every crossing was a fresh Dijkstra: profiling a
+#: training run found 4,716 field builds and 34 million cost lookups, by far
+#: the largest single cost in the engine.
+#:
+#: Rounding the goal to a 2x2 block means everything chasing roughly the same
+#: place shares one field. The path is unaffected in any way that survives:
+#: the route's last waypoint is replaced with the true goal, so the rounding
+#: only decides which way a unit approaches from, at half-tile precision.
+GOAL_SNAP = 2
+
+#: Distinct fields kept. Bounded because a match with many separate skirmishes
+#: has many goals, and an unbounded cache would hold a field for every one for
+#: as long as the occupancy version stood.
+MAX_FIELDS = 64
+
 
 def flow_field(grid: PathGrid, goal: tuple[int, int], *, flying: bool = False) -> list[int]:
     """Cost from every cell to ``goal``, by Dijkstra outward from the goal.
@@ -265,14 +307,18 @@ def flow_field(grid: PathGrid, goal: tuple[int, int], *, flying: bool = False) -
     Run from the goal outward, so the result is cost-to-goal for every cell
     rather than cost-from-one-start.
     """
+    goal = (goal[0] // GOAL_SNAP * GOAL_SNAP, goal[1] // GOAL_SNAP * GOAL_SNAP)
     key = (goal, flying, grid.version)
     cached = grid._fields.get(key)
     if cached is not None:
         return cached
+    if len(grid._fields) >= MAX_FIELDS:
+        grid._fields.clear()
 
     width, height = grid.arena.half_width, grid.arena.half_height
+    board = grid.combined(flying)
     field = [UNREACHABLE] * (width * height)
-    if grid.cost(*goal, flying=flying) == 0:
+    if board[goal[1] * width + goal[0]] == 0:
         grid._fields[key] = field
         return field
 
@@ -282,21 +328,22 @@ def flow_field(grid: PathGrid, goal: tuple[int, int], *, flying: bool = False) -
         spent, cx, cy = heappop(heap)
         if spent > field[cy * width + cx]:
             continue
+        row = cy * width
         for dx, dy in _NEIGHBOURS:
             nx, ny = cx + dx, cy + dy
             if not (0 <= nx < width and 0 <= ny < height):
                 continue
-            step = grid.cost(nx, ny, flying=flying)
+            index = ny * width + nx
+            step = board[index]
             if step == 0:
                 continue
             if dx and dy:
-                if grid.cost(cx + dx, cy, flying=flying) == 0:
-                    continue
-                if grid.cost(cx, cy + dy, flying=flying) == 0:
+                # A diagonal may not cut the corner between two impassable
+                # cells, or a unit slips through a gap the geometry lacks.
+                if board[row + cx + dx] == 0 or board[(cy + dy) * width + cx] == 0:
                     continue
                 step = step * _DIAGONAL_HALVES // 2
             candidate = spent + step
-            index = ny * width + nx
             if candidate < field[index]:
                 field[index] = candidate
                 heappush(heap, (candidate, nx, ny))
@@ -345,6 +392,7 @@ def field_path(
     rather than to a hung tick.
     """
     field = flow_field(grid, goal, flying=flying)
+    goal = (goal[0] // GOAL_SNAP * GOAL_SNAP, goal[1] // GOAL_SNAP * GOAL_SNAP)
     cell, path = start, [start]
     for _ in range(limit):
         step = next_cell(grid, field, cell)

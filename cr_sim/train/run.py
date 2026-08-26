@@ -19,6 +19,7 @@ import json
 import sys
 import time
 from dataclasses import asdict
+from typing import Any
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,7 @@ from ..api.encoding import NOOP_SLOT
 from ..api.env import CRSimEnv
 from ..api.reward import RewardWeights
 from .ppo import PPOConfig, train
+from .selfplay import FrozenOpponent, evaluation_probe
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BUILD = ROOT / "data_cache" / "csv_logic"
@@ -90,7 +92,18 @@ def build_parser() -> argparse.ArgumentParser:
              "'five-term' adds tower damage, elixir trade, counterpush and kites.",
     )
     parser.add_argument(
-        "--opponent", choices=("idle", "random"), default="random",
+        "--eval-every", type=int, default=10,
+        help="updates between honest evaluations against a random control. The "
+             "trainer's own return is measured while exploring and has run "
+             "eighteen points optimistic; this is the number to watch.",
+    )
+    parser.add_argument("--eval-episodes", type=int, default=40)
+    parser.add_argument(
+        "--refresh-every", type=int, default=20,
+        help="updates between refreshing the self-play opponent",
+    )
+    parser.add_argument(
+        "--opponent", choices=("idle", "random", "self"), default="self",
         help="'idle' never plays a card, which leaves the kite and trade terms with "
              "nothing to measure. 'random' spends its elixir on legal placements.",
     )
@@ -108,11 +121,11 @@ def main(argv: list[str] | None = None) -> int:
     levels = build_level_table(data)
     registry = build_card_registry(data)
 
-    def make_env(index: int) -> CRSimEnv:
-        # Each environment gets its own opponent stream, so eight parallel
-        # battles do not face the identical sequence of placements and report
-        # a smoother result than the policy has earned.
-        opponent = _random_opponent(args.seed * 1000 + index) if args.opponent == "random" else None
+    # Built after the first environment, because the network's shapes come
+    # from an observation and the opponents hold a copy of the network.
+    opponents: list = []
+
+    def _env(opponent=None) -> CRSimEnv:
         return CRSimEnv(
             data, levels, registry, DEFAULT_DECK, DEFAULT_DECK,
             ticks_per_second=args.tps,
@@ -122,6 +135,20 @@ def main(argv: list[str] | None = None) -> int:
             reward_weights=RewardWeights() if args.reward == "five-term" else None,
             opponent_policy=opponent,
         )
+
+    def make_env(index: int) -> CRSimEnv:
+        # Each environment gets its own opponent, so eight parallel battles do
+        # not face an identical sequence of placements and report a smoother
+        # result than the policy has earned.
+        if args.opponent == "random":
+            return _env(_random_opponent(args.seed * 1000 + index))
+        if args.opponent == "self":
+            # Filled in once the network exists; until then the environment
+            # faces an idle side, which only affects the first rollout.
+            holder: list = []
+            opponents.append(holder)
+            return _env(lambda obs, mask, h=holder: h[0](obs, mask) if h else (NOOP_SLOT, 0, 0))
+        return _env(None)
 
     config = PPOConfig(
         total_steps=args.steps,
@@ -141,6 +168,14 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.perf_counter()
     net_holder: dict[str, torch.nn.Module] = {}
+    probe_holder: dict[str, Any] = {}
+    best = {"lift": float("-inf")}
+
+    probe_env = _env(None)
+    probe_env.reset(seed=0)
+    config_nvec = (
+        int(probe_env.action_space.nvec[1]), int(probe_env.action_space.nvec[2])
+    )
 
     with metrics_path.open("w", encoding="utf-8") as stream:
         def record(stats: dict) -> None:
@@ -157,7 +192,25 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
             net = net_holder.get("net")
-            if net is not None and stats["updates"] % args.save_every == 0:
+            if net is None:
+                return
+            probe = probe_holder.get("probe")
+            if probe is not None and args.eval_every and stats["updates"] % args.eval_every == 0:
+                stats.update(probe(net))
+                print(
+                    f"          eval: return {stats['eval_return']:+.4f} vs control "
+                    f"{stats['control_return']:+.4f}  win {stats['eval_win']:.0%} vs "
+                    f"{stats['control_win']:.0%}  lift {stats['eval_lift_sd']:+.2f} sd",
+                    flush=True,
+                )
+                # Kept on measured improvement, not on a schedule. Saving every
+                # N updates leaves whatever the policy happened to be at the
+                # end rather than the best thing seen.
+                if stats["eval_lift_sd"] > best["lift"]:
+                    best["lift"] = stats["eval_lift_sd"]
+                    torch.save({"state_dict": net.state_dict(), "stats": stats},
+                               out / "best.pt")
+            if stats["updates"] % args.save_every == 0:
                 torch.save(
                     {"state_dict": net.state_dict(), "stats": stats},
                     out / "checkpoint.pt",
@@ -166,10 +219,26 @@ def main(argv: list[str] | None = None) -> int:
         # The network's shapes come from the first observation, so it does not
         # exist until the trainer has one. It hands it back here, which is what
         # lets this checkpoint mid-run instead of only at the end.
+        snapshots: list = []
+
+        def _on_net(built) -> None:
+            net_holder["net"] = built
+            if args.opponent == "self":
+                nvec = (5, config_nvec[0], config_nvec[1])
+                for holder in opponents:
+                    snapshot = FrozenOpponent(built, nvec, seed=args.seed)
+                    holder.append(snapshot)
+                    snapshots.append(snapshot)
+            probe_holder["probe"] = evaluation_probe(
+                lambda: _env(None), episodes=args.eval_episodes
+            )
+
         net = train(
             make_env, config,
             on_update=record,
-            on_net=lambda built: net_holder.__setitem__("net", built),
+            on_net=_on_net,
+            opponents=snapshots,
+            refresh_every=args.refresh_every,
         )
 
     torch.save({"state_dict": net.state_dict()}, out / "final.pt")

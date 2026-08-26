@@ -177,7 +177,18 @@ def test_an_unchanged_occupancy_does_not_invalidate(grid):
 
 
 def test_a_field_step_always_reduces_the_remaining_cost(grid):
+    """And the walk arrives.
+
+    At the field's *snapped* goal, not the exact one: goals are rounded to a
+    2x2 block so everything chasing roughly the same place shares one field,
+    which is what stopped a moving target rebuilding a Dijkstra every few
+    ticks. The route's final waypoint is replaced with the true goal, so the
+    rounding never reaches a unit's actual destination.
+    """
+    from cr_sim.engine.pathgrid import GOAL_SNAP
+
     goal = (7, 40)
+    snapped = (goal[0] // GOAL_SNAP * GOAL_SNAP, goal[1] // GOAL_SNAP * GOAL_SNAP)
     field = flow_field(grid, goal)
     cell = (7, 20)
     width = grid.arena.half_width
@@ -187,7 +198,7 @@ def test_a_field_step_always_reduces_the_remaining_cost(grid):
             break
         assert field[step[1] * width + step[0]] < field[cell[1] * width + cell[0]]
         cell = step
-    assert cell == goal, "the field did not lead to its goal"
+    assert cell == snapped, "the field did not lead to its goal"
 
 
 # ------------------------------------------------------------------ routes

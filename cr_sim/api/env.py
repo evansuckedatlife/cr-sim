@@ -357,11 +357,7 @@ class CRSimEnv(_EnvBase):
 
         _apply_action(self.battle, self.team, action, self._config)
 
-        opponent = self.team.opponent
-        opponent_obs = self._observe(opponent)
-        opponent_mask = legal_action_mask(self.battle, opponent, self.registry, self._config)
-        opponent_action = self.opponent_policy(opponent_obs, opponent_mask)
-        _apply_action(self.battle, opponent, opponent_action, self._config)
+        self._opponent_move()
 
         _advance(self.battle, self.frame_skip)
 
@@ -387,6 +383,30 @@ class CRSimEnv(_EnvBase):
             )
 
         return self._observe(self.team), reward, terminated, truncated, _info(self.battle)
+
+    def _opponent_move(self) -> None:
+        """Let the other side act, without asking it when there is no choice.
+
+        The same rule the agent gets, and for the same reason -- but it matters
+        more here. A neural opponent costs a full observation encode and a
+        forward pass every time it is consulted, and it was being consulted on
+        every one of the agent's forced decisions too, roughly nine times per
+        agent step. Since the opponent is broke on most of those ticks and its
+        only legal move is to pass, nearly all of that work produced the action
+        it would have taken anyway. Skipping it took self-play from 12 steps a
+        second to something worth running overnight.
+        """
+        opponent = self.team.opponent
+        mask = legal_action_mask(self.battle, opponent, self.registry, self._config)
+        legal = int(mask.sum())
+        if legal <= 0:
+            return
+        if legal == 1:
+            only = tuple(int(v) for v in np.argwhere(mask)[0])
+            _apply_action(self.battle, opponent, only, self._config)
+            return
+        action = self.opponent_policy(self._observe(opponent), mask)
+        _apply_action(self.battle, opponent, action, self._config)
 
     def _run_out_forced_decisions(self) -> float:
         """Advance past every state where there is nothing to decide.
@@ -418,12 +438,7 @@ class CRSimEnv(_EnvBase):
             only = tuple(int(v) for v in np.argwhere(mask)[0])
 
             _apply_action(self.battle, self.team, only, self._config)
-            opponent = self.team.opponent
-            opponent_mask = legal_action_mask(
-                self.battle, opponent, self.registry, self._config
-            )
-            opponent_action = self.opponent_policy(self._observe(opponent), opponent_mask)
-            _apply_action(self.battle, opponent, opponent_action, self._config)
+            self._opponent_move()
             _advance(self.battle, self.frame_skip)
 
             if self._reward is not None:

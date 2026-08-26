@@ -148,12 +148,19 @@ def train(
     device: str = "cpu",
     on_update: Callable[[dict], None] | None = None,
     on_net: Callable[[ActorCritic], None] | None = None,
+    opponents: "Sequence[Any] | None" = None,
+    refresh_every: int = 0,
 ) -> ActorCritic:
     """Run PPO and return the trained network.
 
     ``make_env`` takes an index so each environment can be seeded differently;
     identical seeds across the batch would collect the same battle several
     times over and report a misleadingly smooth return.
+
+    ``opponents`` are the frozen policy snapshots facing the learner, one per
+    environment. Refreshed every ``refresh_every`` updates so the thing being
+    beaten improves alongside the thing beating it; at zero they never change,
+    which makes the opponent a fixed sparring partner instead of self-play.
 
     ``on_net`` is handed the network as soon as it is built. Its shapes come
     from the first observation, so a caller that wants to checkpoint mid-run
@@ -244,6 +251,14 @@ def train(
 
         stats = _update(net, optimiser, rollout, config, device)
         update_index += 1
+
+        if opponents and refresh_every and update_index % refresh_every == 0:
+            # Every snapshot moves at once. Staggering them would have the
+            # learner facing several generations in one batch, and the
+            # advantage estimates would be averaging across opponents of
+            # different strength.
+            for opponent in opponents:
+                opponent.refresh(net)
 
         # How often the policy chose to spend nothing. Worth watching rather
         # than inferring from the return: "always pass" is the comfortable
