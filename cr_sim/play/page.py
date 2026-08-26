@@ -46,6 +46,8 @@ PAGE = r"""<!doctype html>
   }
   .card.sel { border-color: var(--gold); transform: translateY(-4px); }
   .card.poor { opacity: .45; cursor: not-allowed; }
+  .card.evo { border-color: var(--gold); box-shadow: 0 0 10px rgba(234,179,8,.45); }
+  .card .ev { font-size: 9px; color: var(--gold); letter-spacing: .08em; }
   .card img { width: 52px; height: 52px; object-fit: contain; display: block; margin: 0 auto; }
   .card .nm { font-size: 10px; color: var(--dim); white-space: nowrap;
               overflow: hidden; text-overflow: ellipsis; }
@@ -252,10 +254,14 @@ function renderHand() {
   (STATE ? STATE.you.hand : []).forEach((c) => {
     const d = document.createElement('div');
     d.className = 'card' + (selected === c.name ? ' sel' : '')
-                + (elixir < c.cost ? ' poor' : '');
+                + (elixir < c.cost ? ' poor' : '')
+                + (c.evo ? ' evo' : '');
     const img = SETUP.icons[c.name];
     d.innerHTML = (img ? `<img src="${img}" alt="">` : '<div style="height:52px"></div>')
-                + `<div class="nm">${c.name}</div><div class="co">${c.cost}</div>`;
+                + `<div class="nm">${c.name}</div>`
+                + `<div class="co">${c.cost}</div>`
+                + (c.evo ? '<div class="ev">EVO</div>'
+                         : c.hasEvo ? '<div class="ev" style="color:#8b949e">evo</div>' : '');
     d.onclick = () => { selected = (selected === c.name) ? null : c.name; renderHand(); };
     el.appendChild(d);
   });

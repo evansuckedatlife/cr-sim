@@ -22,7 +22,7 @@ because Evolutions are real cards and the hero forms share the same schema.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Iterator, Mapping
 
@@ -62,6 +62,14 @@ class Card:
     source_table: str
     is_evolution: bool = False
     is_hero_form: bool = False
+    #: The evolved form of this card, if it has one. Named on the base card as
+    #: ``EvolvedSpells``, which can be a list -- four cards carry more than one
+    #: and the first is taken.
+    evolution: str | None = None
+    #: Deck cycles between evolved plays, from the evolved card's
+    #: ``DarkElixirCost``. One means every second play is evolved, two every
+    #: third. Zero for a card with no evolution.
+    evolution_cycles: int = 0
     not_in_use: bool = False
     not_visible: bool = False
 
@@ -156,6 +164,22 @@ class CardRegistry:
         return tuple(c for c in self.standard() if c.kind is kind)
 
 
+def _first_evolution(value: Any) -> str | None:
+    """The evolved form named on a base card.
+
+    ``EvolvedSpells`` is a single name for most cards and a list for four of
+    them. Only the first is taken: a deck slot holds one evolution, and picking
+    among several is a deck-building choice this layer does not make.
+    """
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, (list, tuple)):
+        for entry in value:
+            if isinstance(entry, str) and entry:
+                return entry
+    return None
+
+
 def _int(value: Any, default: int = 0) -> int:
     return value if isinstance(value, int) else default
 
@@ -207,6 +231,7 @@ def build_card_registry(data: LogicData) -> CardRegistry:
                     source_table=table_name,
                     is_evolution=is_evo,
                     is_hero_form=is_hero,
+                    evolution=_first_evolution(row.get("EvolvedSpells")),
                     not_in_use=bool(row.get("NotInUse", False)),
                     not_visible=bool(row.get("NotVisible", False)),
                     summon_character=row.get("SummonCharacter"),
@@ -231,7 +256,27 @@ def build_card_registry(data: LogicData) -> CardRegistry:
     by_name: dict[str, Card] = {}
     for card in cards:
         by_name.setdefault(card.name, card)
-    return CardRegistry(cards=tuple(cards), by_name=by_name)
+
+    # A second pass, because the cycle count lives on the *evolved* card and a
+    # base card may be built before it. Resolved here rather than looked up at
+    # play time so nothing in the engine has to know the field name.
+    resolved: list[Card] = []
+    for card in cards:
+        cycles = 0
+        if card.evolution:
+            evolved = by_name.get(card.evolution)
+            raw_cycles = (evolved.raw or {}).get("DarkElixirCost") if evolved else None
+            cycles = raw_cycles if isinstance(raw_cycles, int) and raw_cycles > 0 else 0
+        # A named evolution with no cycle count is a hero form, not an
+        # evolution -- sixteen links in this build are those, and treating them
+        # as evolutions would give half the roster a second card it never had.
+        resolved.append(
+            replace(card, evolution_cycles=cycles, evolution=card.evolution if cycles else None)
+        )
+    by_name = {}
+    for card in resolved:
+        by_name.setdefault(card.name, card)
+    return CardRegistry(cards=tuple(resolved), by_name=by_name)
 
 
 def _character_exists(data: LogicData, name: str) -> bool:

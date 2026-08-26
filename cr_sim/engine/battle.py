@@ -105,6 +105,30 @@ class Player:
     crowns: int = 0
     #: Card names in draw order; the hand is the first four.
     cycle: list[str] = field(default_factory=list)
+    #: Plays of each evolution card since it last came out evolved. A slot
+    #: starts charged, which is how a match begins: the first play of an
+    #: evolution card is the evolved one.
+    evolution_charge: dict[str, int] = field(default_factory=dict)
+
+    def evolution_ready(self, card: "Card") -> bool:
+        """Whether this card's next play is its evolved form.
+
+        One cycle means every second play is evolved, two means every third.
+        Counted in plays of the card itself rather than in deck rotations,
+        which is the same thing: a card returns to hand once per rotation, so
+        one play is one cycle.
+        """
+        if not card.evolution or card.evolution_cycles <= 0:
+            return False
+        return self.evolution_charge.get(card.name, card.evolution_cycles) >= card.evolution_cycles
+
+    def spend_evolution(self, card: "Card") -> None:
+        self.evolution_charge[card.name] = 0
+
+    def cycle_evolution(self, card: "Card") -> None:
+        if card.evolution and card.evolution_cycles > 0:
+            charge = self.evolution_charge.get(card.name, card.evolution_cycles)
+            self.evolution_charge[card.name] = charge + 1
 
     @property
     def hand(self) -> tuple[str, ...]:
@@ -443,10 +467,25 @@ class Battle:
 
         player.elixir.spend(card.mana_cost)
         player.play(card_name)
-        if card.kind is CardKind.SPELL:
-            self._cast(team, card, x, y)
+
+        # An evolution slot deploys a different card entirely -- Evo Barbarians
+        # summons Barbarian_EV1, five of them instead of four -- while costing
+        # the same and occupying the same deck slot. Swapped here rather than
+        # in the deck so the cycle keeps running on the base card, which is
+        # what recharges the evolution.
+        played = card
+        if player.evolution_ready(card):
+            evolved = self.registry.get(card.evolution) if card.evolution else None
+            if evolved is not None:
+                played = evolved
+                player.spend_evolution(card)
         else:
-            self._deploy(team, card, x, y)
+            player.cycle_evolution(card)
+
+        if played.kind is CardKind.SPELL:
+            self._cast(team, played, x, y)
+        else:
+            self._deploy(team, played, x, y)
         return True
 
     def _deploy(self, team: Team, card: Card, x: int, y: int) -> None:

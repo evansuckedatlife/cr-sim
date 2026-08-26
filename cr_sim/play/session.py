@@ -268,8 +268,8 @@ class PlaySession:
             # `exact` is the display value; `units` is what a spend checks.
             "elixir": round(player.elixir.exact, 2),
             "crowns": player.crowns,
-            "hand": [self._card(name) for name in player.hand],
-            "next": self._card(player.next_card) if player.next_card else None,
+            "hand": [self._card(name, player) for name in player.hand],
+            "next": self._card(player.next_card, player) if player.next_card else None,
             "towers": [
                 {
                     "n": t.spec.name if t.spec else "Tower",
@@ -282,12 +282,19 @@ class PlaySession:
             ],
         }
 
-    def _card(self, name: str) -> dict[str, Any]:
+    def _card(self, name: str, player=None) -> dict[str, Any]:
         entry = self.registry.get(name)
         return {
             "name": name,
             "cost": entry.mana_cost if entry is not None else 0,
             "kind": entry.kind.value if entry is not None else "troop",
+            # Whether this play will be the evolved one. Shown because it
+            # changes what the card does and there is no other way to tell:
+            # the evolved unit reports the base unit's name.
+            "evo": bool(
+                entry is not None and player is not None and player.evolution_ready(entry)
+            ),
+            "hasEvo": bool(entry is not None and entry.evolution),
         }
 
     def _result(self) -> dict[str, Any] | None:
