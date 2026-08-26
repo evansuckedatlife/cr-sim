@@ -16,11 +16,11 @@ fall, and matches resolve on crowns, sudden death or a tiebreaker.
 | Milestone | State | What landed |
 |-----------|-------|-------------|
 | **M0 — data pipeline** | ✅ | APK decoder, csv_logic + TOML ingestion, `EXT` inheritance and merge operators, level scaling, 122-card registry, stat gate. Every playable card resolves. |
-| **M1 — deterministic core** | ✅ | Integer subtile geometry, PCG32 RNG, entities, elixir from the real timeline, arena from the shipped tilemap, bridge routing, 12-phase tick loop, state hashing. |
+| **M1 — deterministic core** | ✅ | Integer subtile geometry, PCG32 RNG, entities, elixir from the real timeline, arena from the shipped tilemap, bridge routing, an explicitly ordered tick loop (17 named phases), state hashing. |
 | **M2 — combat** | ✅ | Targeting (sight, filters, sticky targets), attack cycle (load/hit-speed, simultaneous resolution), damage, Crown Towers with their own scaling, King activation with its 3300ms delay, kamikaze units, swarm spread, and projectiles that actually fly. |
 | **M3 — collision & pathing** | 🟡 | Circle collision, mass-weighted pushback, immovable tanks, derived swarm packing, and a spatial index. Weighted-grid pathfinding (the `PATHFINDING_*` costs) is still waypoint-only. |
 | **M4 — match rules** | ✅ | Elixir, deck cycle, deploy legality, crowns, king-destruction, regulation end, overtime sudden death, and a percentage-based tiebreaker. |
-| **M5 — spells & buffs** | 🟡 | Spells cast and land, area effects tick, buffs slow/freeze/rage, damage-over-time, Arrows' waves. The ACTION-driven spells (Graveyard, Clone, Vines, Mirror) still do nothing. |
+| **M5 — spells & buffs** | ✅ | Spells cast where the enemy is, area effects tick, buffs slow/freeze/rage/stun, damage- and heal-over-time, Arrows' waves, Tornado's pull, invisibility, damage reduction, and the Log rolling down its lane. |
 | **M6 — the full roster** | ⬜ | Charge/dash, death spawns, spawners, shields, ramp damage — plus an **ACTION interpreter** |
 | **M7 — champions & evolutions** | ⬜ | Abilities, Evolutions, Mirror/Clone/Graveyard |
 | **M8 — ML interface** | ⬜ | Gymnasium env, observation/action encoding, self-play, multiprocess vec env |
@@ -32,21 +32,21 @@ These are things the engine does **not** do yet. None are bugs; all are
 scheduled, and each is listed because a simulator that hides its gaps is worse
 than one that names them.
 
-- **Five spells still do nothing**: Graveyard, Clone, Vines, Mirror, Merge
-  Maiden. Every one is defined in the ACTION graph rather than in stat fields,
-  so they need the interpreter that M6 brings.
-- **The Log does not roll.** Its damage lands where the throw lands rather than
-  sweeping down the lane, which understates it against a spread push.
+- **Five spells resolve to a summon but not to their real behaviour**:
+  Graveyard, Clone, Vines, Mirror, Merge Maiden. Each is defined in the ACTION
+  graph rather than in stat fields — Graveyard's skeletons should trickle out
+  across an area over time, not arrive at once — so they need the interpreter
+  that M6 brings.
 - **Pathfinding is waypoints, not a search.** Ground units route through the
   nearer bridge and otherwise steer straight. The `PATHFINDING_*` costs the
   game ships (`DEFAULT=8`, `ROAD=5`, `WATER=7`, `BLOCKED=50`, `BUILDING=50`)
   are not used, so units do not flow around a building the way they should.
-- **Shields, invisibility and damage reduction** are read from the data but not
-  applied.
+- **Two self-buff triggers are deferred to M6**, where they belong alongside
+  the charge mechanics they serve: `BuffAfterHits` (Prince's rage ladder,
+  Barbarian and Skeleton evolutions) and `ReflectedAttackBuff` (Electro Giant
+  zapping whoever hits it).
 - **Sparky's `LoadFirstHit` is not implemented.** One entity in the build sets
   it, and it is why a stun resets her charge.
-- **Area-effect objects are inert.** The `AEO` layer (Poison's cloud, Tornado's
-  pull, Graveyard's spawner) is loaded but nothing ticks it.
 - **Performance is the constraint on M8.** ~5.7× real-time at 60 TPS, ~12-15×
   at 20 TPS. Enough to verify against, not enough to train against on its own:
   that needs the 20 TPS mode, all 8 cores, and eventually the vectorized port.
@@ -73,8 +73,8 @@ punishes a clump when its intended target dies mid-flight.
 
 ### Open questions
 
-Tracked in `reference/anchors.json` and printed by `cr-sim validate`. Three have
-been closed with evidence; two remain:
+Tracked in `reference/anchors.json` and printed by `cr-sim validate`. Four have
+been closed with evidence; five remain:
 
 | id | status | why it matters |
 |---|---|---|
@@ -83,6 +83,10 @@ been closed with evidence; two remain:
 | `building-collision-shape` | open, **high** | Blocks M3. The King Tower's footprint is a 3×3 square but the only per-entity extent in the data is a scalar `CollisionRadius` |
 | `arrows-effective-damage` | ✅ resolved | Per wave. 3 waves x 122 = 366, which is exactly what clears Minions, Goblins and Princess |
 | `bridge-width` | open, low | This build says 2 tiles everywhere; public sources say 3 for some arenas |
+| `tornado-attract-unit` | ✅ resolved | `AttractPercentage` is a flat rate in tiles/minute, not a percentage of the pulled unit's speed — 360 drags a unit across the tornado's own radius in 917ms against its 1050ms life |
+| `sparky-load-first-hit` | open, low | Whether her charge survives a stun |
+| `lightning-bolt-count` | open, medium | The engine fires 4 bolts where the card documents 3 |
+| `heal-spirit-total` | open, low | The four-beat rhythm is confirmed; the scaled magnitude (400 at level 11) is not |
 
 ## What M0 established
 

@@ -193,7 +193,7 @@ def _aim(battle, team, card, lanes, rng):
 
 def cmd_battle(args) -> int:
     from .engine.battle import Battle, BattleConfig
-    from .engine.entity import Team
+    from .engine.entity import EntityKind, Team
     from .engine.fixed import SUBTILES_PER_TILE, to_tiles
     from .render.web import build_icon_map, render_ascii, render_replay
 
@@ -265,7 +265,14 @@ def cmd_battle(args) -> int:
     print("\ndeployments:")
     for line in played:
         print(f"  {line}")
-    alive = [e for e in battle.entities if not e.dead and int(e.kind) != 2]
+    # Towers are excluded because they are always there, and projectiles and
+    # area effects because they are not units -- a Poison cloud still drifting
+    # when the whistle goes was being counted and printed as an anonymous "?".
+    alive = [
+        e
+        for e in battle.entities
+        if not e.dead and e.kind in (EntityKind.TROOP, EntityKind.BUILDING)
+    ]
     print(f"\nafter {battle.tick} ticks ({battle.tick / args.tps:.1f}s): {len(alive)} unit(s) alive")
     for e in alive:
         print(
