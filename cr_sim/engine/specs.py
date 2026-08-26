@@ -75,9 +75,18 @@ class UnitSpec:
     # -- provenance, so a surprising number can be traced back
     source_ref: str
     level: int
+    #: The rarity this spec was scaled with. Carried on the spec rather than
+    #: looked up in a side table: anything derived from a unit later -- its
+    #: projectile above all -- has to scale on the *same* ladder, and a
+    #: lookup that can miss silently gives a Legendary's arrow 47% of its
+    #: damage and a Champion's 39%.
+    rarity: str = "Common"
 
     #: Consumed by its own attack (Ice Spirit, Wall Breakers, Balloon's bomb).
     kamikaze: bool = False
+    #: Name of the projectile this unit launches, if it is ranged. A unit
+    #: with one deals its damage on impact rather than on the swing.
+    projectile: str | None = None
 
     @property
     def is_melee(self) -> bool:
@@ -139,7 +148,15 @@ def build_unit_spec(
     if hitpoints <= 0:
         raise SpecError(f"{name!r} has no hitpoints; not a spawnable unit")
 
-    damage, _source = _resolve_damage(data, raw)
+    damage, source = _resolve_damage(data, raw)
+
+    # Damage sourced from a projectile is delivered by that projectile, which
+    # takes time to arrive. Melee damage lands on the swing.
+    projectile = None
+    if source in ("CustomFirstProjectile", "Projectile"):
+        projectile = raw.get(source)
+    elif source == "AttackSequenceList.Projectile":
+        projectile = None
 
     ref = str(raw.get("__ref__", name))
     if kind is None:
@@ -173,8 +190,10 @@ def build_unit_spec(
         retarget_each_tick=_bool(raw.get("RetargetEachTick")),
         crown_tower_damage_percent=_int(raw.get("CrownTowerDamagePercent")),
         kamikaze=_bool(raw.get("Kamikaze")),
+        projectile=projectile if isinstance(projectile, str) else None,
         source_ref=ref,
         level=level,
+        rarity=rarity,
     )
 
 
@@ -199,7 +218,8 @@ def build_tower_spec(
     hitpoints = _int(raw.get("Hitpoints"))
     if hitpoints <= 0:
         raise SpecError(f"{name!r} has no hitpoints; not a tower")
-    damage, _source = _resolve_damage(data, raw)
+    damage, source = _resolve_damage(data, raw)
+    projectile = raw.get(source) if source in ("CustomFirstProjectile", "Projectile") else None
 
     return UnitSpec(
         name=str(raw.get("Name", name)),
@@ -227,8 +247,10 @@ def build_tower_spec(
         target_only_buildings=False,
         retarget_each_tick=_bool(raw.get("RetargetEachTick")),
         crown_tower_damage_percent=_int(raw.get("CrownTowerDamagePercent")),
+        projectile=projectile if isinstance(projectile, str) else None,
         source_ref=str(raw.get("__ref__", name)),
         level=level,
+        rarity="Common",
     )
 
 

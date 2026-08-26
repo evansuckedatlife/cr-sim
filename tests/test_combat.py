@@ -466,6 +466,9 @@ def test_kamikaze_units_are_consumed_by_their_attack(world, name):
         if bomber.dead:
             break
     assert bomber.dead, "kamikaze unit survived its own attack"
+    # It dies on the swing, but its bomb is still in the air; let it land.
+    for _ in range(120):
+        battle.step()
     hits = [e for e in battle.damage_log if e.attacker_id == bomber.id]
     assert len(hits) == 1, f"landed {len(hits)} hits, expected exactly 1"
     assert victim.hitpoints < victim.max_hitpoints
@@ -509,4 +512,6 @@ def test_wall_breakers_detonate_on_a_tower(world):
         if breaker.dead:
             break
     assert breaker.dead
+    for _ in range(120):  # the bomb is still travelling
+        battle.step()
     assert tower.hitpoints < before, "did not damage the tower it blew up on"

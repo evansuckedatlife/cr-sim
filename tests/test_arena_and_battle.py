@@ -381,35 +381,6 @@ def test_lifetime_does_not_run_during_deployment(data, levels, registry):
     assert cannon.lifetime_left == full
 
 
-# ----------------------------------------------------------- scaling guard
-
-
-def test_movement_does_not_scale_quadratically(data, levels, registry):
-    """Arrived units must park, not re-plan every tick.
-
-    Re-planning meant scanning every entity for a target on every tick for
-    every idle unit, which turned a busy board into an O(n^2) stall. Guard it
-    by timing a crowded board against a sparse one.
-    """
-    import time
-
-    def run(units: int) -> float:
-        battle = make_battle(data, levels, registry, first_card="Skeletons")
-        battle.players[Team.BLUE].elixir.add(10)
-        for i in range(units):
-            battle.players[Team.BLUE].cycle = ["Skeletons"] + [
-                c for c in DECK if c != "Skeletons"
-            ]
-            battle.players[Team.BLUE].elixir.add(10)
-            battle.play_card(Team.BLUE, "Skeletons", tiles(3.5 + (i % 3)), tiles(12))
-        for _ in range(400):  # long enough for everything to arrive and park
-            battle.step()
-        start = time.perf_counter()
-        for _ in range(200):
-            battle.step()
-        return time.perf_counter() - start
-
-    sparse = run(2)
-    crowded = run(20)
-    # 10x the units must not cost anywhere near 100x the time.
-    assert crowded < sparse * 25 + 0.5, f"sparse={sparse:.4f}s crowded={crowded:.4f}s"
+# Scaling is guarded in tests/test_collision.py by counting broad-phase pair
+# checks, which is deterministic. The wall-clock version that used to live here
+# passed alone and failed under load -- a flaky test is worse than no test.

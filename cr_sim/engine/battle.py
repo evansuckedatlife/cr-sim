@@ -31,7 +31,7 @@ from .arena import Arena, load_arena
 from .constants import TickClock
 from .elixir import BattleTimeline, ElixirBar, build_timeline
 from .entity import Entity, EntityKind, EntityState, Team, reset_entity_ids
-from .fixed import milli_tiles, pack_offsets, ring_offsets
+from .fixed import distance, milli_tiles, pack_offsets, ring_offsets
 from .combat import (
     AttackState,
     DamageEvent,
@@ -41,6 +41,7 @@ from .combat import (
     apply_hit,
 )
 from .pathing import Route, crosses_river, route_to, step_towards
+from .projectiles import Projectile, ProjectileSpec, build_projectile_spec
 from .targeting import acquire_target, in_attack_range, should_keep_target
 from .movement import resolve_collisions
 from .rng import Rng
@@ -161,6 +162,8 @@ class Battle:
         "_max_sight",
         "_by_id_map",
         "graveyard",
+        "_projectile_specs",
+        "_pre_tick_crowns",
     )
 
     def __init__(
@@ -205,6 +208,7 @@ class Battle:
         #: Dead entities, kept out of the live list so phases stop paying
         #: for them. A three-minute match kills hundreds.
         self.graveyard: list[Entity] = []
+        self._projectile_specs: dict[str, ProjectileSpec | None] = {}
         _globals = self.data.globals_map()
         # Grace band that stops a unit flickering between two equidistant enemies.
         _ext = _globals.get('LOGIC_RANGE_EXTENSION_TO_KEEP_TARGET', 0)
@@ -217,6 +221,12 @@ class Battle:
         self.tick = 0
         self.finished = False
         self.result: BattleResult | None = None
+        #: Both sides' crown counts as of the start of the tick currently being
+        #: processed. Sudden death needs to know whether *this* tick is the one
+        #: that scored, and comparing against a snapshot taken before the
+        #: tick's combat runs is the only way to tell that apart from a crown
+        #: that was already on the board.
+        self._pre_tick_crowns: tuple[int, int] = (0, 0)
 
         self.players = {
             Team.BLUE: self._make_player(Team.BLUE, self.config.blue_deck),
@@ -248,6 +258,7 @@ class Battle:
         ladder, and the King and Princess towers scale at different rates.
         """
         scales = build_tower_scales(self.data.globals_map())
+
         for placement in self.arena.towers:
             try:
                 spec = build_tower_spec(
@@ -390,6 +401,13 @@ class Battle:
         # Rebuilt before any phase reads it, so every phase in a tick sees one
         # consistent snapshot of where things are.
         self._index.rebuild(self.entities)
+        # Taken before combat runs, so check_victory can tell "a tower died
+        # this tick" apart from "a tower is already dead" -- the distinction
+        # sudden death is built on.
+        self._pre_tick_crowns = (
+            self.players[Team.BLUE].crowns,
+            self.players[Team.RED].crowns,
+        )
         for phase in self._phase_fns:
             phase()
         self.tick += 1
@@ -430,7 +448,8 @@ class Battle:
                         e.hitpoints,
                         e.max_hitpoints,
                         1 if e.is_deploying else 0,
-                        getattr(e.spec, "name", "?"),
+                        getattr(e.spec, "name", None)
+                        or getattr(getattr(e, "pspec", None), "name", "?"),
                         # Real collision radius, so the viewer can draw each
                         # unit at its true footprint instead of a token dot.
                         e.collision_radius,
@@ -450,6 +469,17 @@ class Battle:
         if self.result is None:
             self.result = self._decide("time")
         return self.result
+
+    @property
+    def in_overtime(self) -> bool:
+        """Whether the match has crossed the regulation/overtime boundary.
+
+        A separate read of :meth:`BattleTimeline.is_overtime` rather than a
+        flag set once, so it always reflects ``self.tick`` even if a caller
+        pokes the clock directly (as the M4 tests do, to reach overtime
+        without simulating three minutes of ticks).
+        """
+        return self.timeline.is_overtime(self.tick)
 
     def hash(self) -> int:
         return state_hash(
@@ -566,7 +596,8 @@ class Battle:
         # would land the killing blow and its victim, already at zero, would be
         # skipped before swinging back. Mirrors must trade evenly.
         for hit in pending:
-            event = apply_hit(hit, self.tick)
+            launched = self._launch(hit)
+            event = None if launched else apply_hit(hit, self.tick)
             if event is not None:
                 self.damage_log.append(event)
             if hit.spec.kamikaze:
@@ -575,7 +606,7 @@ class Battle:
                 # this they keep swinging forever, which turns a one-shot
                 # utility card into a permanent damage dealer.
                 hit.attacker.kill()
-            if hit.spec.area_damage_radius > 0:
+            if not launched and hit.spec.area_damage_radius > 0:
                 self.damage_log.extend(
                     apply_area_damage(
                         hit.spec,
@@ -593,8 +624,101 @@ class Battle:
                     )
                 )
 
+    def _projectile_spec(self, name: str, rarity: str, level: int) -> ProjectileSpec | None:
+        key = f"{name}@{rarity}@{level}"
+        if key not in self._projectile_specs:
+            self._projectile_specs[key] = build_projectile_spec(
+                self.data, name, self.levels.get(rarity), level=level, clock=self.clock
+            )
+        return self._projectile_specs[key]
+
+    def _launch(self, hit) -> bool:
+        """Turn a decided hit into a shot in flight. False means melee.
+
+        A ranged attacker does not deal damage when it swings -- it commits a
+        projectile, and the damage arrives when that projectile does. In the
+        gap the target can move, die, or be replaced by something else, which
+        is the whole reason dodging exists.
+        """
+        spec = hit.spec
+        if not spec.projectile:
+            return False
+        # The projectile must scale on the same ladder as the unit that fired it.
+        pspec = self._projectile_spec(spec.projectile, spec.rarity, spec.level)
+        if pspec is None or pspec.speed_per_tick <= 0:
+            return False  # a zero-speed projectile is an instant hit
+
+        shot = Projectile(
+            pspec=pspec,
+            team=hit.attacker.team,
+            x=hit.attacker.x,
+            y=hit.attacker.y,
+            target=hit.target,
+            owner_id=hit.attacker.id,
+            spawn_tick=self.tick,
+        )
+        self.entities.append(shot)
+        self._by_id_map[shot.id] = shot
+        return True
+
     def _phase_advance_projectiles(self) -> None:
-        """M2: fly projectiles and resolve impacts."""
+        """Advance every shot, and resolve the ones that land this tick.
+
+        Impacts are collected and applied together for the same reason attacks
+        are: two shots arriving on the same tick must both count, regardless of
+        which happens to sit earlier in the entity list.
+        """
+        arrivals: list[Projectile] = []
+        for entity in self.entities:
+            if entity.kind is not EntityKind.PROJECTILE or entity.dead:
+                continue
+            if entity.advance(self._entity(entity.target_id)):
+                arrivals.append(entity)
+
+        for shot in arrivals:
+            self._impact(shot)
+            shot.kill()
+
+    def _impact(self, shot: Projectile) -> None:
+        """Deliver a projectile's payload where it landed."""
+        pspec = shot.pspec
+        attacker = self._entity(shot.owner_id)
+        if pspec.is_splash:
+            # Splash cares about where the shot *landed*, not who it was aimed
+            # at -- which is why a Bomber punishes a clump even if its intended
+            # target dies mid-flight.
+            for victim in list(self._index.near(shot.x, shot.y, pspec.radius)):
+                if victim.dead or victim.team is shot.team:
+                    continue
+                if victim.kind is EntityKind.PROJECTILE or not victim.is_targetable:
+                    continue
+                if victim.flying and not pspec.aoe_to_air:
+                    continue
+                if not victim.flying and not pspec.aoe_to_ground:
+                    continue
+                if distance(shot.x, shot.y, victim.x, victim.y) > pspec.radius + victim.collision_radius:
+                    continue
+                self._deal(pspec, attacker, victim)
+            return
+
+        target = self._entity(shot.target_id)
+        if target is None or target.dead or target.team is shot.team:
+            return  # the shot arrived at a corpse; it is simply spent
+        self._deal(pspec, attacker, target)
+
+    def _deal(self, pspec: ProjectileSpec, attacker: Entity | None, victim: Entity) -> None:
+        amount = pspec.damage_to(victim.kind is EntityKind.TOWER)
+        dealt = victim.apply_damage(amount)
+        if dealt:
+            self.damage_log.append(
+                DamageEvent(
+                    tick=self.tick,
+                    attacker_id=attacker.id if attacker is not None else 0,
+                    target_id=victim.id,
+                    amount=dealt,
+                    lethal=victim.hitpoints <= 0,
+                )
+            )
 
     def _phase_tick_area_effects(self) -> None:
         """M5: area-effect damage ticks and buff application."""
@@ -747,6 +871,16 @@ class Battle:
         return self._king_active[tower.team]
 
     def _phase_check_victory(self) -> None:
+        """Everything that can end a match, checked in the order the rules rank.
+
+        Three crowns and a destroyed King are instant wins in any period --
+        regulation, sudden death or the last tick of overtime -- so they are
+        checked first and unconditionally, exactly as before M4. Only once
+        neither has fired does the period matter: sudden death turns *any*
+        tower kill into an instant win once overtime has started, regulation
+        ending level sends the match into overtime rather than ending it, and
+        overtime running out with nothing decided falls to the tiebreaker.
+        """
         for team in (Team.BLUE, Team.RED):
             if self.players[team].crowns >= 3:
                 self.result = self._decide("three crowns")
@@ -755,6 +889,36 @@ class Battle:
             king = self._king(team)
             if king is not None and king.dead:
                 self.result = self._decide("king tower destroyed")
+                self.finished = True
+                return
+
+        if self.timeline.is_overtime(self.tick):
+            blue_before, red_before = self._pre_tick_crowns
+            blue_scored = self.players[Team.BLUE].crowns > blue_before
+            red_scored = self.players[Team.RED].crowns > red_before
+            if blue_scored != red_scored:
+                # Exactly one side landed a tower this tick -- sudden death:
+                # the very first tower destroyed in overtime wins outright,
+                # Princess Tower or King alike (a King death was already
+                # caught above, with its own reason).
+                self.result = self._decide("sudden death")
+                self.finished = True
+                return
+            if self.tick == self.timeline.total_ticks - 1:
+                # Overtime's last tick resolved with nobody having scored --
+                # crowns are guaranteed level here, since any period that put
+                # them ahead would have ended the match already.
+                self.result = self._decide_tiebreaker()
+                self.finished = True
+                return
+        elif self.tick == self.timeline.regulation_ticks - 1:
+            # The last tick of regulation. Level, the match plays on into
+            # overtime -- nothing to do here but let the clock cross the
+            # boundary. Ahead, it ends right now.
+            blue = self.players[Team.BLUE].crowns
+            red = self.players[Team.RED].crowns
+            if blue != red:
+                self.result = self._decide("regulation")
                 self.finished = True
                 return
 
@@ -825,6 +989,56 @@ class Battle:
             winner = None
         return BattleResult(
             winner=winner, blue_crowns=blue, red_crowns=red, ticks=self.tick, reason=reason
+        )
+
+    def _worst_princess(self, team: Team) -> tuple[int, int]:
+        """``team``'s most-damaged Princess Tower, as ``(hitpoints, max_hitpoints)``.
+
+        A destroyed tower is a perfectly valid answer here -- zero hitpoints
+        is the lowest percentage there is, so a Princess Tower already lost
+        earlier in the match (the two sides can each be down one and still be
+        level on crowns) outranks any tower still standing. The King never
+        enters into this: the tiebreaker is expressly about Princess Towers.
+        """
+        worst_hp, worst_max = 0, 1
+        seen = False
+        for tower in self._towers[team]:
+            if "King" in getattr(tower.spec, "name", ""):
+                continue
+            if not seen or tower.hitpoints * worst_max < worst_hp * tower.max_hitpoints:
+                worst_hp, worst_max = tower.hitpoints, tower.max_hitpoints
+                seen = True
+        return worst_hp, worst_max
+
+    def _decide_tiebreaker(self) -> BattleResult:
+        """Resolve a match that finishes overtime still level on crowns.
+
+        Sudden death gives an instant winner to whichever side lands the
+        first tower kill; if overtime runs out without one, the match falls
+        back to comparing each side's worst (most-damaged) Princess Tower as
+        a *fraction of its own maximum* -- the side that damaged the
+        opponent's tower more, in percentage terms, wins. Percentage rather
+        than raw hitpoints, because otherwise a tower with a bigger health
+        pool would look "less damaged" than an equally-battered smaller one.
+        The comparison is done by cross-multiplying two fractions rather than
+        dividing, so it stays exact in integer arithmetic.
+        """
+        blue_hp, blue_max = self._worst_princess(Team.BLUE)
+        red_hp, red_max = self._worst_princess(Team.RED)
+        # blue_hp/blue_max vs red_hp/red_max, without ever dividing.
+        blue_share = blue_hp * red_max
+        red_share = red_hp * blue_max
+        if blue_share == red_share:
+            # Both sides took exactly the same proportional damage. Not a
+            # tie broken either way -- a genuine draw.
+            return self._decide("draw")
+        winner = Team.BLUE if blue_share > red_share else Team.RED
+        return BattleResult(
+            winner=winner,
+            blue_crowns=self.players[Team.BLUE].crowns,
+            red_crowns=self.players[Team.RED].crowns,
+            ticks=self.tick,
+            reason="tiebreaker",
         )
 
     # ------------------------------------------------------------------ views

@@ -109,12 +109,14 @@ _PAGE = """<!doctype html>
     <p><button id="play">play</button>
        <button id="slow">0.5x</button>
        <button id="fast">4x</button>
-       <button id="hb">hitboxes</button></p>
+       <button id="hb">hitboxes</button>
+       <button id="pj">projectiles</button></p>
     <div class="legend">
       <b>blue</b> defends the top, <b>red</b> the bottom.<br>
       troops are circles and enlarged for legibility (thin ring = real hitbox);<br>
       buildings are squares drawn at their true footprint.<br>
       dashed ring = still deploying; dimmed card = unaffordable.<br>
+      small glowing dot with a fading trail = projectile (no hitbox or health bar; "projectiles" toggles).<br>
       {meta}
     </div>
   </div>
@@ -129,6 +131,7 @@ const ICON_SRC = {icons};
 const COSTS = {costs};
 const ART_SCALE = {art_scale};
 let SHOW_HITBOX = true;
+let SHOW_PROJECTILES = true;
 const ICONS = {{}};
 const HW = ARENA.half_width, HH = ARENA.half_height;
 const c = document.getElementById('c'), g = c.getContext('2d');
@@ -162,13 +165,51 @@ function shape(cx, cy, r, square) {{
   }}
 }}
 
+// Projectiles have no size or health worth drawing -- kind 3 in the entity
+// tuple always has collision_radius 0 and hp === max_hp === 1. They get a
+// small glowing dot instead of the troop/building treatment, plus a short
+// fading trail back to last frame's position so fast bolts still read as
+// moving rather than teleporting between frames.
+function projectile(cx, cy, team, prev) {{
+  const light = team === 0 ? '#bfe3ff' : '#ffd6da';
+  const glow = team === 0 ? '#4c8dff' : '#ff5c6c';
+  if (prev) {{
+    g.save();
+    g.globalAlpha = 0.35;
+    g.strokeStyle = glow;
+    g.lineWidth = 2;
+    g.lineCap = 'round';
+    g.beginPath(); g.moveTo(prev[0], prev[1]); g.lineTo(cx, cy); g.stroke();
+    g.restore();
+  }}
+  g.save();
+  g.shadowColor = glow; g.shadowBlur = 6;
+  g.fillStyle = light;
+  g.beginPath(); g.arc(cx, cy, Math.max(2.5, SCALE * 0.16), 0, 7); g.fill();
+  g.restore();
+}}
+
 function draw(i) {{
   const f = FRAMES[i]; if (!f) return;
   g.clearRect(0, 0, c.width, c.height);
   terrain();
+  // Delta positions for projectile trails, keyed by entity id and read
+  // straight from the previous frame -- nothing accumulates across draw()
+  // calls, so scrubbing back and forth stays correct.
+  const prevFrame = FRAMES[i - 1];
+  const prevProj = {{}};
+  if (prevFrame) {{
+    for (const pe of prevFrame.e) {{
+      if (pe[2] === 3) prevProj[pe[0]] = [px(pe[3]), px(pe[4])];
+    }}
+  }}
   for (const e of f.e) {{
     const [id, team, kind, x, y, hp, mhp, deploying, name, cr] = e;
     const cx = px(x), cy = px(y);
+    if (kind === 3) {{
+      if (SHOW_PROJECTILES) projectile(cx, cy, team, prevProj[id]);
+      continue;
+    }}
     const tower = kind === 2;
     // Two radii. The hitbox is the unit's true CollisionRadius; the art is
     // drawn larger so the card is actually recognisable at this zoom. The
@@ -274,6 +315,7 @@ function loop(ts) {{
 slider.oninput = () => draw(+slider.value);
 $('play').onclick = e => {{ playing = !playing; e.target.textContent = playing ? 'pause' : 'play'; }};
 $('hb').onclick = () => {{ SHOW_HITBOX = !SHOW_HITBOX; draw(+slider.value); }};
+$('pj').onclick = () => {{ SHOW_PROJECTILES = !SHOW_PROJECTILES; draw(+slider.value); }};
 $('slow').onclick = () => speed = 0.5;
 $('fast').onclick = () => speed = 4;
 let pending = 0;

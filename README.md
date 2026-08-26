@@ -10,16 +10,16 @@ Full plan: `../.claude/plans/i-want-to-build-purrfect-kernighan.md`.
 
 ## Status
 
-**178 tests.** Battles run end to end: units deploy, route, fight, die, towers
-fall and matches resolve on crowns.
+**220 tests.** Battles run end to end: units deploy, route, fight, die, towers
+fall, and matches resolve on crowns, sudden death or a tiebreaker.
 
 | Milestone | State | What landed |
 |-----------|-------|-------------|
 | **M0 — data pipeline** | ✅ | APK decoder, csv_logic + TOML ingestion, `EXT` inheritance and merge operators, level scaling, 122-card registry, stat gate. Every playable card resolves. |
 | **M1 — deterministic core** | ✅ | Integer subtile geometry, PCG32 RNG, entities, elixir from the real timeline, arena from the shipped tilemap, bridge routing, 12-phase tick loop, state hashing. |
-| **M2 — combat** | 🟡 | Targeting (sight, filters, sticky targets), attack cycle (load/hit-speed, simultaneous resolution), damage, Crown Towers with their own scaling, King activation, kamikaze units, swarm spread. **Projectiles resolve instantly — see below.** |
-| **M3 — collision & pathing** | ⬜ next | Circle collision, mass-weighted pushback, weighted-grid pathfinding, **and the spatial index the engine now needs for speed** |
-| **M4 — match rules** | 🟡 | Elixir, deck cycle, deploy legality, crowns and king-destruction all work. Overtime and the tiebreaker do not. |
+| **M2 — combat** | ✅ | Targeting (sight, filters, sticky targets), attack cycle (load/hit-speed, simultaneous resolution), damage, Crown Towers with their own scaling, King activation with its 3300ms delay, kamikaze units, swarm spread, and projectiles that actually fly. |
+| **M3 — collision & pathing** | 🟡 | Circle collision, mass-weighted pushback, immovable tanks, derived swarm packing, and a spatial index. Weighted-grid pathfinding (the `PATHFINDING_*` costs) is still waypoint-only. |
+| **M4 — match rules** | ✅ | Elixir, deck cycle, deploy legality, crowns, king-destruction, regulation end, overtime sudden death, and a percentage-based tiebreaker. |
 | **M5 — spells & buffs** | ⬜ | Area effects, damage-over-time, freeze/rage/slow, projectile waves |
 | **M6 — the full roster** | ⬜ | Charge/dash, death spawns, spawners, shields, ramp damage — plus an **ACTION interpreter** |
 | **M7 — champions & evolutions** | ⬜ | Abilities, Evolutions, Mirror/Clone/Graveyard |
@@ -32,21 +32,38 @@ These are things the engine does **not** do yet. None are bugs; all are
 scheduled, and each is listed because a simulator that hides its gaps is worse
 than one that names them.
 
-- **Projectiles are instant.** A hit lands the moment it is decided. That is
-  correct for melee and near enough for fast towers, but wrong for anything
-  slow: a Mortar shell should take ~2.3 seconds to land and a Rocket should be
-  dodgeable. The flight-time formula is known and verified
-  (`distance × 60 / Speed`, cross-checked against Mortar at 2300ms and Xbow at
-  431ms) — it just is not wired in.
-- **No collision.** Units pass through each other and stack. Nothing pushes,
-  nothing blocks, and a Skeleton Army occupies the same space as one Skeleton.
-- **No spells.** They cost elixir and do nothing. Ice Spirit dies on impact but
-  does not freeze.
-- **Overtime and tiebreakers.** A drawn match ends drawn.
-- **Performance regressed.** A full 5-minute match takes ~23s at 60 TPS,
-  because targeting scans every entity for every unit each tick. Fine for
-  verification, nowhere near enough for training. M3 fixes it with a spatial
-  index.
+- **No spells.** They cost elixir and do nothing. Ice Spirit dies on impact and
+  its bomb lands, but it does not freeze. This is the largest remaining gap.
+- **Pathfinding is waypoints, not a search.** Ground units route through the
+  nearer bridge and otherwise steer straight. The `PATHFINDING_*` costs the
+  game ships (`DEFAULT=8`, `ROAD=5`, `WATER=7`, `BLOCKED=50`, `BUILDING=50`)
+  are not used, so units do not flow around a building the way they should.
+- **No buffs.** Rage, freeze, slow, stun, shields beyond the flat hitpoint pool.
+- **Area-effect objects are inert.** The `AEO` layer (Poison's cloud, Tornado's
+  pull, Graveyard's spawner) is loaded but nothing ticks it.
+- **Performance is the constraint on M8.** ~5.7× real-time at 60 TPS, ~12-15×
+  at 20 TPS. Enough to verify against, not enough to train against on its own:
+  that needs the 20 TPS mode, all 8 cores, and eventually the vectorized port.
+
+### Projectiles fly
+
+Ranged attacks no longer resolve on the swing. A unit commits a projectile and
+the damage arrives when the projectile does, which restores a whole layer of
+the game — dodging, over-committing, and shots landing where a push *was*.
+
+`Speed` is tiles per minute, the same unit as a character's. Three flight times
+that are recognisable in play corroborate the reading:
+
+| projectile | Speed | over its range | flight |
+|---|---|---|---|
+| Mortar shell | 300 | 11.5 tiles | 2300ms — a slow visible lob |
+| X-Bow bolt | 1600 | 11.5 tiles | 417ms — near-continuous fire |
+| King Tower | 1000 | 7.0 tiles | 417ms — a quick flat shot |
+
+Homing shots re-aim from where they currently are; non-homing ones commit to
+the point they were fired at, which is what makes a Mortar a prediction rather
+than a guarantee. Splash resolves where the shot *landed*, so a Bomber still
+punishes a clump when its intended target dies mid-flight.
 
 ### Open questions
 
@@ -218,7 +235,7 @@ python -m cr_sim.cli card Knight         # full resolved stats for one card
 python -m cr_sim.cli validate            # the stat gate + open questions
 python -m cr_sim.cli arena --map         # terrain, towers, deploy zones
 python -m cr_sim.cli battle --html r.html   # run a match, write a replay
-python -m pytest                         # 178 tests
+python -m pytest                         # 220 tests
 ```
 
 `freeze` re-cuts the regression baseline (`reference/card_stats.json`). Note the

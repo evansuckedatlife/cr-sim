@@ -66,6 +66,8 @@ def can_target(spec: UnitSpec, attacker: Entity, target: Entity) -> bool:
     """
     if target.dead or target.team is attacker.team:
         return False
+    if target.kind is EntityKind.PROJECTILE:
+        return False  # shots in flight are not things you can shoot at
     if not target.is_targetable:  # still deploying
         return False
     if target.flying:

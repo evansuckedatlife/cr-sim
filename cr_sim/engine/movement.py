@@ -149,6 +149,8 @@ def resolve_collisions(
             # single most expensive thing in the tick.
             if a.dead or b.dead:
                 continue
+            if a.kind is EntityKind.PROJECTILE or b.kind is EntityKind.PROJECTILE:
+                continue  # shots pass over everything
             if a.flying != b.flying:
                 # Air and ground occupy different layers and never collide.
                 continue
