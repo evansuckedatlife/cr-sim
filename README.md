@@ -21,9 +21,9 @@ fall, and matches resolve on crowns, sudden death or a tiebreaker.
 | **M3 — collision & pathing** | 🟡 | Circle collision, mass-weighted pushback, immovable tanks, derived swarm packing, and a spatial index. Weighted-grid pathfinding (the `PATHFINDING_*` costs) is still waypoint-only. |
 | **M4 — match rules** | ✅ | Elixir, deck cycle, deploy legality, crowns, king-destruction, regulation end, overtime sudden death, and a percentage-based tiebreaker. |
 | **M5 — spells & buffs** | ✅ | Spells cast where the enemy is, area effects tick, buffs slow/freeze/rage/stun, damage- and heal-over-time, Arrows' waves, Tornado's pull, invisibility, damage reduction, and the Log rolling down its lane. |
-| **M6 — the full roster** | ⬜ | Charge/dash, death spawns, spawners, shields, ramp damage — plus an **ACTION interpreter** |
+| **M6 — the full roster** | 🟡 | Death spawns and death blasts, bombs as fused entities, spawners, charge, the Inferno ramp, earned and reflected buffs, and an **ACTION interpreter** covering every node type the 122 playable cards reach bar ten one-off classes. |
 | **M7 — champions & evolutions** | ⬜ | Abilities, Evolutions, Mirror/Clone/Graveyard |
-| **M8 — ML interface** | ⬜ | Gymnasium env, observation/action encoding, self-play, multiprocess vec env |
+| **M8 — ML interface** | 🟡 | Gymnasium-style env, spatial+vector observation, masked 720-action space, self-play, multiprocess vec env, and a PPO trainer. Not yet trained to anything. |
 | **M9 — vectorized port** | ⬜ | Optional; scalar core as the correctness oracle |
 
 ### Known gaps, stated plainly
@@ -37,6 +37,10 @@ than one that names them.
   graph rather than in stat fields — Graveyard's skeletons should trickle out
   across an area over time, not arrive at once — so they need the interpreter
   that M6 brings.
+- **Ten one-off action classes are unimplemented**, each one card's special
+  (`ActionClone`, `ActionMegaKnightUppercut`, `ActionSoulDrain` and friends).
+  They are counted in `ActionInterpreter.unsupported` and pinned by a test that
+  walks the whole playable pool, so the list can only shrink.
 - **Pathfinding is waypoints, not a search.** Ground units route through the
   nearer bridge and otherwise steer straight. The `PATHFINDING_*` costs the
   game ships (`DEFAULT=8`, `ROAD=5`, `WATER=7`, `BLOCKED=50`, `BUILDING=50`)
@@ -47,9 +51,11 @@ than one that names them.
   zapping whoever hits it).
 - **Sparky's `LoadFirstHit` is not implemented.** One entity in the build sets
   it, and it is why a stun resets her charge.
-- **Performance is the constraint on M8.** ~5.7× real-time at 60 TPS, ~12-15×
-  at 20 TPS. Enough to verify against, not enough to train against on its own:
-  that needs the 20 TPS mode, all 8 cores, and eventually the vectorized port.
+- **Performance is no longer the constraint on M8.** ~103× real-time at 60 TPS
+  and ~302× at 20, single-core, measured on a full three-minute match with
+  deployments. It was 5.3× until `Arena.river_rows` stopped rescanning the
+  tilemap on every call from the movement hot loop. Training throughput is now
+  bounded by the network, not the simulator.
 
 ### Projectiles fly
 
