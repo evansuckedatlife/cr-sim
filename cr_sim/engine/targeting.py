@@ -76,7 +76,7 @@ def can_target(spec: UnitSpec, attacker: Entity, target: Entity) -> bool:
         # Leaving them targetable let a Knight kill a Poison cloud, which has
         # one hitpoint, and cut the spell short.
         return False
-    if not target.is_targetable:  # still deploying
+    if not target.is_acquirable:  # still deploying, or invisible
         return False
     if target.flying:
         if not spec.attacks_air:
@@ -141,7 +141,7 @@ def should_keep_target(
     meaningfully further away before letting go, not merely a subtile further
     than someone else.
     """
-    if target is None or target.dead or not target.is_targetable:
+    if target is None or target.dead or not target.is_acquirable:
         return False
     if spec.retarget_each_tick:
         return False

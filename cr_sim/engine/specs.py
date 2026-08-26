@@ -88,6 +88,17 @@ class UnitSpec:
     #: with one deals its damage on impact rather than on the swing.
     projectile: str | None = None
 
+    #: A buff the unit puts on *itself* once it has gone this long without
+    #: attacking, and loses the moment it swings again. Royal Ghost's
+    #: invisibility, the Knight evolution's fortify, Suspicious Bush.
+    buff_when_not_attacking: str | None = None
+    buff_when_not_attacking_ticks: int = 0
+    #: A buff this unit's hits inflict on whatever it hits. Electro Wizard's
+    #: ZapFreeze is the important one: a stun on every hit, which is what lets
+    #: him reset an Inferno Tower's ramp.
+    buff_on_damage: str | None = None
+    buff_on_damage_ticks: int = 0
+
     @property
     def is_melee(self) -> bool:
         # 1900 milli-tiles is the game's own MELEE_RANGE_LIMIT.
@@ -119,6 +130,10 @@ def _int(value: Any, default: int = 0) -> int:
 
 def _bool(value: Any) -> bool:
     return value is True
+
+
+def _opt_str(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def build_unit_spec(
@@ -191,6 +206,10 @@ def build_unit_spec(
         crown_tower_damage_percent=_int(raw.get("CrownTowerDamagePercent")),
         kamikaze=_bool(raw.get("Kamikaze")),
         projectile=projectile if isinstance(projectile, str) else None,
+        buff_when_not_attacking=_opt_str(raw.get("BuffWhenNotAttacking")),
+        buff_when_not_attacking_ticks=clock.ticks(raw.get("BuffWhenNotAttackingTime")),
+        buff_on_damage=_opt_str(raw.get("BuffOnDamage")),
+        buff_on_damage_ticks=clock.ticks(raw.get("BuffOnDamageTime")),
         source_ref=ref,
         level=level,
         rarity=rarity,

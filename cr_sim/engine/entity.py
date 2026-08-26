@@ -22,6 +22,8 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
+from .buffs import apply_delta
+
 if TYPE_CHECKING:  # pragma: no cover
     from .specs import UnitSpec
 
@@ -169,6 +171,23 @@ class Entity:
         """A unit cannot be hit while still deploying."""
         return not self.dead and self.deploy_ticks_left <= 0
 
+    @property
+    def is_acquirable(self) -> bool:
+        """Whether an enemy can *choose* this entity as its target.
+
+        Stricter than :attr:`is_targetable`, and the gap between the two is
+        deliberate: an invisible Royal Ghost cannot be picked as a target, but
+        a Fireball dropped on the tile it happens to be standing on still
+        burns it. Splash and area effects therefore keep testing
+        ``is_targetable``, and only target *selection* tests this.
+
+        Collapsing the two would make invisibility a blanket immunity, which
+        would let a Royal Ghost walk through Poison untouched.
+        """
+        if not self.is_targetable:
+            return False
+        return self.buffs is None or not self.buffs.is_invisible()
+
     def tick_deploy(self) -> bool:
         """Advance the deploy timer. Returns True on the tick it completes."""
         if self.deploy_ticks_left <= 0:
@@ -217,6 +236,16 @@ class Entity:
         """
         if self.dead or amount <= 0:
             return 0
+        if self.buffs is not None:
+            # Reduction is a property of whoever is being hit, so it belongs at
+            # the one point every source of damage passes through -- a Monk's
+            # shield has to blunt a Fireball and a sword swing alike. Applying
+            # it per call site would mean five places to keep in step.
+            taken = self.buffs.damage_taken_multiplier()
+            if taken:
+                amount = apply_delta(amount, taken)
+                if amount <= 0:
+                    return 0
         dealt = 0
         if self.shield > 0:
             absorbed = min(self.shield, amount)

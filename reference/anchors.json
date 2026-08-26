@@ -238,6 +238,21 @@
       "status": "open",
       "priority": "medium",
       "blocks": "M5 accuracy"
+    },
+    {
+      "id": "tornado-attract-unit",
+      "question": "AttractPercentage (Tornado 360) is named like a percentage. Is it a percentage of the pulled unit's own speed, or a flat rate in tiles/minute like every other speed in this data?",
+      "why_it_matters": "Decides whether Tornado drags a Golem as fast as a Hog Rider, and whether it can pull a unit from its edge to its centre within its 1050ms lifetime at all -- which is the entire card.",
+      "status": "resolved",
+      "resolution": "A flat rate in tiles per minute. Tornado's radius is 5.5 tiles and its LifeDuration is 1050ms; at 360 tiles/min (6 tiles/s) an edge unit reaches the centre in 917ms, just inside its lifetime, which is exactly how the card behaves. Read as a percentage of the unit's own speed it would take a 45-speed Golem 2037ms -- twice the tornado's life, so a Golem would barely move -- and it would mean Tornado pulls fast units harder than slow ones, the opposite of a card that drags an entire push uniformly. The three other tornado buffs corroborate the scale: the Valkyrie and Wizard hero mini-tornadoes read 300 and 250 against smaller radii, and Super Archer's 450 x PushSpeedFactor 120. Implemented as its own tick phase (pull_units) so it moves units that are attacking, frozen, or otherwise not moving under their own power.",
+      "how_to_resolve": "(kept for provenance) time a Tornado dragging a Golem vs a Hog Rider the same distance; equal times confirm a flat rate."
+    },
+    {
+      "id": "heal-spirit-total",
+      "question": "Heal Spirit's total healing at display level 11. The engine derives 400 (four applications of 100, 250ms apart over a 1000ms buff).",
+      "why_it_matters": "Heal is a 1-elixir card whose whole value is the size of the top-up; the mechanism is verified but the magnitude is not.",
+      "status": "open",
+      "how_to_resolve": "Damage a Knight in-game, drop a Heal Spirit on it, read the hitpoints back. The per-application rhythm (4 x 250ms) is already confirmed from HealPerSecond/HitFrequency/BuffTime and is not in question -- only the scaled total."
     }
   ]
 }

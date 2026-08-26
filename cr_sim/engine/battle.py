@@ -31,7 +31,7 @@ from .arena import Arena, load_arena
 from .constants import TickClock
 from .elixir import BattleTimeline, ElixirBar, build_timeline
 from .entity import Entity, EntityKind, EntityState, Team, reset_entity_ids
-from .fixed import distance, milli_tiles, pack_offsets, ring_offsets
+from .fixed import SUBTILES_PER_TILE, distance, milli_tiles, pack_offsets, ring_offsets
 from .combat import (
     AttackState,
     DamageEvent,
@@ -42,7 +42,7 @@ from .combat import (
 )
 from .pathing import Route, crosses_river, route_to, step_towards
 from .areaeffects import AreaEffect, AreaEffectSpec, build_area_effect_spec
-from .buffs import BuffSpec, BuffState, apply_multiplier, build_buff_spec
+from .buffs import BuffSpec, BuffState, apply_delta, build_buff_spec
 from .projectiles import Projectile, ProjectileSpec, build_projectile_spec
 from .spells import SpellPlan, plan_spell
 from .targeting import acquire_target, in_attack_range, should_keep_target
@@ -123,10 +123,12 @@ class Battle:
         "advance_deploy_timers",
         "advance_lifetimes",
         "update_buffs",
+        "update_conditional_buffs",
         "acquire_targets",
         "resolve_attacks",
         "advance_projectiles",
         "tick_area_effects",
+        "pull_units",
         "move_units",
         "resolve_collisions",
         "resolve_deaths",
@@ -171,6 +173,7 @@ class Battle:
         "_area_specs",
         "_spell_plans",
         "_pending_waves",
+        "_last_attack",
         "_buff_specs",
     )
 
@@ -223,6 +226,9 @@ class Battle:
         #: Volleys still to fire, as (tick, card, team, x, y). Arrows is the
         #: only card that uses this, and it is why its damage looks uneven.
         self._pending_waves: list[tuple[int, str, Team, int, int]] = []
+        #: Tick of each entity's most recent swing, for the buffs that
+        #: depend on how long it has been since one.
+        self._last_attack: dict[int, int] = {}
         _globals = self.data.globals_map()
         # Grace band that stops a unit flickering between two equidistant enemies.
         _ext = _globals.get('LOGIC_RANGE_EXTENSION_TO_KEEP_TARGET', 0)
@@ -581,8 +587,8 @@ class Battle:
             if entity.buffs is None or entity.dead:
                 continue
             owed = entity.buffs.tick()
-            if owed:
-                dealt = entity.apply_damage(owed)
+            if owed.damage:
+                dealt = entity.apply_damage(owed.damage)
                 if dealt:
                     self.damage_log.append(
                         DamageEvent(
@@ -593,8 +599,47 @@ class Battle:
                             lethal=entity.hitpoints <= 0,
                         )
                     )
+            if owed.heal and not entity.dead:
+                # Healing cannot resurrect. A unit whose hitpoints already
+                # reached zero this tick is dead in the same sense as one
+                # killed by a sword, and the death phase will retire it.
+                ceiling = entity.max_hitpoints
+                if owed.over_heal_percent:
+                    ceiling += ceiling * owed.over_heal_percent // 100
+                entity.hitpoints = min(entity.hitpoints + owed.heal, ceiling)
             if not entity.buffs:
                 entity.buffs = None
+
+    def _phase_update_conditional_buffs(self) -> None:
+        """Grant and revoke the buffs a unit holds because of what it is doing.
+
+        ``BuffWhenNotAttacking`` is not a timed application like a spell's --
+        it is a *state*. Royal Ghost is invisible for as long as it has not
+        swung recently and solid the instant it does, which is the whole card:
+        it cannot be blocked or targeted on the way in, and it is exposed while
+        it works. The Knight evolution's damage reduction and Suspicious Bush
+        work the same way.
+
+        Re-asserted every tick rather than applied once with a duration,
+        because the condition it depends on can change under it at any moment.
+        """
+        for entity in self.entities:
+            spec = entity.spec
+            if spec is None or entity.dead or not spec.buff_when_not_attacking:
+                continue
+            # Never having attacked counts as idle since deploy, so a Royal
+            # Ghost fades in on its own two seconds after it lands.
+            since = self.tick - self._last_attack.get(entity.id, entity.spawn_tick)
+            # At least one tick, so a unit with a zero threshold (Suspicious
+            # Bush) still drops the buff on the tick it attacks rather than
+            # satisfying "has not attacked for 0ms" while mid-swing.
+            threshold = max(1, spec.buff_when_not_attacking_ticks)
+            if since >= threshold:
+                bspec = self._buff_spec(spec.buff_when_not_attacking, spec.rarity, spec.level)
+                if bspec is not None:
+                    self._apply_buff(entity, bspec, 2, source=entity.id)
+            elif entity.buffs is not None:
+                entity.buffs.remove(spec.buff_when_not_attacking)
 
     def _phase_acquire_targets(self) -> None:
         """Choose each unit's target, keeping the current one where possible.
@@ -668,6 +713,22 @@ class Battle:
         # would land the killing blow and its victim, already at zero, would be
         # skipped before swinging back. Mirrors must trade evenly.
         for hit in pending:
+            self._last_attack[hit.attacker.id] = self.tick
+            if hit.spec.buff_on_damage:
+                # Electro Wizard's stun. Applied on the decision to hit rather
+                # than on impact, so a shot already in the air still stuns --
+                # and so the stun lands even against a target that dies to the
+                # same swing, which is what makes him a reliable Inferno reset.
+                bspec = self._buff_spec(hit.spec.buff_on_damage, hit.spec.rarity, hit.spec.level)
+                if bspec is not None:
+                    self._apply_buff(
+                        hit.target, bspec, hit.spec.buff_on_damage_ticks, source=hit.attacker.id
+                    )
+            if hit.attacker.buffs is not None:
+                # Swinging breaks invisibility. Royal Ghost is untargetable
+                # between attacks and exposed from the moment it commits to
+                # one -- without this it is untargetable for its whole life.
+                hit.attacker.buffs.on_attack()
             launched = self._launch(hit)
             event = None if launched else apply_hit(hit, self.tick)
             if event is not None:
@@ -984,6 +1045,39 @@ class Battle:
                             )
                         )
 
+    def _phase_pull_units(self) -> None:
+        """Drag units toward whatever is attracting them. Tornado, essentially.
+
+        Its own phase, ahead of movement, because a pull is a force applied
+        *to* a unit rather than a decision made *by* one. That distinction is
+        the whole card: a Tornado has to move a unit that is standing still to
+        attack, and a unit that is frozen solid, and a unit whose own speed is
+        zero. Folding this into :meth:`_phase_move_units` would skip every one
+        of those cases, since that phase returns early for all of them -- and
+        dragging a committed push off the bridge and into the King Tower is
+        precisely what Tornado is for.
+
+        Buildings and towers are not pulled: nothing in the game drags a
+        Cannon, and the data has no notion of moving one.
+        """
+        for entity in self.entities:
+            if entity.dead or entity.buffs is None or entity.is_deploying:
+                continue
+            if entity.kind is not EntityKind.TROOP:
+                continue
+            for source_id, tiles_per_minute in entity.buffs.attract_sources():
+                source = self._entity(source_id)
+                if source is None or source.dead:
+                    continue
+                step = tiles_per_minute * SUBTILES_PER_TILE // (60 * self.clock.ticks_per_second)
+                if step <= 0:
+                    continue
+                x, y = step_towards((entity.x, entity.y), (source.x, source.y), step)
+                # Deliberately not routed and not walkability-checked: this is a
+                # displacement, the same as pushback, and a tornado over the
+                # river really does hold units above it.
+                entity.x, entity.y = x, y
+
     def _phase_move_units(self) -> None:
         for entity in self.entities:
             if entity.dead or entity.is_deploying or entity.kind is not EntityKind.TROOP:
@@ -1002,7 +1096,7 @@ class Battle:
             if entity.buffs is not None:
                 # A frozen unit does not move at all; a slowed or raged one
                 # moves at its adjusted rate.
-                step = apply_multiplier(step, entity.buffs.speed_multiplier())
+                step = apply_delta(step, entity.buffs.speed_multiplier())
                 if step <= 0:
                     entity.set_state(EntityState.IDLE)
                     continue

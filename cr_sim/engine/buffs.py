@@ -117,18 +117,21 @@ policy.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 from ..data.leveling import RarityScale
 from ..data.source import LogicData, UnknownEntity
 from .constants import TickClock
 
 __all__ = [
+    "BuffTick",
+    "as_delta",
     "BuffSpec",
     "build_buff_spec",
     "ActiveBuff",
     "BuffState",
     "apply_multiplier",
+    "apply_delta",
 ]
 
 
@@ -158,6 +161,41 @@ def apply_multiplier(base: int, percent: int) -> int:
     multiplier = percent if percent >= 100 else 100 + percent
     result = base * multiplier // 100
     return result if result > 0 else 0
+
+
+def apply_delta(base: int, delta: int) -> int:
+    """Apply an already-normalised delta -- what every ``BuffState`` accessor returns.
+
+    Separate from :func:`apply_multiplier` because the two take different
+    inputs and must not be confused. ``apply_multiplier`` reads a *raw data
+    value* under the column's two conventions; this takes a value that has
+    already been through :func:`as_delta` and summed, where ``0`` is neutral
+    and there is only one convention left.
+
+    Routing a summed delta through ``apply_multiplier`` would be silently
+    wrong at exactly one point: two Rages stacking to ``+100`` would be read
+    as the *whole* multiplier ``100``, i.e. 1.0x, cancelling both buffs
+    instead of doubling. Zero is neutral here and 100 means double.
+    """
+    result = base * (100 + delta) // 100
+    return result if result > 0 else 0
+
+
+def as_delta(percent: int) -> int:
+    """Normalise a raw buff percentage to a *delta* off 100.
+
+    The column's two conventions (see :func:`apply_multiplier`) cannot simply be
+    summed as they stand: ``130`` means "1.3x in total", so adding two of them
+    gives 2.6x rather than the intended 1.6x, and each one silently contributes
+    a whole extra baseline. Converting to a delta first makes summation mean
+    one thing.
+
+    It also fixes a case that was quietly wrong: ``IgnoreBarrel`` is exactly
+    ``100``, a neutral 1.0x marker. Summed raw against a Freeze (``-100``) the
+    two cancelled to zero and the unit kept walking -- a targeting-immunity flag
+    curing Freeze. As deltas they are ``0`` and ``-100``, and it stays frozen.
+    """
+    return percent - 100 if percent >= 100 else percent
 
 
 def _int(value: Any, default: int = 0) -> int:
@@ -203,6 +241,34 @@ class BuffSpec:
     #: existing one's timer instead. See the module docstring.
     stacks: bool
     crown_tower_damage_percent: int
+    #: Healing per application, converted from ``HealPerSecond`` exactly the way
+    #: damage is. The mirror image of the field above and the same mechanism:
+    #: Heal Spirit, Battle Healer and the Witch evolution all regenerate on an
+    #: interval rather than in a lump.
+    heal_per_second: int = 0
+    #: How far past maximum hitpoints healing may go, as a percentage. Zero is
+    #: the normal case: healing tops out at full.
+    allowed_over_heal_percent: int = 0
+    #: Percentage of *incoming* damage removed. Monk's shield is 65 (takes 35%),
+    #: Knight's Fortify evolution 60. Negative means the opposite -- the Dark
+    #: Elixir berserk buff is -100, i.e. double damage taken, the drawback that
+    #: pays for its damage boost.
+    damage_reduction: int = 0
+    #: Multiplier on damage *dealt*, same two conventions as speed.
+    #: ``TripleDamage`` is 300; the Tombstone hero's "no attacks" buff is -100.
+    damage_multiplier: int = 0
+    hitpoint_multiplier: int = 0
+    #: Cannot be targeted while this is active. Royal Ghost's whole card.
+    invisible: bool = False
+    #: Dropped the moment its holder attacks. This is what stops Royal Ghost
+    #: being permanently untargetable: it surfaces to swing.
+    remove_on_attack: bool = False
+    #: Pull toward whatever applied this buff, in tiles per minute -- the same
+    #: unit as every other speed in the data, already scaled by
+    #: ``PushSpeedFactor``. Tornado is 360 at factor 100. See ``attract`` in the
+    #: module docstring for why this is a flat rate and not a percentage.
+    attract: int = 0
+    ignore_pushback: bool = False
 
     def damage_to(self, is_crown_tower: bool) -> int:
         """Per-application damage, reduced against a crown tower where applicable.
@@ -247,6 +313,20 @@ def build_buff_spec(
         else 0
     )
 
+    raw_hps = _int(raw.get("HealPerSecond"))
+    scaled_hps = scale.scale(raw_hps, level) if raw_hps else 0
+    heal_per_application = (
+        scaled_hps * hit_frequency_ticks // clock.ticks_per_second
+        if scaled_hps and hit_frequency_ticks > 0
+        else 0
+    )
+
+    # PushSpeedFactor is a plain percentage on the pull rate; every tornado in
+    # the build carries it, at 100 (neutral) except the Super Archer's 120.
+    attract = _int(raw.get("AttractPercentage"))
+    if attract:
+        attract = attract * _int(raw.get("PushSpeedFactor"), 100) // 100
+
     return BuffSpec(
         name=str(raw.get("Name", name)),
         speed_multiplier=_int(raw.get("SpeedMultiplier")),
@@ -256,7 +336,29 @@ def build_buff_spec(
         hit_frequency_ticks=hit_frequency_ticks,
         stacks=_bool(raw.get("EnableStacking")),
         crown_tower_damage_percent=_int(raw.get("CrownTowerDamagePercent")),
+        heal_per_second=heal_per_application,
+        allowed_over_heal_percent=_int(raw.get("AllowedOverHealPerc")),
+        damage_reduction=_int(raw.get("DamageReduction")),
+        damage_multiplier=_int(raw.get("DamageMultiplier")),
+        hitpoint_multiplier=_int(raw.get("HitpointMultiplier")),
+        invisible=_bool(raw.get("Invisible")),
+        remove_on_attack=_bool(raw.get("RemoveOnAttack")),
+        attract=attract,
+        ignore_pushback=_bool(raw.get("IgnorePushBack")),
     )
+
+
+class BuffTick(NamedTuple):
+    """What one tick of an entity's buffs owes it."""
+
+    damage: int
+    heal: int
+    #: How far past maximum hitpoints this tick's healing may go, as a
+    #: percentage of maximum. Zero means healing stops at full.
+    over_heal_percent: int = 0
+
+    def __bool__(self) -> bool:
+        return bool(self.damage or self.heal)
 
 
 @dataclass(slots=True)
@@ -339,7 +441,7 @@ class BuffState:
             )
         )
 
-    def tick(self) -> int:
+    def tick(self) -> "BuffTick":
         """Advance every active buff by one tick.
 
         Expired buffs (``ticks_left`` reaching zero on this call) are dropped
@@ -352,8 +454,15 @@ class BuffState:
         entity-level total no longer knows which buff contributed what; a
         caller needing per-buff crown tower damage should read
         ``active_names()`` and call ``BuffSpec.damage_to`` itself.
+
+        Healing rides the same countdown and is reported separately rather than
+        netted off. A unit under a Poison cloud and a Battle Healer is being
+        both hurt and healed, and collapsing that to one number would hide
+        which is winning -- and would silently let healing "un-kill" something
+        the damage log has already recorded as dead.
         """
         damage = 0
+        heal = 0
         survivors: list[ActiveBuff] = []
         for active in self._buffs:
             if active.spec.hit_frequency_ticks > 0:
@@ -365,23 +474,67 @@ class BuffState:
                 active.ticks_to_next_damage -= 1
                 if active.ticks_to_next_damage <= 0:
                     damage += active.spec.damage_per_second
+                    heal += active.spec.heal_per_second
                     active.ticks_to_next_damage = active.spec.hit_frequency_ticks
             active.ticks_left -= 1
             if active.ticks_left > 0:
                 survivors.append(active)
         self._buffs = survivors
-        return damage
+        return BuffTick(damage=damage, heal=heal, over_heal_percent=self._over_heal())
 
     def speed_multiplier(self) -> int:
         """Combined movement speed delta -- see the module docstring on why deltas sum."""
-        return sum(active.spec.speed_multiplier for active in self._buffs)
+        return sum(as_delta(a.spec.speed_multiplier) for a in self._buffs)
 
     def hit_speed_multiplier(self) -> int:
-        return sum(active.spec.hit_speed_multiplier for active in self._buffs)
+        return sum(as_delta(a.spec.hit_speed_multiplier) for a in self._buffs)
 
     def spawn_speed_multiplier(self) -> int:
         """Combined spawn-speed delta, for buildings under Rage or Freeze."""
-        return sum(active.spec.spawn_speed_multiplier for active in self._buffs)
+        return sum(as_delta(a.spec.spawn_speed_multiplier) for a in self._buffs)
+
+    def damage_multiplier(self) -> int:
+        """Combined delta on damage *dealt* by this entity."""
+        return sum(as_delta(a.spec.damage_multiplier) for a in self._buffs)
+
+    def damage_taken_multiplier(self) -> int:
+        """Combined delta on damage *received*, from ``DamageReduction``.
+
+        A reduction of 65 (Monk) means 35% of the damage arrives, so the delta
+        is its negation. Reductions past 100 would flip the sign and start
+        healing the target, so the total is clamped at full immunity.
+        """
+        total = sum(a.spec.damage_reduction for a in self._buffs)
+        return -min(total, 100)
+
+    def is_invisible(self) -> bool:
+        """Untargetable while true -- Royal Ghost between swings."""
+        return any(a.spec.invisible for a in self._buffs)
+
+    def ignores_pushback(self) -> bool:
+        return any(a.spec.ignore_pushback for a in self._buffs)
+
+    def on_attack(self) -> None:
+        """Drop the buffs that end when their holder attacks.
+
+        Royal Ghost is invisible until it swings, and visible from the swing
+        until it fades again. Without this the card would simply be
+        untargetable for its whole life.
+        """
+        self._buffs = [a for a in self._buffs if not a.spec.remove_on_attack]
+
+    def attract_sources(self) -> tuple[tuple[int, int], ...]:
+        """``(source_id, tiles_per_minute)`` for every pull acting on this entity.
+
+        The buff knows the rate; only the battle knows where the tornado
+        actually is, so the pair is handed up rather than resolved here.
+        """
+        return tuple(
+            (a.source, a.spec.attract) for a in self._buffs if a.spec.attract
+        )
+
+    def _over_heal(self) -> int:
+        return max((a.spec.allowed_over_heal_percent for a in self._buffs), default=0)
 
     def is_frozen(self) -> bool:
         """Whether movement is fully stopped.
@@ -392,6 +545,21 @@ class BuffState:
         -100 or past it are the same observable state: stopped.
         """
         return self.speed_multiplier() <= -100
+
+    def remove(self, name: str) -> bool:
+        """Drop every copy of a named buff. Returns whether anything went.
+
+        Needed for the *conditional* buffs, which are not on a timer at all:
+        Royal Ghost's invisibility is granted by a state ("has not attacked
+        recently") and has to end the moment that state does, rather than
+        counting down.
+        """
+        before = len(self._buffs)
+        self._buffs = [a for a in self._buffs if a.spec.name != name]
+        return len(self._buffs) != before
+
+    def has(self, name: str) -> bool:
+        return any(a.spec.name == name for a in self._buffs)
 
     def clear(self) -> None:
         self._buffs.clear()

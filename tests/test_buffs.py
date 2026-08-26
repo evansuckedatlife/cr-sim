@@ -16,6 +16,7 @@ from cr_sim.data.source import LogicData
 from cr_sim.engine.buffs import (
     ActiveBuff,
     BuffState,
+    apply_delta,
     apply_multiplier,
     build_buff_spec,
 )
@@ -133,10 +134,10 @@ def test_damage_over_time_starts_after_one_interval_not_on_contact():
     state = BuffState()
     state.apply(p, duration_ticks=p.hit_frequency_ticks * 8)
 
-    assert state.tick() == 0, "damage landed on the contact tick"
+    assert state.tick().damage == 0, "damage landed on the contact tick"
     for _ in range(p.hit_frequency_ticks - 2):
-        assert state.tick() == 0
-    assert state.tick() == p.damage_per_second, "no damage after one full interval"
+        assert state.tick().damage == 0
+    assert state.tick().damage == p.damage_per_second, "no damage after one full interval"
 
 
 def test_damage_over_time_repeats_on_its_own_interval():
@@ -145,7 +146,7 @@ def test_damage_over_time_repeats_on_its_own_interval():
     state = BuffState()
     # Kept alive well past its own duration, the way a cloud refreshes it.
     state.apply(p, duration_ticks=p.hit_frequency_ticks * 8 + 5)
-    hits = [i for i in range(p.hit_frequency_ticks * 8) if state.tick() > 0]
+    hits = [i for i in range(p.hit_frequency_ticks * 8) if state.tick().damage > 0]
     assert len(hits) == 8, hits
     # Evenly spaced, one interval apart.
     gaps = {b - a for a, b in zip(hits, hits[1:])}
@@ -174,7 +175,7 @@ def test_poison_stacks_two_independent_copies():
     assert state.active_names() == ("Poison", "Poison")
 
     # Damage lands one interval after application, not on contact.
-    total = sum(state.tick() for _ in range(p.hit_frequency_ticks))
+    total = sum(state.tick().damage for _ in range(p.hit_frequency_ticks))
     assert total == p.damage_per_second * 2, "two stacked clouds must both tick"
 
 
@@ -185,7 +186,11 @@ def test_rage_refreshes_instead_of_stacking():
     state.apply(r, duration_ticks=100)
     state.apply(r, duration_ticks=100)
     assert state.active_names() == ("Rage",), "non-stacking buff produced two copies"
-    assert state.speed_multiplier() == r.speed_multiplier, "speed boost must not have doubled"
+    # Reported as a delta off 100, so a single Rage is +30% -- the same 1.3x
+    # a raw 130 means, just in the one convention the accessors sum in.
+    assert apply_delta(1000, state.speed_multiplier()) == 1300, (
+        "speed boost must not have doubled"
+    )
 
 
 def test_reapplying_a_refreshing_buff_resets_its_remaining_duration():
@@ -233,7 +238,7 @@ def test_combining_multipliers_is_order_independent():
     backward.apply(poison, duration_ticks=480)
 
     assert forward.speed_multiplier() == backward.speed_multiplier()
-    assert apply_multiplier(1000, forward.speed_multiplier()) == apply_multiplier(
+    assert apply_delta(1000, forward.speed_multiplier()) == apply_delta(
         1000, backward.speed_multiplier()
     )
 
@@ -255,7 +260,7 @@ def test_freeze_reads_as_frozen():
     state = BuffState()
     state.apply(spec("Freeze"), duration_ticks=240)
     assert state.is_frozen()
-    assert apply_multiplier(1000, state.speed_multiplier()) == 0
+    assert apply_delta(1000, state.speed_multiplier()) == 0
 
 
 # --------------------------------------------------------- lifecycle & bookkeeping
@@ -276,13 +281,13 @@ def test_clear_removes_every_active_buff():
     assert not state
     assert state.active_names() == ()
     assert state.speed_multiplier() == 0
-    assert state.tick() == 0
+    assert not state.tick()
 
 
 def test_expired_buffs_are_swept_on_the_tick_their_duration_ends():
     state = BuffState()
     state.apply(spec("Rage"), duration_ticks=3)
-    assert state.speed_multiplier() == 130
+    assert apply_delta(1000, state.speed_multiplier()) == 1300
     state.tick()
     state.tick()
     assert state, "buff expired a tick early"

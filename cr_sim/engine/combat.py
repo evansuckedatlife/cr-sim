@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .buffs import apply_delta
 from .entity import Entity, EntityKind, EntityState
 from .fixed import distance_squared
 from .specs import UnitSpec
@@ -87,8 +88,20 @@ class DamageEvent:
     lethal: bool = False
 
 
-def _damage_for(spec: UnitSpec, target: Entity) -> int:
-    return spec.damage_to(is_crown_tower=target.kind is EntityKind.TOWER)
+def _damage_for(spec: UnitSpec, target: Entity, attacker: Entity | None = None) -> int:
+    """Damage one swing carries, before the victim's own reductions.
+
+    The attacker's buffs scale what it deals; the victim's scale what it takes
+    (in :meth:`Entity.apply_damage`). Keeping the two on opposite sides of the
+    hit is what lets a raged Monk hit a fortified Knight and have both modifiers
+    count exactly once.
+    """
+    damage = spec.damage_to(is_crown_tower=target.kind is EntityKind.TOWER)
+    if attacker is not None and attacker.buffs is not None:
+        dealt = attacker.buffs.damage_multiplier()
+        if dealt:
+            damage = apply_delta(damage, dealt)
+    return damage
 
 
 @dataclass(slots=True)
@@ -138,7 +151,7 @@ def advance_attack(
 
 def apply_hit(hit: PendingHit, tick: int) -> DamageEvent | None:
     """Apply a decided hit. Its target may already have died this tick."""
-    dealt = hit.target.apply_damage(_damage_for(hit.spec, hit.target))
+    dealt = hit.target.apply_damage(_damage_for(hit.spec, hit.target, hit.attacker))
     if not dealt:
         return None
     return DamageEvent(
@@ -167,7 +180,7 @@ def apply_area_damage(
     events: list[DamageEvent] = []
     radius_squared = radius * radius
     for target in targets:
-        if target.dead or target.team is attacker.team or not target.is_targetable:
+        if target.dead or target.team is attacker.team or not target.is_acquirable:
             continue
         if target.flying and not spec.attacks_air:
             continue
