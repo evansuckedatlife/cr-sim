@@ -74,6 +74,22 @@ def _is_namespace(key: str) -> bool:
     return bool(stripped) and stripped.isupper()
 
 
+def _overlay_namespace_for(stem: str) -> str | None:
+    """Which namespace a TOML file's bare top-level sections belong to.
+
+    Besides the direct ``<table>.toml`` overlays, the build ships
+    ``<table>_evo.toml`` files holding the Evolution variants -- ``[Knight_EV1]``
+    with ``Base="Knight"``. They use bare names like any other overlay, so
+    without this the whole Evolution roster is stranded and unreachable.
+    """
+    direct = _CSV_TO_NAMESPACE.get(stem) or _TOML_FILE_NAMESPACE.get(stem)
+    if direct:
+        return direct
+    if stem.endswith("_evo"):
+        return _CSV_TO_NAMESPACE.get(stem[: -len("_evo")])
+    return None
+
+
 class UnknownEntity(KeyError):
     """Raised when a name cannot be found in any namespace."""
 
@@ -125,9 +141,7 @@ class LogicData:
             # sections are bare entity names rather than namespaces, and they
             # extend that table.  spells_characters.toml is where Three
             # Musketeers' SummonCharactersList lives, for instance.
-            overlay_namespace = _CSV_TO_NAMESPACE.get(path.stem) or _TOML_FILE_NAMESPACE.get(
-                path.stem
-            )
+            overlay_namespace = _overlay_namespace_for(path.stem)
             for key, entries in parsed.items():
                 if not isinstance(entries, dict):
                     continue

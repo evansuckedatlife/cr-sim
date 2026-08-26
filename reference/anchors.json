@@ -133,7 +133,32 @@
     "melee_range_medium": 1200,
     "melee_range_long": 1900,
     "tiles_per_minute_per_speed_unit": 1,
-    "milli_tiles_per_tile": 1000
+    "milli_tiles_per_tile": 1000,
+    "arena_tiles_wide": 18,
+    "arena_tiles_tall": 32,
+    "river_top_tile": 15.0,
+    "river_bottom_tile": 17.0,
+    "bridge_centre_tiles": [
+      3.5,
+      14.5
+    ],
+    "bridge_width_tiles": 2.0,
+    "king_tower_tile": [
+      9.0,
+      3.0
+    ],
+    "princess_tower_tiles": [
+      [
+        3.5,
+        6.5
+      ],
+      [
+        14.5,
+        6.5
+      ]
+    ],
+    "subtiles_per_tile": 18000,
+    "_geometry_source": "tilemaps/tilemap.csv from the APK, 36x64 half-tile bitfield; 141 of 158 arena rows use it"
   },
   "open_questions": [
     {
@@ -149,6 +174,24 @@
       "why_it_matters": "Decides whether Arrows clears 230 HP Minions, which is its defining use. Affects any spell with ProjectileWaves or MultipleProjectiles (Arrows, Hunter, Princess).",
       "how_to_resolve": "M5 models waves explicitly; then assert Arrows clears a Minion Horde and Hunter's point-blank burst kills what it should. Until then do not treat `damage` on these three as a single hit.",
       "status": "open"
+    },
+    {
+      "id": "tower-hp-scaling",
+      "question": "Do Crown Towers scale on the card PowerLevelMultiplier ladder, or on their own per-level percentage?",
+      "why_it_matters": "Tower hitpoints set every damage race in the game. cr-sim currently applies the card ladder, giving Princess 3584 / King 6144 at level 11, which is very likely too high.",
+      "evidence": "globals.csv carries a separate tower progression the cards do not use: HITPOINT_INCREASE_PERCENT_PER_TOWER_LEVEL=8, HITPOINT_INCREASE_PERCENT_PER_KING_LEVEL=7, *_AFTER_TOURNAMENTCAP=10, *_AT_TOURNAMENTCAP=10, TOWER_SCALING_START_EXP_LEVEL=9. A flat +8%/level on the level-1 base gives Princess 2520 at level 11 instead of 3584.",
+      "how_to_resolve": "Read Princess and King Tower hitpoints off the in-game tower card at a known King level, then fit which of the candidate formulas reproduces it. Must be settled in M2, when towers start fighting.",
+      "status": "open",
+      "priority": "high"
+    },
+    {
+      "id": "bridge-width",
+      "question": "Are the bridges 2 or 3 tiles wide?",
+      "why_it_matters": "Bridge width sets how many units can cross abreast and how spells cover a crossing push.",
+      "evidence": "Every non-event tilemap in build 150535029 has 2-tile bridges (cells x5-8 and x27-30 across all four river rows), and 141 of 158 arena rows point at that one tilemap. Public descriptions say 2 tiles in Arenas 1-6 and 8-9 but 3 tiles in Arenas 7 and 10-23, which this build's data does not reproduce anywhere.",
+      "how_to_resolve": "Likely the public figure describes the visual bridge art, or predates a geometry unification. If a future APK extraction shows a 3-tile tilemap, tests/test_arena_and_battle.py::test_bridges_are_two_tiles_wide_in_this_build will fail and flag it.",
+      "status": "open",
+      "priority": "medium"
     }
   ]
 }

@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cr_sim.data.decode import DecodeError, decode_bytes
 
-ASSET_PREFIX = "assets/csv_logic/"
+ASSET_PREFIXES = ("assets/csv_logic/", "assets/tilemaps/")
 
 
 def apk_candidates(target: Path) -> list[Path]:
@@ -28,7 +28,7 @@ def apk_candidates(target: Path) -> list[Path]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("target", type=Path, help="APK file, or a directory of split APKs")
-    ap.add_argument("--out", type=Path, default=Path("data_cache/csv_logic"))
+    ap.add_argument("--out", type=Path, default=Path("data_cache"))
     args = ap.parse_args()
 
     out: Path = args.out
@@ -44,13 +44,17 @@ def main() -> int:
         except zipfile.BadZipFile:
             continue
         with zf:
-            members = [n for n in zf.namelist() if n.startswith(ASSET_PREFIX) and not n.endswith("/")]
+            members = [
+                n
+                for n in zf.namelist()
+                if n.startswith(ASSET_PREFIXES) and not n.endswith("/")
+            ]
             if not members:
                 continue
             source_apk = apk
             print(f"{apk.name}: {len(members)} logic files")
             for member in members:
-                name = member[len(ASSET_PREFIX) :]
+                name = member[len("assets/") :]
                 try:
                     decoded = decode_bytes(zf.read(member), name=name)
                 except DecodeError as exc:
@@ -64,7 +68,7 @@ def main() -> int:
                 written += 1
 
     if source_apk is None:
-        print(f"no {ASSET_PREFIX} found under {args.target}", file=sys.stderr)
+        print(f"none of {ASSET_PREFIXES} found under {args.target}", file=sys.stderr)
         return 1
 
     (out / "_PROVENANCE.txt").write_text(

@@ -13,8 +13,8 @@ Full plan: `../.claude/plans/i-want-to-build-purrfect-kernighan.md`.
 | Milestone | State | Notes |
 |-----------|-------|-------|
 | **M0 — data pipeline** | ✅ | APK decoder, csv_logic + TOML ingestion, `EXT` inheritance, level scaling, 122-card registry, stat gate. Every playable card resolves. **64 tests.** |
-| M1 — fixed-point core, arena, tick loop | ⬜ next | |
-| M2 — targeting, attacks, projectiles, towers | ⬜ | |
+| **M1 — fixed-point core, arena, tick loop** | ✅ | Integer subtile geometry, PCG32 RNG, entities, elixir, real tilemap arena, bridge routing, 12-phase tick loop, state hashing. **131 tests.** |
+| M2 — targeting, attacks, projectiles, towers | ⬜ next | |
 | M3 — pathing, collision, pushback | ⬜ | |
 | M4 — elixir, deck cycle, win conditions | ⬜ | |
 | M5 — spells, area effects, buffs | ⬜ | |
@@ -123,6 +123,31 @@ The arena layout is data too — `SPAWN_GROUP.King_PrincessTowers` places the Ki
 Tower at (18, 6) and Princess Towers at (7, 13) and (29, 13), in half-tiles
 across the 18×32 arena. M1 does not have to guess the geometry.
 
+## The arena is data, not a guess
+
+Terrain comes from the game's own `tilemaps/tilemap.csv` — a 36×64 grid of
+**half-tiles** covering the 18×32 board. Each cell is a bitfield, and every
+value in the shipped file decomposes cleanly into known flags with **no leftover
+bits**, which is what confirms the reading:
+
+| bit | meaning |
+|---|---|
+| 1 / 2 | left / right lane road (`PATHFINDING_ROAD_COST=5` vs `DEFAULT=8`) |
+| 16 | blocked — out-of-play margins and tower footprints |
+| 32 | river; bridges are simply the gaps in it |
+| 256 | bridge centre line |
+
+What falls out, all verified: the river spans **y 15→17** (two tiles, centred on
+16); two bridges **two tiles wide centred on x 3.5 and 14.5** — exactly the
+Princess Tower positions, so towers sit in line with their bridge. The map holds
+both sides; `spawn_groups.toml` lists one and the other mirrors through
+`y → 64 − y`.
+
+Watch the two coordinate systems: `spawn_groups.toml` positions are half-tile
+grid *lines* (King Tower `x=18` → tile 9.0, dead centre), while tilemap cells
+are *spans*. Reading the tower's x as a cell index puts it at 9.25 and slightly
+off-centre forever.
+
 ## Data provenance
 
 Extracted from a real APK, not a public dump:
@@ -152,7 +177,7 @@ python -m cr_sim.cli cards               # the 122-card playable pool
 python -m cr_sim.cli cards --kind spell --level 14
 python -m cr_sim.cli card Knight         # full resolved stats for one card
 python -m cr_sim.cli validate            # the stat gate + open questions
-python -m pytest                         # 64 tests
+python -m pytest                         # 131 tests
 ```
 
 `freeze` re-cuts the regression baseline (`reference/card_stats.json`). Note the
