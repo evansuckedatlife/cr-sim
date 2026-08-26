@@ -52,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--match-seconds", type=int, default=120)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--entropy", type=float, default=0.02)
+    parser.add_argument(
+        "--shaping", type=float, default=0.01,
+        help="weight on tower-health difference. At 0.01 a whole match's tower "
+             "damage is worth about 0.02 against 1.0 per crown, so the reward is "
+             "effectively sparse; raise it to give credit between crowns.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=ROOT / "runs")
     parser.add_argument("--name", default="ppo")
@@ -78,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             ticks_per_second=args.tps,
             frame_skip=args.frame_skip,
             max_ticks=args.tps * args.match_seconds,
+            reward_shaping_weight=args.shaping,
         )
 
     config = PPOConfig(
@@ -90,7 +97,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     (out / "config.json").write_text(
         json.dumps({**asdict(config), "deck": list(DEFAULT_DECK), "tps": args.tps,
-                    "frame_skip": args.frame_skip, "match_seconds": args.match_seconds}, indent=2),
+                    "frame_skip": args.frame_skip, "match_seconds": args.match_seconds,
+                    "shaping": args.shaping}, indent=2),
         encoding="utf-8",
     )
 
