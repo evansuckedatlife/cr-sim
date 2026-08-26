@@ -112,7 +112,8 @@ _PAGE = """<!doctype html>
        <button id="hb">hitboxes</button></p>
     <div class="legend">
       <b>blue</b> defends the top, <b>red</b> the bottom.<br>
-      art is enlarged for legibility; the thin ring is the real hitbox.<br>
+      troops are circles and enlarged for legibility (thin ring = real hitbox);<br>
+      buildings are squares drawn at their true footprint.<br>
       dashed ring = still deploying; dimmed card = unaffordable.<br>
       {meta}
     </div>
@@ -151,6 +152,16 @@ function terrain() {{
   g.moveTo(0, HH * SCALE / 2); g.lineTo(HW * SCALE, HH * SCALE / 2); g.stroke();
 }}
 
+function shape(cx, cy, r, square) {{
+  g.beginPath();
+  if (square) {{
+    const k = Math.min(r * 0.28, 6);   // slight rounding so it reads as a building
+    g.roundRect(cx - r, cy - r, r * 2, r * 2, k);
+  }} else {{
+    g.arc(cx, cy, r, 0, 7);
+  }}
+}}
+
 function draw(i) {{
   const f = FRAMES[i]; if (!f) return;
   g.clearRect(0, 0, c.width, c.height);
@@ -163,26 +174,31 @@ function draw(i) {{
     // drawn larger so the card is actually recognisable at this zoom. The
     // hitbox is still outlined, so nothing about the real footprint is lost.
     const hit = Math.max(3, px(cr || 0));
-    const r = Math.max(tower ? SCALE * 1.4 : 11, hit * ART_SCALE);
+    // Buildings are drawn at their true extent -- they are big enough to read
+    // already, and inflating them would misrepresent what they block.
+    const r = (kind !== 0) ? hit : Math.max(11, hit * ART_SCALE);
     const img = ICONS[name];
+    // Buildings occupy a square footprint in Clash Royale; only troops have a
+    // circular collision radius. Drawing both as circles made towers read as
+    // blobs and hid where a building actually blocks the board.
+    const square = kind !== 0;
     g.globalAlpha = deploying ? 0.5 : 1;
-    // Team ring first, so the art sits on a coloured disc and ownership stays
-    // readable even for art that is mostly transparent.
-    g.beginPath(); g.arc(cx, cy, r, 0, 7);
+    // Coloured backing first, so ownership stays readable under art that is
+    // mostly transparent.
     g.fillStyle = team === 0 ? '#4c8dff' : '#ff5c6c';
-    g.fill();
+    shape(cx, cy, r, square); g.fill();
     if (img && img.complete && img.naturalWidth) {{
       g.save();
-      g.beginPath(); g.arc(cx, cy, r - 1, 0, 7); g.clip();
+      shape(cx, cy, r - 1, square); g.clip();
       const d = (r - 1) * 2;
       g.drawImage(img, cx - r + 1, cy - r + 1, d, d);
       g.restore();
       g.lineWidth = 2; g.strokeStyle = team === 0 ? '#9dc2ff' : '#ffb0b8';
-      g.beginPath(); g.arc(cx, cy, r, 0, 7); g.stroke();
+      shape(cx, cy, r, square); g.stroke();
     }}
     if (SHOW_HITBOX && hit < r - 2) {{
       g.lineWidth = 1; g.strokeStyle = 'rgba(255,255,255,.30)';
-      g.beginPath(); g.arc(cx, cy, hit, 0, 7); g.stroke();
+      shape(cx, cy, hit, square); g.stroke();
     }}
     g.globalAlpha = 1;
     if (deploying) {{

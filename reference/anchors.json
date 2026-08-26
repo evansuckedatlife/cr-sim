@@ -158,7 +158,12 @@
       ]
     ],
     "subtiles_per_tile": 18000,
-    "_geometry_source": "tilemaps/tilemap.csv from the APK, 36x64 half-tile bitfield; 141 of 158 arena rows use it"
+    "_geometry_source": "tilemaps/tilemap.csv from the APK, 36x64 half-tile bitfield; 141 of 158 arena rows use it",
+    "king_tower_footprint_tiles": [
+      3.0,
+      3.0
+    ],
+    "_footprint_source": "BLOCKED region in tilemap.csv at cells x15-20,y3-8; PrincessTower has no blocked footprint and uses CollisionRadius=1000 (1 tile)"
   },
   "open_questions": [
     {
@@ -190,6 +195,15 @@
       "why_it_matters": "Bridge width sets how many units can cross abreast and how spells cover a crossing push.",
       "evidence": "Every non-event tilemap in build 150535029 has 2-tile bridges (cells x5-8 and x27-30 across all four river rows), and 141 of 158 arena rows point at that one tilemap. Public descriptions say 2 tiles in Arenas 1-6 and 8-9 but 3 tiles in Arenas 7 and 10-23, which this build's data does not reproduce anywhere.",
       "how_to_resolve": "Likely the public figure describes the visual bridge art, or predates a geometry unification. If a future APK extraction shows a 3-tile tilemap, tests/test_arena_and_battle.py::test_bridges_are_two_tiles_wide_in_this_build will fail and flag it.",
+      "status": "open",
+      "priority": "medium"
+    },
+    {
+      "id": "building-collision-shape",
+      "question": "Do buildings collide as squares or as circles?",
+      "why_it_matters": "Decides whether a unit can clip a building's corner, and how tightly troops pack around a Cannon or Tombstone. Affects every surround and every building-block placement.",
+      "evidence": "The King Tower's blocked footprint in tilemap.csv is a clean 3.0x3.0 tile SQUARE (cells x15-20, y3-8), not a disc, and buildings are placed on tile centres. But the only per-entity extent in the data is CollisionRadius, a single scalar (KingTower 1400, PrincessTower 1000), which is circular by nature. PrincessTower has no blocked footprint at all. cr-sim's fixed.circles_overlap currently treats everything as a circle.",
+      "how_to_resolve": "M3 (collision). Test by walking a troop diagonally at a Cannon's corner and comparing where it stops against the real game.",
       "status": "open",
       "priority": "medium"
     }
