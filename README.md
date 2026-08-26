@@ -12,7 +12,7 @@ Full plan: `../.claude/plans/i-want-to-build-purrfect-kernighan.md`.
 
 | Milestone | State | Notes |
 |-----------|-------|-------|
-| **M0 — data pipeline** | ✅ | APK decoder, csv_logic + TOML ingestion, `EXT` inheritance, level scaling, 122-card registry, stat gate. Every playable card resolves. **50 tests.** |
+| **M0 — data pipeline** | ✅ | APK decoder, csv_logic + TOML ingestion, `EXT` inheritance, level scaling, 122-card registry, stat gate. Every playable card resolves. **64 tests.** |
 | M1 — fixed-point core, arena, tick loop | ⬜ next | |
 | M2 — targeting, attacks, projectiles, towers | ⬜ | |
 | M3 — pathing, collision, pushback | ⬜ | |
@@ -73,6 +73,20 @@ Two traps here, both caught by tests rather than assumed away:
 | Zap / Freeze / Lightning / Log | 192 / 148 / 1057 / 268 | ✅ exact |
 | Poison | 92 dmg/sec over 8s | ✅ exact |
 | Ice Wizard / Electro Wizard | 688 HP 89 dmg / 714 HP | ✅ exact |
+
+**Interaction breakpoints** (`tests/test_interactions.py`) cross-check the same
+numbers a second way — relationships between cards, which is what actually
+proves a damage pipeline. All at equal level:
+
+- P.E.K.K.A one-shots a Musketeer and a Wizard, but **not** a Knight
+- Mini P.E.K.K.A one-shots a Musketeer
+- Fireball alone leaves a Musketeer alive; Fireball + Zap kills her
+- Zap clears Skeletons and Bats but **not** Goblins; the Log clears Goblins
+
+This is how the one genuinely ambiguous number got settled. Public stat sites
+listed P.E.K.K.A at 510 damage where the extracted build says 842; a same-level
+Musketeer has 721 hitpoints, so only 842 reproduces the one-shot everyone knows
+— and it still correctly fails to one-shot a Knight. The public figure is stale.
 
 Match structure comes straight out of `battle_timelines.csv` and matches live
 play exactly: 6 starting elixir, 180s regulation + 120s overtime, and elixir at
@@ -138,7 +152,7 @@ python -m cr_sim.cli cards               # the 122-card playable pool
 python -m cr_sim.cli cards --kind spell --level 14
 python -m cr_sim.cli card Knight         # full resolved stats for one card
 python -m cr_sim.cli validate            # the stat gate + open questions
-python -m pytest                         # 50 tests
+python -m pytest                         # 64 tests
 ```
 
 `freeze` re-cuts the regression baseline (`reference/card_stats.json`). Note the

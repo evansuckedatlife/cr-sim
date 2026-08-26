@@ -43,7 +43,7 @@
       "elixir": 3,
       "rarity": "Common",
       "damage": 122,
-      "radius": 1400,
+      "radius": 3500,
       "damage_source": "projectile"
     },
     "Assassin": {

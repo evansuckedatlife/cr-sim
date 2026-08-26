@@ -20,10 +20,11 @@
       "dps": 168
     },
     "Pekka": {
-      "_source": "confirmed: 3,760 HP at level 11, 1.8s hit speed. NOTE: damage NOT anchored, see open_questions.",
+      "_source": "3760 HP confirmed live; damage 842 established by interaction breakpoints (see tests/test_interactions.py)",
       "elixir": 7,
       "rarity": "Epic",
       "hitpoints": 3760,
+      "damage": 842,
       "hit_speed": 1800
     },
     "ArcherQueen": {
@@ -39,10 +40,12 @@
       "damage": 1484
     },
     "Arrows": {
-      "_source": "well-established tournament-standard value",
+      "_source": "122 is PER PROJECTILE. Arrows lands 3 waves of 10 projectiles 200ms apart, so a stationary target takes more than this.",
       "elixir": 3,
       "rarity": "Common",
-      "damage": 122
+      "damage": 122,
+      "projectile_waves": 3,
+      "multiple_projectiles": 10
     },
     "Fireball": {
       "_source": "tournament-standard damage, 2.5-tile radius, reduced crown-tower damage",
@@ -135,9 +138,16 @@
   "open_questions": [
     {
       "id": "pekka-damage",
-      "question": "P.E.K.K.A damage at display level 11: extracted data gives 842 (base 329 x 2.56); some public stat sites report 510.",
-      "why_it_matters": "If 842 is wrong the whole damage-scaling path is wrong; but HP from the same multiplier verifies exactly on three cards, which argues the extracted value is right and the public tables are stale.",
-      "how_to_resolve": "Open P.E.K.K.A's card page in-game at any level and read 'Damage'; compare against cr-sim's `validate` output for that same level.",
+      "question": "P.E.K.K.A damage at display level 11: extracted data gives 842; some public stat sites report 510.",
+      "status": "resolved",
+      "resolution": "842 is correct. A same-level Musketeer has 721 HP, and P.E.K.K.A one-shotting a Musketeer is a well-established interaction that 510 cannot produce. The breakpoint also cuts the other way correctly: 842 does NOT one-shot a 1766 HP Knight, which matches play. The public 510 figure is stale. Locked in by tests/test_interactions.py.",
+      "how_to_resolve": "(kept for provenance) read Damage on the in-game card page."
+    },
+    {
+      "id": "arrows-effective-damage",
+      "question": "Arrows deals 122 per projectile across 3 waves of 10. How many waves actually land on one stationary unit, and does the in-game 'Damage' figure show per-wave or total?",
+      "why_it_matters": "Decides whether Arrows clears 230 HP Minions, which is its defining use. Affects any spell with ProjectileWaves or MultipleProjectiles (Arrows, Hunter, Princess).",
+      "how_to_resolve": "M5 models waves explicitly; then assert Arrows clears a Minion Horde and Hunter's point-blank burst kills what it should. Until then do not treat `damage` on these three as a single hit.",
       "status": "open"
     }
   ]

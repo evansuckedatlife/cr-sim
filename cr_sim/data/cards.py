@@ -216,6 +216,7 @@ def build_card_registry(data: LogicData) -> CardRegistry:
                     unlock_arena=row.get("UnlockArena"),
                     tid=row.get("TID"),
                     implicit_character=implicit,
+                    raw=row,
                 )
             )
 
@@ -301,6 +302,30 @@ def _character_damage(data: LogicData, character: Mapping[str, Any]) -> tuple[in
     return None, None
 
 
+def _note_multishot(source: Mapping[str, Any], summary: dict[str, Any]) -> None:
+    """Flag entities that fire more than one projectile per attack.
+
+    This matters because the ``damage`` reported everywhere else is the damage
+    of *one* projectile.  Hunter fires 10 pellets from one shot, so his 84 is
+    per-pellet and a point-blank hit is worth roughly ten times that; Arrows
+    lands three separate waves 200ms apart, so a unit that walks out of the
+    radius takes fewer of them.  Leaving these implicit would make the numbers
+    look wrong later for reasons nobody could see.
+    """
+    for key, field_name in (
+        ("multiple_projectiles", "MultipleProjectiles"),
+        ("group_projectiles", "GroupProjectiles"),
+        ("projectile_waves", "ProjectileWaves"),
+        ("projectile_wave_interval", "ProjectileWaveInterval"),
+        ("area_damage_radius", "AreaDamageRadius"),
+    ):
+        value = source.get(field_name)
+        if value is not None:
+            summary[key] = value
+    if summary.get("multiple_projectiles") or summary.get("projectile_waves"):
+        summary["damage_is_per_projectile"] = True
+
+
 def _resolve_opt(data: LogicData, namespace: str, name: Any) -> Mapping[str, Any]:
     if not isinstance(name, str):
         return {}
@@ -322,6 +347,7 @@ def _spell_payload(data: LogicData, scale, level: int, card: Card, summary: dict
     * **over time** -- no damage at all on either, just a buff that carries
       ``DamagePerSecond`` (Poison, Tornado).
     """
+    card_row = card.raw or {}
     projectile = _resolve_opt(data, "PROJECTILE", card.projectile)
     if projectile:
         summary["projectile"] = card.projectile
@@ -362,9 +388,11 @@ def _spell_payload(data: LogicData, scale, level: int, card: Card, summary: dict
             summary["spawns_count"] = _int(source.get("SpawnCharacterCount"), 1)
             break
 
-    radius = projectile.get("Radius") or area.get("Radius")
+    radius = card_row.get("Radius") or projectile.get("Radius") or area.get("Radius")
     if isinstance(radius, int):
         summary["radius"] = radius
+
+    _note_multishot(card_row, summary)
 
     # Damage-over-time lives on the buff the area effect applies.
     buff = _resolve_opt(data, "BUFF", area.get("Buff") or projectile.get("TargetBuff"))
@@ -470,6 +498,8 @@ def card_stat_summary(
         value = character.get(field)
         if value is not None:
             summary[key] = value
+
+    _note_multishot(character, summary)
 
     if summary.get("hit_speed") and summary.get("damage"):
         summary["dps"] = round(summary["damage"] * 1000 / summary["hit_speed"])
