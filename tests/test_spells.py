@@ -336,3 +336,25 @@ def test_a_red_log_rolls_the_other_way(world):
         battle.step()
     assert ahead.hitpoints < ahead.max_hitpoints, "a red Log did not roll toward blue"
     assert behind.hitpoints == behind.max_hitpoints, "a red Log rolled backwards"
+
+
+def test_lightning_fires_exactly_three_bolts(world):
+    """1500ms over a 460ms interval is three, not four.
+
+    A timer started on contact fits four bolts into that window. The count is
+    LifeDuration // HitSpeed, and Lightning is the only effect in the build
+    where the two models disagree -- Poison, Tornado and Earthquake come out
+    identical either way, so nothing else pays for this.
+    """
+    battle = _battle(world, "Lightning")
+    victims = [_victim(battle, world, 9 + i * 0.7, 12, hitpoints=9_999) for i in range(5)]
+    assert battle.play_card(Team.BLUE, "Lightning", tiles(9.7), tiles(12))
+    for _ in range(400):
+        battle.step()
+    struck = [v for v in victims if v.hitpoints < v.max_hitpoints]
+    assert len(struck) == 3, f"{len(struck)} targets struck"
+
+
+def test_capping_the_bolts_does_not_change_poison(world):
+    """The count applies to the cloud; Poison's damage comes from its buff."""
+    assert _cast_and_measure(world, "Poison") == 736

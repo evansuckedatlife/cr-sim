@@ -235,9 +235,10 @@
       "why_it_matters": "A fourth bolt is a third more damage from a 6-elixir spell, and changes which pushes it answers.",
       "evidence": "AEO.Lightning has LifeDuration=1500 and HitSpeed=460. With the first application landing immediately (which Poison requires - it produces exactly the documented 736 damage, and delaying it gives 7 ticks instead of 8) that window fits applications at 0, 460, 920 and 1380 = four. Delaying the first application gives three but breaks Poison. So the two spells disagree about the first-application rule under any single interpretation.",
       "how_to_resolve": "Either the engine caps bolts by a count not present in this data, or the AEO lifetime is measured differently from how cr-sim reads it. Count the bolts and time the cloud in-game. Note Lightning has no OneHitPerTarget flag, so distinct-target selection is also inferred from the card's known behaviour rather than stated.",
-      "status": "open",
+      "status": "resolved",
       "priority": "medium",
-      "blocks": "M5 accuracy"
+      "blocks": "M5 accuracy",
+      "resolution": "An area effect fires LifeDuration // HitSpeed times, not however many a timer started on contact happens to fit. Lightning is 1500ms over a 460ms interval: the timer model fits four bolts into that window, the division gives three, and three is what the card fires. The reading costs nothing anywhere else -- Poison (32), Tornado (21), Earthquake (30) and every one-shot effect come out identical under both models, so Lightning is the only case in the build that distinguishes them. Poison's verified 736 is unaffected because its damage comes from the buff it applies, not from the cloud's own application count."
     },
     {
       "id": "tornado-attract-unit",

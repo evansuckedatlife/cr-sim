@@ -93,6 +93,24 @@ class AreaEffectSpec:
         """One application and done, like Zap."""
         return self.interval_ticks <= 0
 
+    @property
+    def max_applications(self) -> int:
+        """How many times this effect fires over its life.
+
+        ``LifeDuration // HitSpeed``, not however many a timer happens to fit.
+        The two differ for exactly one effect in the build, and it is the one
+        with a published answer: Lightning is 1500ms over a 460ms interval, and
+        a timer started on contact fits four bolts into that window where the
+        card fires three. Every other repeating effect -- Poison at 32, Tornado
+        at 21, Earthquake at 30 -- comes out identical either way, so this
+        costs nothing anywhere else.
+
+        See `lightning-bolt-count` in reference/anchors.json.
+        """
+        if self.interval_ticks <= 0:
+            return 1
+        return max(1, self.life_ticks // self.interval_ticks)
+
     def damage_to(self, is_crown_tower: bool) -> int:
         if not is_crown_tower or not self.crown_tower_damage_percent:
             return self.damage
@@ -234,6 +252,14 @@ class AreaEffect(Entity):
     def tick(self) -> bool:
         """Advance one tick. Returns True if the effect applies this tick."""
         applies = False
+        if self.applications >= self.aspec.max_applications:
+            # Spent. It still occupies the board for the rest of its life --
+            # Lightning's flash lingers past its last bolt -- but it has
+            # nothing left to deliver.
+            self.ticks_left -= 1
+            if self.ticks_left <= 0:
+                self.kill()
+            return False
         if self.ticks_to_next <= 0:
             applies = True
             self.applications += 1
