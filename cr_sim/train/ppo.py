@@ -159,6 +159,7 @@ def train(
     opponents: "Sequence[Any] | None" = None,
     refresh_every: int = 0,
     resume: "dict | None" = None,
+    parallel: "Any | None" = None,
 ) -> ActorCritic:
     """Run PPO and return the trained network.
 
@@ -170,6 +171,13 @@ def train(
     environment. Refreshed every ``refresh_every`` updates so the thing being
     beaten improves alongside the thing beating it; at zero they never change,
     which makes the opponent a fixed sparring partner instead of self-play.
+
+    ``parallel`` is a :class:`~cr_sim.api.vec.CRSimVecEnv` to collect rollouts
+    through instead of stepping local environments one at a time. About 90% of
+    a decision here is simulating the battle, so spreading that over processes
+    is most of the throughput available; the network still runs once per batch
+    in this process. ``make_env`` is still called once, for the observation
+    and action shapes, and is not stepped.
 
     ``resume`` restarts a run that stopped: a checkpoint holding the network
     weights, the optimiser state and how many steps had been taken. The
@@ -186,15 +194,24 @@ def train(
     torch.manual_seed(config.seed)
     rng = np.random.default_rng(config.seed)
 
-    envs = [make_env(i) for i in range(config.num_envs)]
-    nvec = [int(v) for v in envs[0].action_space.nvec]
+    # One local environment either way: its spaces define the network's
+    # shapes, and building it is cheap next to a rollout.
+    probe = make_env(0)
+    nvec = [int(v) for v in probe.action_space.nvec]
     num_actions = int(np.prod(nvec))
 
-    observations = []
-    for index, env in enumerate(envs):
-        obs, _ = env.reset(seed=config.seed * 1000 + index)
-        observations.append(obs)
-    masks = [env.legal_action_mask() for env in envs]
+    if parallel is not None:
+        envs = []
+        observations, masks = parallel.reset(
+            [config.seed * 1000 + i for i in range(config.num_envs)]
+        )
+    else:
+        envs = [probe] + [make_env(i) for i in range(1, config.num_envs)]
+        observations = []
+        for index, env in enumerate(envs):
+            obs, _ = env.reset(seed=config.seed * 1000 + index)
+            observations.append(obs)
+        masks = [env.legal_action_mask() for env in envs]
 
     sample_grid = observations[0]["grid"]
     net = ActorCritic(
@@ -256,24 +273,36 @@ def train(
             mask = _flat_mask(masks)
             action, log_prob, value = net.act(grid.to(device), vector.to(device), mask.to(device))
 
-            rewards = np.zeros(config.num_envs, dtype=np.float32)
-            dones = np.zeros(config.num_envs, dtype=np.float32)
-            for index, env in enumerate(envs):
-                decoded = _unflatten_action(int(action[index]), nvec)
-                obs, reward, terminated, truncated, _ = env.step(decoded)
-                rewards[index] = reward
-                running_return[index] += reward
-                if terminated or truncated:
-                    dones[index] = 1.0
+            decoded = [_unflatten_action(int(a), nvec) for a in action]
+            if parallel is not None:
+                # Terminal episodes were reset inside their worker, so the
+                # observations coming back already belong to the next one and
+                # the crown difference of the finished episode arrives with
+                # them.
+                observations, rewards, dones, crowns, masks = parallel.step(decoded)
+                running_return += rewards
+                for index in np.flatnonzero(dones):
                     episode_returns.append(float(running_return[index]))
-                    episode_crowns.append(
-                        env.battle.players[env.team].crowns
-                        - env.battle.players[env.team.opponent].crowns
-                    )
+                    episode_crowns.append(int(crowns[index]))
                     running_return[index] = 0.0
-                    obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
-                observations[index] = obs
-                masks[index] = env.legal_action_mask()
+            else:
+                rewards = np.zeros(config.num_envs, dtype=np.float32)
+                dones = np.zeros(config.num_envs, dtype=np.float32)
+                for index, env in enumerate(envs):
+                    obs, reward, terminated, truncated, _ = env.step(decoded[index])
+                    rewards[index] = reward
+                    running_return[index] += reward
+                    if terminated or truncated:
+                        dones[index] = 1.0
+                        episode_returns.append(float(running_return[index]))
+                        episode_crowns.append(
+                            env.battle.players[env.team].crowns
+                            - env.battle.players[env.team.opponent].crowns
+                        )
+                        running_return[index] = 0.0
+                        obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
+                    observations[index] = obs
+                    masks[index] = env.legal_action_mask()
 
             buffers["grid"].append(grid)
             buffers["vector"].append(vector)

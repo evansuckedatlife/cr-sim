@@ -39,6 +39,7 @@ state hashes, worker process identity aside.
 
 from __future__ import annotations
 
+import dataclasses
 import multiprocessing as mp
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,20 +75,26 @@ class VecEnvConfig:
     tower_level: int = 11
     reward_shaping_weight: float = 0.01
     max_ticks: int | None = None
+    #: Which reward to build. A weights object rather than a tracker, because
+    #: the tracker holds a battle and this has to survive pickling.
+    reward_weights: Any = None
+    #: Seed for a random opponent, or ``None`` for an idle one. A trained
+    #: opponent cannot come through here -- its weights would have to be
+    #: shipped to every worker on every refresh, which is why self-play runs
+    #: stay single-process for now.
+    opponent_seed: int | None = None
+    #: Environments this worker owns. Sharding several onto one process keeps
+    #: the number of pipes down and amortises the round trip.
+    shard: int = 1
 
 
-def _worker(config: VecEnvConfig, conn) -> None:
-    """Entry point run inside a spawned worker process.
+def _build_env(config: VecEnvConfig, data, levels, registry, index: int) -> CRSimEnv:
+    opponent = None
+    if config.opponent_seed is not None:
+        from ..train.run import _random_opponent
 
-    Everything is rebuilt from ``config`` rather than received pre-built; see
-    the module docstring. The loop below is a minimal RPC server over the
-    pipe: ``("reset", seed)``, ``("step", action)`` and ``("close", None)``
-    are the only messages :class:`CRSimVecEnv` ever sends.
-    """
-    data = LogicData.load(config.build)
-    levels = build_level_table(data)
-    registry = build_card_registry(data)
-    env = CRSimEnv(
+        opponent = _random_opponent(config.opponent_seed + index)
+    return CRSimEnv(
         data,
         levels,
         registry,
@@ -99,8 +106,32 @@ def _worker(config: VecEnvConfig, conn) -> None:
         level=config.level,
         tower_level=config.tower_level,
         reward_shaping_weight=config.reward_shaping_weight,
+        reward_weights=config.reward_weights,
         max_ticks=config.max_ticks,
+        opponent_policy=opponent,
     )
+
+
+def _worker(config: VecEnvConfig, conn) -> None:
+    """Entry point run inside a spawned worker process.
+
+    Everything is rebuilt from ``config`` rather than received pre-built; see
+    the module docstring. The loop is a minimal RPC server over the pipe:
+    ``("reset", seeds)``, ``("step", actions)`` and ``("close", None)``.
+
+    A worker owns ``config.shard`` environments and steps all of them per
+    message, because the round trip costs about as much as a decision does and
+    one message per environment would spend the parallelism on plumbing.
+
+    Terminal episodes are reset *here*, and the crown difference is sent back
+    with the transition. Resetting in the parent would need another round trip
+    at exactly the moment the parent has nothing else to do.
+    """
+    data = LogicData.load(config.build)
+    levels = build_level_table(data)
+    registry = build_card_registry(data)
+    envs = [_build_env(config, data, levels, registry, i) for i in range(config.shard)]
+    rng = np.random.default_rng(config.opponent_seed or 0)
     try:
         while True:
             try:
@@ -108,9 +139,25 @@ def _worker(config: VecEnvConfig, conn) -> None:
             except EOFError:
                 return
             if command == "reset":
-                conn.send(env.reset(seed=payload))
+                out = []
+                for env, seed in zip(envs, payload):
+                    obs, _ = env.reset(seed=seed)
+                    out.append((obs, env.legal_action_mask()))
+                conn.send(out)
             elif command == "step":
-                conn.send(env.step(payload))
+                out = []
+                for env, action in zip(envs, payload):
+                    obs, reward, terminated, truncated, _ = env.step(action)
+                    done = bool(terminated or truncated)
+                    crowns = 0
+                    if done:
+                        crowns = (
+                            env.battle.players[env.team].crowns
+                            - env.battle.players[env.team.opponent].crowns
+                        )
+                        obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
+                    out.append((obs, float(reward), done, crowns, env.legal_action_mask()))
+                conn.send(out)
             elif command == "close":
                 return
             else:  # pragma: no cover - defensive; the parent never sends this
@@ -140,15 +187,34 @@ class CRSimVecEnv:
         config: VecEnvConfig,
         num_envs: int = 8,
         *,
+        workers: int | None = None,
         mp_context: str = "spawn",
     ) -> None:
+        # One process per environment is the obvious arrangement and usually
+        # the wrong one: past the core count the processes fight each other
+        # for CPU and the pipes multiply for nothing. Environments are shared
+        # out over the workers instead, and each worker steps its whole share
+        # per message.
+        workers = workers or num_envs
+        if num_envs % workers:
+            raise ValueError(f"{num_envs} environments do not divide over {workers} workers")
         self.num_envs = num_envs
+        self._shard = num_envs // workers
         self._ctx = mp.get_context(mp_context)
         self._conns = []
         self._procs = []
-        for _ in range(num_envs):
+        shard_config = dataclasses.replace(config, shard=self._shard)
+        for worker in range(workers):
             parent_conn, child_conn = self._ctx.Pipe()
-            proc = self._ctx.Process(target=_worker, args=(config, child_conn), daemon=True)
+            # Each worker gets a distinct opponent seed, or eight parallel
+            # battles would face an identical sequence of placements and
+            # report a smoother result than the policy has earned.
+            per = shard_config
+            if config.opponent_seed is not None:
+                per = dataclasses.replace(
+                    shard_config, opponent_seed=config.opponent_seed + worker * 1000
+                )
+            proc = self._ctx.Process(target=_worker, args=(per, child_conn), daemon=True)
             proc.start()
             # Only the child needs its end; holding it open here too would
             # leave the pipe's write side alive in this process after the
@@ -160,28 +226,46 @@ class CRSimVecEnv:
         self._closed = False
 
     def reset(self, seeds: Sequence[int | None] | None = None):
+        """Reset every environment. Returns ``(observations, masks)``."""
         seeds = list(seeds) if seeds is not None else [None] * self.num_envs
         if len(seeds) != self.num_envs:
             raise ValueError(f"expected {self.num_envs} seeds, got {len(seeds)}")
-        for conn, seed in zip(self._conns, seeds):
-            conn.send(("reset", seed))
-        results = [conn.recv() for conn in self._conns]
-        obs = [r[0] for r in results]
-        infos = [r[1] for r in results]
-        return obs, infos
+        for i, conn in enumerate(self._conns):
+            conn.send(("reset", seeds[i * self._shard:(i + 1) * self._shard]))
+        obs, masks = [], []
+        for conn in self._conns:
+            for o, m in conn.recv():
+                obs.append(o)
+                masks.append(m)
+        return obs, masks
 
     def step(self, actions: Sequence[Sequence[int]]):
+        """Step every environment once.
+
+        Returns ``(observations, rewards, dones, crowns, masks)``. An episode
+        that ended has already been reset inside its worker, so the returned
+        observation is the first of the next episode and ``crowns`` carries
+        the finished one's result -- the only thing about it the caller still
+        needs.
+        """
         if len(actions) != self.num_envs:
             raise ValueError(f"expected {self.num_envs} actions, got {len(actions)}")
-        for conn, action in zip(self._conns, actions):
-            conn.send(("step", action))
-        results = [conn.recv() for conn in self._conns]
-        obs = [r[0] for r in results]
-        reward = np.asarray([r[1] for r in results], dtype=np.float32)
-        terminated = np.asarray([r[2] for r in results], dtype=bool)
-        truncated = np.asarray([r[3] for r in results], dtype=bool)
-        infos: list[dict[str, Any]] = [r[4] for r in results]
-        return obs, reward, terminated, truncated, infos
+        for i, conn in enumerate(self._conns):
+            conn.send(("step", list(actions[i * self._shard:(i + 1) * self._shard])))
+        obs, masks = [], []
+        rewards = np.zeros(self.num_envs, dtype=np.float32)
+        dones = np.zeros(self.num_envs, dtype=np.float32)
+        crowns = np.zeros(self.num_envs, dtype=np.int64)
+        index = 0
+        for conn in self._conns:
+            for o, r, d, c, m in conn.recv():
+                obs.append(o)
+                masks.append(m)
+                rewards[index] = r
+                dones[index] = 1.0 if d else 0.0
+                crowns[index] = c
+                index += 1
+        return obs, rewards, dones, crowns, masks
 
     def close(self) -> None:
         if self._closed:

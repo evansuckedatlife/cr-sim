@@ -72,6 +72,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cr-sim-train")
     parser.add_argument("--steps", type=int, default=200_000)
     parser.add_argument("--envs", type=int, default=8, help="parallel battles per rollout")
+    parser.add_argument(
+        "--workers", type=int, default=0,
+        help="processes to spread the environments over. 0 runs them in this "
+             "process, one after another. About 90%% of a decision is "
+             "simulating the battle, so this is most of the throughput "
+             "available -- but it cannot carry a self-play opponent, whose "
+             "weights would have to be shipped to every worker on each "
+             "refresh, so it applies to --opponent random or idle.",
+    )
     parser.add_argument("--horizon", type=int, default=256)
     parser.add_argument("--tps", type=int, default=20, help="engine tick rate")
     parser.add_argument("--frame-skip", type=int, default=10, help="ticks per decision")
@@ -322,17 +331,47 @@ def main(argv: list[str] | None = None) -> int:
                 lambda: _env(None), episodes=args.eval_episodes
             )
 
-        net = train(
-            make_env, config,
-            on_update=record,
-            on_net=_on_net,
-            opponents=snapshots,
-            refresh_every=args.refresh_every,
-            # The optimiser itself, not its state at startup: a checkpoint
-            # needs the moment estimates as they are when it is written.
-            on_optimiser=lambda o: optimiser_holder.__setitem__("optimiser", o),
-            resume=resume_state,
-        )
+        parallel = None
+        if args.workers:
+            if args.opponent == "self":
+                print("--workers cannot carry a self-play opponent; "
+                      "use --opponent random, or drop --workers", file=sys.stderr)
+                return 1
+            from ..api.vec import CRSimVecEnv, VecEnvConfig
+
+            parallel = CRSimVecEnv(
+                VecEnvConfig(
+                    build=args.build, blue_deck=DEFAULT_DECK, red_deck=DEFAULT_DECK,
+                    ticks_per_second=args.tps, frame_skip=args.frame_skip,
+                    max_ticks=args.tps * args.match_seconds,
+                    reward_shaping_weight=args.shaping,
+                    reward_weights=_reward_weights(args),
+                    opponent_seed=(args.seed * 1000 if args.opponent == "random" else None),
+                ),
+                num_envs=args.envs,
+                workers=args.workers,
+            )
+
+        try:
+            net = train(
+                make_env, config,
+                on_update=record,
+                on_net=_on_net,
+                opponents=snapshots,
+                refresh_every=args.refresh_every,
+                # The optimiser itself, not its state at startup: a checkpoint
+                # needs the moment estimates as they are when it is written.
+                on_optimiser=lambda o: optimiser_holder.__setitem__("optimiser", o),
+                resume=resume_state,
+                parallel=parallel,
+            )
+        finally:
+            # Worker processes are daemons, so they would die with the parent
+            # anyway -- but not before a crash leaves eight of them holding
+            # CPU until the interpreter finally exits.
+            if parallel is not None:
+                parallel.close()
+
 
     torch.save({"state_dict": net.state_dict()}, out / "final.pt")
     elapsed = time.perf_counter() - started
