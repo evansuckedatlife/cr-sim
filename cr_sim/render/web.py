@@ -108,10 +108,11 @@ _PAGE = """<!doctype html>
     <p><input id="s" type="range" min="0" max="0" value="0"></p>
     <p><button id="play">play</button>
        <button id="slow">0.5x</button>
-       <button id="fast">4x</button></p>
+       <button id="fast">4x</button>
+       <button id="hb">hitboxes</button></p>
     <div class="legend">
       <b>blue</b> defends the top, <b>red</b> the bottom.<br>
-      units are drawn at their real collision radius.<br>
+      art is enlarged for legibility; the thin ring is the real hitbox.<br>
       dashed ring = still deploying; dimmed card = unaffordable.<br>
       {meta}
     </div>
@@ -125,6 +126,8 @@ const TPS = {tps};
 const REAL_TPS = {real_tps};
 const ICON_SRC = {icons};
 const COSTS = {costs};
+const ART_SCALE = {art_scale};
+let SHOW_HITBOX = true;
 const ICONS = {{}};
 const HW = ARENA.half_width, HH = ARENA.half_height;
 const c = document.getElementById('c'), g = c.getContext('2d');
@@ -156,9 +159,11 @@ function draw(i) {{
     const [id, team, kind, x, y, hp, mhp, deploying, name, cr] = e;
     const cx = px(x), cy = px(y);
     const tower = kind === 2;
-    // Draw each unit at its true collision radius, so a Giant reads as bigger
-    // than a Skeleton and overlaps are visible rather than implied.
-    const r = Math.max(tower ? SCALE : 7, px(cr || 0));
+    // Two radii. The hitbox is the unit's true CollisionRadius; the art is
+    // drawn larger so the card is actually recognisable at this zoom. The
+    // hitbox is still outlined, so nothing about the real footprint is lost.
+    const hit = Math.max(3, px(cr || 0));
+    const r = Math.max(tower ? SCALE * 1.4 : 11, hit * ART_SCALE);
     const img = ICONS[name];
     g.globalAlpha = deploying ? 0.5 : 1;
     // Team ring first, so the art sits on a coloured disc and ownership stays
@@ -174,6 +179,10 @@ function draw(i) {{
       g.restore();
       g.lineWidth = 2; g.strokeStyle = team === 0 ? '#9dc2ff' : '#ffb0b8';
       g.beginPath(); g.arc(cx, cy, r, 0, 7); g.stroke();
+    }}
+    if (SHOW_HITBOX && hit < r - 2) {{
+      g.lineWidth = 1; g.strokeStyle = 'rgba(255,255,255,.30)';
+      g.beginPath(); g.arc(cx, cy, hit, 0, 7); g.stroke();
     }}
     g.globalAlpha = 1;
     if (deploying) {{
@@ -248,6 +257,7 @@ function loop(ts) {{
 }}
 slider.oninput = () => draw(+slider.value);
 $('play').onclick = e => {{ playing = !playing; e.target.textContent = playing ? 'pause' : 'play'; }};
+$('hb').onclick = () => {{ SHOW_HITBOX = !SHOW_HITBOX; draw(+slider.value); }};
 $('slow').onclick = () => speed = 0.5;
 $('fast').onclick = () => speed = 4;
 let pending = 0;
@@ -269,7 +279,8 @@ def render_replay(
     path: str | Path,
     *,
     ticks_per_second: float = 60,
-    scale: int = 13,
+    scale: int = 15,
+    art_scale: float = 2.2,
     meta: str = "",
     real_tps: int | None = None,
     icons: Mapping[str, str] | None = None,
@@ -309,6 +320,7 @@ def render_replay(
         arena=json.dumps(arena_payload, separators=(",", ":")),
         frames=json.dumps(list(frames), separators=(",", ":")),
         scale=scale,
+        art_scale=art_scale,
         tps=ticks_per_second,
         cw=arena.half_width * scale,
         ch=arena.half_height * scale,

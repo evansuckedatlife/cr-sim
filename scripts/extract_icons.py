@@ -38,7 +38,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("target", type=Path, help="APK file, or a directory of split APKs")
     ap.add_argument("--out", type=Path, default=Path("data_cache/icons"))
-    ap.add_argument("--size", type=int, default=64)
+    ap.add_argument("--size", type=int, default=160)
+    ap.add_argument(
+        "--no-crop",
+        action="store_true",
+        help="keep the original transparent padding instead of trimming it",
+    )
     args = ap.parse_args()
 
     try:
@@ -69,6 +74,21 @@ def main() -> int:
                 except Exception as exc:  # noqa: BLE001
                     print(f"  !! {member}: {exc}")
                     continue
+                # Card art carries a lot of empty margin -- Knight's character
+                # fills only 59% of its PNG. Drawn inside a circle that margin
+                # is doubly wasted, so trim to the visible pixels and pad back
+                # to a square, which keeps the aspect ratio while letting the
+                # character fill the frame.
+                if not args.no_crop:
+                    bbox = image.getbbox()
+                    if bbox:
+                        image = image.crop(bbox)
+                    side = max(image.size)
+                    square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+                    square.paste(
+                        image, ((side - image.width) // 2, (side - image.height) // 2)
+                    )
+                    image = square
                 image.thumbnail((args.size, args.size), Image.LANCZOS)
                 buffer = io.BytesIO()
                 # optimize + max compression: these are tiny and embedded as

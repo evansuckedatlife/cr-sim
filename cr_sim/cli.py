@@ -238,6 +238,8 @@ def cmd_battle(args) -> int:
             real_tps=args.tps,
             icons=build_icon_map(registry),
             costs={c.name: c.mana_cost for c in registry.standard()},
+            scale=args.scale,
+            art_scale=args.icon_scale,
             meta=f"seed {args.seed} &middot; {args.tps} TPS &middot; level {args.level}",
         )
         print(f"\nwrote {out}  ({len(battle.frames)} frames) - open it in a browser")
@@ -313,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ascii", action="store_true", help="print a terminal snapshot")
     p.add_argument("--frame-interval", type=int, default=3, help="record 1 viewer frame every N ticks")
     p.add_argument("--interval", type=float, default=2.5, help="seconds between scripted deployments")
+    p.add_argument("--scale", type=int, default=15, help="viewer pixels per half-tile")
+    p.add_argument("--icon-scale", type=float, default=2.2, help="art size relative to the real hitbox")
     p.set_defaults(func=cmd_battle)
 
     p = sub.add_parser("arena", help="print the arena geometry")
