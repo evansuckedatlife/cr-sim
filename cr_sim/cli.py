@@ -145,6 +145,52 @@ def _resolve_deck(name: str) -> tuple[str, ...]:
     return tuple(part.strip() for part in name.split(",") if part.strip())
 
 
+def _aim(battle, team, card, lanes, rng):
+    """Pick somewhere sensible to put a card.
+
+    Troops go down in their owner's half, as they must. A spell is aimed at the
+    enemy instead -- at the biggest clump of them if there is one, otherwise at
+    a tower. Dropping spells on your own side, which is what the deploy
+    positions do, means every one of them lands on empty grass.
+
+    This is placement, not tactics: it exists so a replay shows spells doing
+    something. A real agent arrives with M8.
+    """
+    from .engine.entity import EntityKind, Team
+    from .engine.fixed import to_tiles
+
+    is_spell = card is not None and card.kind is CardKind.SPELL
+    if not is_spell:
+        lane = lanes[rng.below(len(lanes))]
+        return lane, (11.0 + rng.below(4) if team is Team.BLUE else 21.0 - rng.below(4))
+
+    enemies = [
+        e
+        for e in battle.entities
+        if not e.dead
+        and e.team is not team
+        and e.kind is EntityKind.TROOP
+        and not e.is_deploying
+    ]
+    if enemies:
+        # The unit with the most company within a couple of tiles.
+        def crowd(target):
+            return sum(
+                1
+                for other in enemies
+                if abs(other.x - target.x) < 2 * 18000 and abs(other.y - target.y) < 2 * 18000
+            )
+
+        best = max(enemies, key=lambda e: (crowd(e), e.id))
+        return to_tiles(best.x), to_tiles(best.y)
+
+    towers = [t for t in battle._towers[team.opponent] if not t.dead and "King" not in t.spec.name]
+    if towers:
+        target = towers[rng.below(len(towers))]
+        return to_tiles(target.x), to_tiles(target.y)
+    return None
+
+
 def cmd_battle(args) -> int:
     from .engine.battle import Battle, BattleConfig
     from .engine.entity import Team
@@ -203,8 +249,11 @@ def cmd_battle(args) -> int:
             if not affordable:
                 continue
             choice = affordable[rng.below(len(affordable))]
-            lane = lanes[rng.below(len(lanes))]
-            y = 11.0 + rng.below(4) if team is Team.BLUE else 21.0 - rng.below(4)
+            card = registry.get(choice)
+            spot = _aim(battle, team, card, lanes, rng)
+            if spot is None:
+                continue
+            lane, y = spot
             if battle.play_card(team, choice, int(lane * tile), int(y * tile)):
                 played.append(
                     f"t={battle.tick / args.tps:>5.1f}s {team.name:5} {choice:12} @({lane}, {y})"

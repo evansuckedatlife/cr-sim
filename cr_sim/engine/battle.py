@@ -355,7 +355,17 @@ class Battle:
             return False
         if not player.elixir.can_afford(card.mana_cost):
             return False
-        if not self.arena.can_deploy(team, x, y):
+        # Honour the card's own placement rules. Without this a Fireball
+        # cannot be cast on the enemy half at all -- the only place anyone
+        # would ever cast one -- so every spell lands in its owner's own
+        # territory and hits nothing.
+        if not self.arena.can_deploy(
+            team,
+            x,
+            y,
+            anywhere=card.can_deploy_on_enemy_side,
+            on_water=card.can_place_on_water,
+        ):
             return False
 
         player.elixir.spend(card.mana_cost)

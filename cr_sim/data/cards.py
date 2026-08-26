@@ -82,6 +82,12 @@ class Card:
 
     unlock_arena: str | None = None
     tid: str | None = None
+    #: Where the card may legally be placed. Spells and the two tunnelling
+    #: troops (Miner, Goblin Drill) may be put down in enemy territory;
+    #: everything else is confined to its owner's half.
+    can_deploy_on_enemy_side: bool = False
+    #: Area spells may be cast over the river, where no troop can stand.
+    can_place_on_water: bool = False
     #: Set when the card has no explicit summon field but a character of the
     #: same name exists -- the game's implicit convention.
     implicit_character: str | None = None
@@ -215,6 +221,8 @@ def build_card_registry(data: LogicData) -> CardRegistry:
                     area_effect_object=row.get("AreaEffectObject"),
                     unlock_arena=row.get("UnlockArena"),
                     tid=row.get("TID"),
+                    can_deploy_on_enemy_side=row.get("CanDeployOnEnemySide") is True,
+                    can_place_on_water=row.get("CanPlaceOnWater") is True,
                     implicit_character=implicit,
                     raw=row,
                 )
