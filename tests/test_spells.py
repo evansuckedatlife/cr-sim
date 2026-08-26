@@ -244,3 +244,95 @@ def test_lightning_strikes_the_biggest_targets_and_not_the_same_one_twice(world)
         hits = [e for e in battle.damage_log if e.target_id == victim.id]
         assert len(hits) == 1, f"struck {len(hits)} times"
     assert small.hitpoints < small.max_hitpoints
+
+
+# ------------------------------------------------------------------ the roll
+
+
+def test_the_log_sweeps_a_lane_rather_than_landing_at_a_point(world):
+    """The throw only decides where the roll starts.
+
+    ProjectileRange is 10.1 tiles, so the Log catches units nowhere near where
+    it was cast. Detonating at the throw point -- which is what this engine did
+    until the roll was modelled -- hits one of these five instead of all five,
+    and badly understates the card against exactly the spread push it exists to
+    answer.
+    """
+    battle = _battle(world, "Log")
+    line = [_victim(battle, world, 9, y, unit="Goblin") for y in (13, 15, 17, 19, 21)]
+    assert battle.play_card(Team.BLUE, "Log", tiles(9), tiles(12))
+    for _ in range(400):
+        battle.step()
+    for goblin in line:
+        assert goblin.hitpoints < goblin.max_hitpoints, "the roll missed a unit in its lane"
+
+
+def test_the_roll_hits_each_unit_exactly_once(world):
+    """Damaging every tick it overlaps would scale with how slowly it passes."""
+    battle = _battle(world, "Log")
+    victim = _victim(battle, world, 9, 14, unit="Goblin")
+    battle.play_card(Team.BLUE, "Log", tiles(9), tiles(12))
+    for _ in range(400):
+        battle.step()
+    hits = [e for e in battle.damage_log if e.target_id == victim.id]
+    assert len(hits) == 1, f"the roll hit one unit {len(hits)} times"
+
+
+def test_the_roll_is_a_lane_and_not_a_circle(world):
+    """1.95 tiles across against 0.6 deep -- a log lying on its side.
+
+    A round splash of the same area would catch the unit standing four tiles
+    off to the side, which the card does not.
+    """
+    battle = _battle(world, "Log")
+    in_lane = _victim(battle, world, 9, 15, unit="Goblin")
+    off_lane = _victim(battle, world, 13, 15, unit="Goblin")
+    battle.play_card(Team.BLUE, "Log", tiles(9), tiles(12))
+    for _ in range(400):
+        battle.step()
+    assert in_lane.hitpoints < in_lane.max_hitpoints
+    assert off_lane.hitpoints == off_lane.max_hitpoints, "the roll hit off its lane"
+
+
+def test_the_log_does_not_touch_air(world):
+    """It rolls along the ground. Minions fly over it."""
+    battle = _battle(world, "Log")
+    minion = _victim(battle, world, 9, 15, unit="Minion")
+    minion.flying = True
+    battle.play_card(Team.BLUE, "Log", tiles(9), tiles(12))
+    for _ in range(400):
+        battle.step()
+    assert minion.hitpoints == minion.max_hitpoints
+
+
+def test_the_roll_shoves_what_it_passes_over_back_down_the_lane(world):
+    """Pushback 700 -- 0.7 tiles, along the roll rather than away from a centre."""
+    battle = _battle(world, "Log")
+    victim = _victim(battle, world, 9, 15, unit="Goblin")
+    start = victim.y
+    battle.play_card(Team.BLUE, "Log", tiles(9), tiles(12))
+    for _ in range(400):
+        battle.step()
+    assert victim.y > start, "the roll did not push its victim back"
+
+
+def test_a_red_log_rolls_the_other_way(world):
+    """A log rolls away from whoever threw it, never back toward its own side."""
+    data, levels, registry = world
+    battle = Battle(
+        data, levels, registry,
+        BattleConfig(seed=1, blue_deck=("Knight",) * 8, red_deck=("Log",) * 8),
+    )
+    battle.entities = [e for e in battle.entities if e.kind is not EntityKind.TOWER]
+    battle._towers = {Team.BLUE: [], Team.RED: []}
+    battle.players[Team.RED].elixir.add(10)
+
+    behind = _victim(battle, world, 9, 22, unit="Goblin")   # further up, red's own side
+    ahead = _victim(battle, world, 9, 16, unit="Goblin")    # down the board, toward blue
+    for victim in (behind, ahead):
+        victim.team = Team.BLUE
+    assert battle.play_card(Team.RED, "Log", tiles(9), tiles(20))
+    for _ in range(400):
+        battle.step()
+    assert ahead.hitpoints < ahead.max_hitpoints, "a red Log did not roll toward blue"
+    assert behind.hitpoints == behind.max_hitpoints, "a red Log rolled backwards"

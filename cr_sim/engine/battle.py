@@ -43,7 +43,12 @@ from .combat import (
 from .pathing import Route, crosses_river, route_to, step_towards
 from .areaeffects import AreaEffect, AreaEffectSpec, build_area_effect_spec
 from .buffs import BuffSpec, BuffState, apply_delta, build_buff_spec
-from .projectiles import Projectile, ProjectileSpec, build_projectile_spec
+from .projectiles import (
+    Projectile,
+    ProjectileSpec,
+    RollingProjectile,
+    build_projectile_spec,
+)
 from .spells import SpellPlan, plan_spell
 from .targeting import acquire_target, in_attack_range, should_keep_target
 from .movement import resolve_collisions
@@ -902,12 +907,61 @@ class Battle:
         for entity in self.entities:
             if entity.kind is not EntityKind.PROJECTILE or entity.dead:
                 continue
+            if isinstance(entity, RollingProjectile):
+                # A roll hits continuously along its path rather than once at
+                # the end, so it is swept every tick and only retired when it
+                # runs out of range.
+                finished = entity.advance()
+                self._sweep_roll(entity)
+                if finished:
+                    entity.kill()
+                continue
             if entity.advance(self._entity(entity.target_id)):
                 arrivals.append(entity)
 
         for shot in arrivals:
             self._impact(shot)
             shot.kill()
+
+    def _sweep_roll(self, roll: RollingProjectile) -> None:
+        """Damage and shove everything the roll is currently over.
+
+        Each enemy is hit once for the whole pass. Damaging every tick it
+        overlaps would scale the Log's damage with how slowly it crosses a
+        unit, which is neither what the card does nor a number the data
+        contains.
+        """
+        pspec = roll.pspec
+        reach = max(pspec.roll_radius_x, pspec.roll_radius_y)
+        for victim in list(self._index.near(roll.x, roll.y, reach)):
+            if victim.dead or victim.team is roll.team or victim.id in roll.struck:
+                continue
+            if victim.kind is EntityKind.PROJECTILE or not victim.is_targetable:
+                continue
+            if victim.flying and not pspec.aoe_to_air:
+                continue
+            if not victim.flying and not pspec.aoe_to_ground:
+                continue
+            if not roll.covers(victim):
+                continue
+            roll.struck.add(victim.id)
+            dealt = victim.apply_damage(
+                pspec.damage_to(is_crown_tower=victim.kind is EntityKind.TOWER)
+            )
+            if dealt:
+                self.damage_log.append(
+                    DamageEvent(
+                        tick=self.tick,
+                        attacker_id=roll.owner_id,
+                        target_id=victim.id,
+                        amount=dealt,
+                        lethal=victim.hitpoints <= 0,
+                    )
+                )
+            if pspec.pushback and victim.kind is EntityKind.TROOP:
+                # Knockback is along the roll, so a Log pushes a push back down
+                # the lane rather than scattering it sideways.
+                victim.y += pspec.pushback * roll.direction
 
     def _strike(self, effect: AreaEffect) -> None:
         """Fire an area effect's own projectile at what is inside it.
@@ -948,6 +1002,22 @@ class Battle:
     def _impact(self, shot: Projectile) -> None:
         """Deliver a projectile's payload where it landed."""
         pspec = shot.pspec
+        if pspec.rolls and not isinstance(shot, RollingProjectile):
+            # The throw only chose where the roll starts. Handing off here
+            # rather than detonating is what makes the Log a lane-clearing
+            # spell instead of a small splash where it happened to land.
+            self._register(
+                RollingProjectile(
+                    pspec=pspec,
+                    team=shot.team,
+                    x=shot.x,
+                    y=shot.y,
+                    direction=1 if shot.team is Team.BLUE else -1,
+                    owner_id=shot.owner_id,
+                    spawn_tick=self.tick,
+                )
+            )
+            return
         if pspec.area_effect:
             # Lightning and friends: the shot is only the delivery, and what it
             # leaves behind is the actual spell.

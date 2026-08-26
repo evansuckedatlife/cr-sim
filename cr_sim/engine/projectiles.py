@@ -36,7 +36,13 @@ from .constants import TickClock
 from .entity import Entity, EntityKind, Team
 from .fixed import SUBTILES_PER_TILE, distance, milli_tiles, point_along
 
-__all__ = ["ProjectileSpec", "build_projectile_spec", "Projectile", "flight_ticks"]
+__all__ = [
+    "ProjectileSpec",
+    "build_projectile_spec",
+    "Projectile",
+    "RollingProjectile",
+    "flight_ticks",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +65,23 @@ class ProjectileSpec:
     spawn_count: int
     #: An area effect this shot leaves where it lands, if any.
     area_effect: str | None = None
+
+    #: How far this shot *rolls* after it lands, in subtiles. The Log and
+    #: Barbarian Barrel are thrown to a point and then travel on from it,
+    #: sweeping everything in a lane. Zero for everything that simply detonates.
+    roll_range: int = 0
+    #: Half-extents of the rolling hit area. The Log's are 1.95 tiles across
+    #: and 0.6 deep -- wide and thin, which is the shape of a log lying on its
+    #: side, and the reason it clears a spread-out line of troops that a round
+    #: splash radius would miss.
+    roll_radius_x: int = 0
+    roll_radius_y: int = 0
+    #: Pushback applies to everything the roll touches, not only what it kills.
+    pushback_all: bool = False
+
+    @property
+    def rolls(self) -> bool:
+        return self.roll_range > 0
 
     @property
     def is_splash(self) -> bool:
@@ -108,12 +131,18 @@ def build_projectile_spec(
     # spawning the thing that does. The Log is thrown, lands, and *becomes* a
     # rolling log; Barbarian Log does the same before dropping a Barbarian.
     # Follow the chain for the payload rather than reporting zero damage.
-    #
-    # NOTE: the roll itself is not simulated -- the damage is delivered where
-    # the throw lands rather than swept along the lane behind it. That
-    # understates the Log against a spread-out push and is recorded as a known
-    # limitation rather than passed off as complete.
+    # The roll itself is modelled: see :class:`RollingProjectile`, which the
+    # throw hands off to on impact.
+    # The rolling stage carries its own geometry, which is nothing like the
+    # throw's: the throw has a splash radius, the roll has a range and a lane.
+    roll: Mapping[str, Any] = {}
     spawned = raw.get("SpawnProjectile")
+    if isinstance(spawned, str):
+        try:
+            roll = data.resolve(f"PROJECTILE.{spawned}")
+        except (UnknownEntity, KeyError):
+            roll = {}
+
     if not damage and isinstance(spawned, str):
         try:
             follow: Mapping[str, Any] = data.resolve(f"PROJECTILE.{spawned}")
@@ -139,6 +168,10 @@ def build_projectile_spec(
             raw.get("SpawnCharacter") if isinstance(raw.get("SpawnCharacter"), str) else None
         ),
         spawn_count=_int(raw.get("SpawnCharacterCount"), 1),
+        roll_range=milli_tiles(_int(roll.get("ProjectileRange"))),
+        roll_radius_x=milli_tiles(_int(roll.get("ProjectileRadius"))),
+        roll_radius_y=milli_tiles(_int(roll.get("ProjectileRadiusY"))),
+        pushback_all=_bool(roll.get("PushbackAll")),
         area_effect=(
             raw.get("SpawnAreaEffectObject")
             if isinstance(raw.get("SpawnAreaEffectObject"), str)
@@ -230,3 +263,69 @@ class Projectile(Entity):
             *self.origin, self.target_x, self.target_y, self.travelled, self.total
         )
         return False
+
+
+class RollingProjectile(Entity):
+    """A shot that keeps going after it lands, sweeping a lane.
+
+    The Log's damage is not delivered where it is thrown -- the throw only sets
+    where the roll *starts*. It then travels ``ProjectileRange`` (10.1 tiles for
+    the Log, 4.5 for Barbarian Barrel) at its own speed, hitting each enemy it
+    passes over exactly once and shoving them back.
+
+    Treating it as a point detonation, as this engine did until now,
+    consistently understates it: the whole reason to play a Log into a spread
+    push is that it catches units the throw never lands near.
+
+    The hit area is an ellipse rather than a circle because the data gives two
+    radii -- 1.95 tiles across against 0.6 deep. That is a log lying on its
+    side, and it is why the card clears a line of Goblins but not a column.
+    """
+
+    __slots__ = ("pspec", "owner_id", "direction", "travelled", "struck")
+
+    def __init__(
+        self,
+        *,
+        pspec: ProjectileSpec,
+        team: Team,
+        x: int,
+        y: int,
+        direction: int,
+        owner_id: int,
+        spawn_tick: int,
+    ) -> None:
+        super().__init__(
+            kind=EntityKind.PROJECTILE, team=team, x=x, y=y, hitpoints=1, spawn_tick=spawn_tick
+        )
+        self.pspec = pspec
+        self.owner_id = owner_id
+        #: +1 rolls up the board, -1 down it. A log rolls away from whoever
+        #: threw it; it never comes back toward its own side.
+        self.direction = direction
+        self.travelled = 0
+        #: Each enemy is hit once. Without this the roll would tick damage into
+        #: anything it moved slowly past, turning a 105-damage spell into a
+        #: multi-second grinder.
+        self.struck: set[int] = set()
+
+    def advance(self, _target: Entity | None = None) -> bool:
+        """Roll one tick. Returns True when it has run out of range."""
+        step = self.pspec.speed_per_tick
+        self.travelled += step
+        self.y += step * self.direction
+        return self.travelled >= self.pspec.roll_range
+
+    def covers(self, entity: Entity) -> bool:
+        """Whether the rolling area currently overlaps ``entity``.
+
+        Compared as an ellipse, cross-multiplied so it stays in integers like
+        every other distance test in this engine.
+        """
+        bx = self.pspec.roll_radius_x + entity.collision_radius
+        by = self.pspec.roll_radius_y + entity.collision_radius
+        if bx <= 0 or by <= 0:
+            return False
+        dx = entity.x - self.x
+        dy = entity.y - self.y
+        return dx * dx * by * by + dy * dy * bx * bx <= bx * bx * by * by
