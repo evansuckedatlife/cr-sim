@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from .arena import Arena
 from .fixed import distance, point_along
 
-__all__ = ["Route", "route_to"]
+__all__ = ["Route", "route_to", "crosses_river", "step_towards"]
 
 
 @dataclass(slots=True)
@@ -118,6 +118,28 @@ def route_to(
         route.waypoints = [(centre_x, near), (centre_x, far), goal]
     route.start(start)
     return route
+
+
+def step_towards(
+    start: tuple[int, int], goal: tuple[int, int], step: int
+) -> tuple[int, int]:
+    """Move ``step`` subtiles straight at ``goal``.
+
+    Chasing a moving target does not want a route. A route is a plan, and a
+    plan whose destination moves every tick has to be rebuilt every tick --
+    which is exactly what it was doing, allocating a fresh Route per chasing
+    unit per tick for a path that is a straight line anyway. Routes are for the
+    one thing that genuinely needs planning: crossing the river.
+    """
+    gap = distance(*start, *goal)
+    if gap <= step or gap == 0:
+        return goal
+    return point_along(*start, *goal, step, gap)
+
+
+def crosses_river(arena: Arena, start_y: int, goal_y: int) -> bool:
+    """Whether a straight line between these two points would cross the water."""
+    return _crosses_river(arena, start_y, goal_y)
 
 
 def _crosses_river(arena: Arena, start_y: int, goal_y: int) -> bool:

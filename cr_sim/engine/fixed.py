@@ -39,6 +39,8 @@ __all__ = [
     "within_range",
     "point_along",
     "clamp",
+    "ring_offsets",
+    "pack_offsets",
 ]
 
 #: Subtiles in one arena tile. See the module docstring for why 18000.
@@ -121,6 +123,51 @@ def point_along(
 
 def clamp(value: int, low: int, high: int) -> int:
     return low if value < low else high if value > high else value
+
+
+def pack_offsets(count: int, unit_radius: int) -> tuple[tuple[int, int], ...]:
+    """Lay ``count`` units out in concentric rings so none overlap.
+
+    Some multi-unit cards ship no ``SummonRadius`` at all -- Skeleton Army
+    (fifteen units), Minions, Archers. A ring of one radius cannot hold fifteen
+    skeletons without overlap, and stacking them is not a state the board can
+    represent, so the layout is derived from how much room the units need:
+    rings spaced two radii apart, each holding as many as its circumference
+    allows.
+
+    This is a derived default, not a value from the data. It only applies where
+    the card specifies nothing.
+    """
+    if count <= 1 or unit_radius <= 0:
+        return ((0, 0),) * max(1, count)
+
+    spacing = 2 * unit_radius
+    if count <= 8:
+        # A small group reads as a formation, not a blob: put everyone on one
+        # ring sized so neighbours just touch, rather than one in the middle.
+        radius = max(spacing, round(spacing / (2 * math.sin(math.pi / count))))
+        step = 2 * math.pi / count
+        return tuple(
+            (round(radius * math.cos(step * i)), round(radius * math.sin(step * i)))
+            for i in range(count)
+        )
+
+    out: list[tuple[int, int]] = [(0, 0)]
+    ring = 1
+    while len(out) < count:
+        radius = ring * spacing
+        # How many units of this size fit around a circle of this radius.
+        capacity = max(1, int(math.pi * 2 * radius // spacing))
+        take = min(capacity, count - len(out))
+        step = 2 * math.pi / take
+        # Offset alternate rings so units do not line up spoke-on-spoke.
+        phase = (ring % 2) * step / 2
+        out.extend(
+            (round(radius * math.cos(phase + step * i)), round(radius * math.sin(phase + step * i)))
+            for i in range(take)
+        )
+        ring += 1
+    return tuple(out[:count])
 
 
 def ring_offsets(count: int, radius: int, *, start_eighth: int = 0) -> tuple[tuple[int, int], ...]:

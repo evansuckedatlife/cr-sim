@@ -64,7 +64,7 @@ def _spawn(battle, world, name, team, x, y):
         collision_radius=spec.collision_radius, mass=spec.mass,
         flying=spec.flying, shield=spec.shield_hitpoints,
     )
-    battle.entities.append(entity)
+    battle._register(entity)
     return entity
 
 

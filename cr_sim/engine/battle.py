@@ -31,7 +31,7 @@ from .arena import Arena, load_arena
 from .constants import TickClock
 from .elixir import BattleTimeline, ElixirBar, build_timeline
 from .entity import Entity, EntityKind, EntityState, Team, reset_entity_ids
-from .fixed import milli_tiles, ring_offsets
+from .fixed import milli_tiles, pack_offsets, ring_offsets
 from .combat import (
     AttackState,
     DamageEvent,
@@ -40,9 +40,11 @@ from .combat import (
     apply_area_damage,
     apply_hit,
 )
-from .pathing import Route, route_to
+from .pathing import Route, crosses_river, route_to, step_towards
 from .targeting import acquire_target, in_attack_range, should_keep_target
+from .movement import resolve_collisions
 from .rng import Rng
+from .spatial import SpatialIndex
 from .specs import UnitSpec, build_tower_spec, build_unit_spec
 
 __all__ = ["Battle", "BattleConfig", "Player", "BattleResult", "KING_ACTIVATION_MS"]
@@ -121,6 +123,7 @@ class Battle:
         "advance_projectiles",
         "tick_area_effects",
         "move_units",
+        "resolve_collisions",
         "resolve_deaths",
         "check_tower_activation",
         "check_victory",
@@ -153,6 +156,11 @@ class Battle:
         "damage_log",
         "_king_active",
         "_king_waking",
+        "_index",
+        "_max_radius",
+        "_max_sight",
+        "_by_id_map",
+        "graveyard",
     )
 
     def __init__(
@@ -186,6 +194,17 @@ class Battle:
         #: A King Tower is inert until provoked; see _phase_check_tower_activation.
         self._king_active: dict[Team, bool] = {Team.BLUE: False, Team.RED: False}
         self._king_waking: dict[Team, int] = {Team.BLUE: 0, Team.RED: 0}
+        # Neighbour queries drive both targeting and collision; without an
+        # index each is a full scan per unit per tick.
+        self._index = SpatialIndex(self.arena.width, self.arena.height)
+        self._max_radius = 0
+        self._max_sight = 0
+        # Id -> entity. Targeting and combat both resolve a target id every
+        # tick for every unit; scanning the entity list for it is O(n^2).
+        self._by_id_map: dict[int, Entity] = {}
+        #: Dead entities, kept out of the live list so phases stop paying
+        #: for them. A three-minute match kills hundreds.
+        self.graveyard: list[Entity] = []
         _globals = self.data.globals_map()
         # Grace band that stops a unit flickering between two equidistant enemies.
         _ext = _globals.get('LOGIC_RANGE_EXTENSION_TO_KEEP_TARGET', 0)
@@ -250,15 +269,37 @@ class Battle:
                 collision_radius=spec.collision_radius,
                 mass=1000,
             )
-            self.entities.append(tower)
+            self._register(tower)
             self._towers[placement.team].append(tower)
 
     def _summon_layout(self, card: Card) -> tuple[tuple[int, int], ...]:
-        """Ring positions for every unit this card deploys."""
+        """Where each of a card's units lands relative to the drop point.
+
+        A card's own ``SummonRadius`` wins where it has one. Four multi-unit
+        cards ship none at all -- Skeleton Army, Minions, Archers,
+        Skeleton Warriors -- and a ring is derived from how much space the units
+        need instead, because fifteen skeletons cannot share a point.
+        """
         total = sum(n for _name, n in card.summons())
-        if total <= 1 or card.summon_radius <= 0:
+        if total <= 1:
             return ((0, 0),) * max(1, total)
-        return ring_offsets(total, milli_tiles(card.summon_radius))
+
+        radius = milli_tiles(card.summon_radius)
+        unit_radius = 0
+        for character, _count in card.summons():
+            try:
+                unit_radius = max(unit_radius, self._spec(character, rarity=card.rarity).collision_radius)
+            except Exception:
+                continue
+        if radius <= 0:
+            return pack_offsets(total, unit_radius or milli_tiles(500))
+        # A stated radius that cannot physically hold the group still needs
+        # packing, or the units simply spawn inside one another.
+        import math
+
+        if unit_radius and 2 * math.pi * radius < total * 2 * unit_radius:
+            return pack_offsets(total, unit_radius)
+        return ring_offsets(total, radius)
 
     def _spec(self, name: str, *, rarity: str) -> UnitSpec:
         key = f"{name}@{rarity}"
@@ -337,7 +378,7 @@ class Battle:
                     shield=spec.shield_hitpoints,
                     lifetime_ticks=spec.lifetime_ticks,
                 )
-                self.entities.append(unit)
+                self._register(unit)
                 index += 1
 
     # ------------------------------------------------------------- the loop
@@ -346,6 +387,9 @@ class Battle:
         """Advance exactly one tick, running every phase in order."""
         if self.finished:
             return
+        # Rebuilt before any phase reads it, so every phase in a tick sees one
+        # consistent snapshot of where things are.
+        self._index.rebuild(self.entities)
         for phase in self._phase_fns:
             phase()
         self.tick += 1
@@ -477,10 +521,14 @@ class Battle:
             ):
                 continue
 
+            # Only entities whose cells overlap the sight circle are even
+            # considered; scanning the whole board here is what made a crowded
+            # match take twenty seconds.
+            reach = spec.sight_range + self._tower_sight_bonus + entity.collision_radius
             found = acquire_target(
                 spec,
                 entity,
-                self.entities,
+                self._index.candidates(entity, reach),
                 sight_bonus_for_towers=self._tower_sight_bonus,
             )
             if found is None:
@@ -533,7 +581,13 @@ class Battle:
                         hit.spec,
                         (hit.target.x, hit.target.y),
                         hit.spec.area_damage_radius,
-                        [e for e in self.entities if e.id != hit.target.id],
+                        [
+                            e
+                            for e in self._index.near(
+                                hit.target.x, hit.target.y, hit.spec.area_damage_radius
+                            )
+                            if e.id != hit.target.id
+                        ],
                         hit.attacker,
                         self.tick,
                     )
@@ -567,15 +621,26 @@ class Battle:
                     self._routes.pop(entity.id, None)
                     continue
                 goal = (target.x, target.y)
-                route = self._routes.get(entity.id)
-                if route is None or route.waypoints[-1:] != [goal]:
-                    route = route_to(
-                        self.arena, (entity.x, entity.y), goal, flying=entity.flying
+                if entity.flying or not crosses_river(self.arena, entity.y, target.y):
+                    # Same side of the water (or airborne): walk straight at it.
+                    # Building a route here would mean rebuilding it every tick,
+                    # since the destination moves.
+                    self._routes.pop(entity.id, None)
+                    entity.x, entity.y = step_towards(
+                        (entity.x, entity.y), goal, spec.speed_per_tick
                     )
-                    self._routes[entity.id] = route
-                entity.x, entity.y = route.advance(
-                    (entity.x, entity.y), spec.speed_per_tick
-                )
+                else:
+                    # Across the water: this genuinely needs a bridge, and the
+                    # plan survives until the crossing is done.
+                    route = self._routes.get(entity.id)
+                    if route is None or route.finished:
+                        route = route_to(
+                            self.arena, (entity.x, entity.y), goal, flying=entity.flying
+                        )
+                        self._routes[entity.id] = route
+                    entity.x, entity.y = route.advance(
+                        (entity.x, entity.y), spec.speed_per_tick
+                    )
                 entity.set_state(EntityState.MOVING)
                 continue
 
@@ -601,15 +666,47 @@ class Battle:
             entity.x, entity.y = route.advance((entity.x, entity.y), spec.speed_per_tick)
             entity.set_state(EntityState.MOVING)
 
+    def _phase_resolve_collisions(self) -> None:
+        """Separate overlapping units.
+
+        Resolved after movement rather than by blocking it: refusing to move on
+        contact deadlocks a crowd, because everyone waits for space that only
+        appears once somebody moves. Overlap-then-separate always converges.
+        """
+        if self._max_radius <= 0:
+            return
+        # The index was built at the top of the tick; movement has since
+        # invalidated it, so refresh before asking who overlaps whom.
+        self._index.rebuild(self.entities)
+        resolve_collisions(self._index, self.arena, max_radius=self._max_radius)
+
     def _phase_resolve_deaths(self) -> None:
+        """Finalise deaths and retire the bodies.
+
+        Dead entities move to the graveyard rather than lingering in the live
+        list. Every phase iterates that list, and a three-minute match kills
+        hundreds of units -- left in place they would go on costing a scan each
+        for the rest of the match. They stay reachable by id so a stale target
+        reference resolves to something dead rather than to nothing.
+        """
+        died = False
         for entity in self.entities:
             if entity.state is EntityState.DYING and not entity.dead:
                 entity.dead = True
                 entity.state = EntityState.DEAD
                 self._routes.pop(entity.id, None)
                 self._attacks.pop(entity.id, None)
+                died = True
                 if entity.kind is EntityKind.TOWER:
                     self.players[entity.team.opponent].crowns += 1
+        if died:
+            alive: list[Entity] = []
+            for entity in self.entities:
+                if entity.dead:
+                    self.graveyard.append(entity)
+                else:
+                    alive.append(entity)
+            self.entities = alive
 
     def _phase_check_tower_activation(self) -> None:
         """Wake a King Tower once it is provoked.
@@ -664,13 +761,18 @@ class Battle:
     # ------------------------------------------------------------- helpers
 
     def _entity(self, entity_id: int) -> Entity | None:
-        """Look up any entity by id."""
-        if not entity_id:
-            return None
-        for entity in self.entities:
-            if entity.id == entity_id:
-                return entity
-        return None
+        """Look up any entity by id, alive or dead."""
+        return self._by_id_map.get(entity_id) if entity_id else None
+
+    def _register(self, entity: Entity) -> None:
+        self.entities.append(entity)
+        self._by_id_map[entity.id] = entity
+        spec = entity.spec
+        if spec is not None:
+            if spec.collision_radius > self._max_radius:
+                self._max_radius = spec.collision_radius
+            if spec.sight_range > self._max_sight:
+                self._max_sight = spec.sight_range
 
     def _by_id(self, entity_id: int) -> Entity | None:
         if not entity_id:
@@ -700,12 +802,14 @@ class Battle:
         return best.x, best.y
 
     def _king(self, team: Team) -> Entity | None:
-        for entity in self.entities:
-            if (
-                entity.team is team
-                and entity.kind is EntityKind.TOWER
-                and "King" in getattr(entity.spec, "name", "")
-            ):
+        """The team's King Tower, alive or dead.
+
+        Read from the tower index rather than the live entity list: a destroyed
+        King is retired to the graveyard, and the victory check needs to be able
+        to see that it died.
+        """
+        for entity in self._towers[team]:
+            if "King" in getattr(entity.spec, "name", ""):
                 return entity
         return None
 
