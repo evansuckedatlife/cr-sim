@@ -225,13 +225,64 @@ function drawEntity(e) {
   ctx.globalAlpha = 1;
 }
 
-let hover = null;
+let hover = null, dragging = false;
+
+function selectedCard() {
+  if (!selected || !STATE) return null;
+  return STATE.you.hand.find((c) => c.name === selected) || null;
+}
+
+// Mirrors the server's placement rules closely enough to colour the marker.
+// The server still decides on release; this only avoids promising a tile it
+// is about to refuse.
+function placementLegal(tx, ty) {
+  const card = selectedCard();
+  if (!card || !SETUP) return false;
+  if (tx < 0 || ty < 0 || tx >= SETUP.widthTiles || ty >= SETUP.heightTiles) return false;
+  const cx = Math.floor(tx * 2), cy = Math.floor(ty * 2);
+  const row = SETUP.terrain[cy];
+  if (!row) return false;
+  const cell = row[cx];
+  if (cell === 1) return false;                       // blocked terrain
+  if (cell === 2 && !card.water) return false;        // the river
+  if (!card.anywhere) {
+    const [, riverTop] = [0, SETUP.riverBand[0]];
+    if (ty > riverTop) return false;                  // your own half only
+  }
+  return true;
+}
+
+function snapped() {
+  if (!hover) return null;
+  const [tx, ty] = screenToWorld(hover[0], hover[1]);
+  // Snapped to the tile centre, which is what the game places on and what
+  // makes an aim repeatable rather than pixel-dependent.
+  return [Math.floor(tx) + 0.5, Math.floor(ty) + 0.5];
+}
+
 function drawPlacement() {
   if (!selected || !hover) return;
-  const [px, py] = hover;
-  ctx.beginPath(); ctx.arc(px, py, TILE * 0.8, 0, 6.284);
-  ctx.strokeStyle = 'rgba(234,179,8,.9)'; ctx.setLineDash([5, 4]); ctx.lineWidth = 2;
-  ctx.stroke(); ctx.setLineDash([]);
+  const tile = snapped();
+  if (!tile) return;
+  const legal = placementLegal(tile[0], tile[1]);
+  const [px, py] = worldToScreen(tile[0], tile[1]);
+
+  ctx.save();
+  ctx.strokeStyle = legal ? 'rgba(34,197,94,.95)' : 'rgba(239,68,68,.9)';
+  ctx.fillStyle = legal ? 'rgba(34,197,94,.16)' : 'rgba(239,68,68,.14)';
+  ctx.lineWidth = 2;
+  ctx.fillRect(px - TILE / 2, py - TILE / 2, TILE, TILE);
+  ctx.strokeRect(px - TILE / 2, py - TILE / 2, TILE, TILE);
+
+  // A ghost of what is about to land, so the tile is not the only feedback.
+  const card = selectedCard();
+  const img = card && ICONS[card.name];
+  if (img && img.complete && img.naturalWidth) {
+    ctx.globalAlpha = 0.55;
+    ctx.drawImage(img, px - TILE * 0.7, py - TILE * 0.7, TILE * 1.4, TILE * 1.4);
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
 }
 
 function render() {
@@ -248,7 +299,32 @@ function render() {
 
 // ------------------------------------------------------------------- ui
 
-function renderHand() {
+// The hand was rebuilt on every poll, ten times a second. A click that
+// landed between mousedown and mouseup hit an element that had already been
+// replaced, so cards frequently would not select at all. It is rebuilt only
+// when its contents actually change now; affordability, which does change
+// constantly, is toggled as a class on the existing nodes.
+let handSignature = '';
+
+function handState() {
+  if (!STATE) return '';
+  return STATE.you.hand.map((c) => c.name + (c.evo ? '*' : '')).join('|')
+       + '/' + (selected || '');
+}
+
+function refreshAffordability() {
+  if (!STATE) return;
+  const elixir = STATE.you.elixir;
+  document.querySelectorAll('#hand .card').forEach((el) => {
+    el.classList.toggle('poor', elixir < Number(el.dataset.cost));
+  });
+}
+
+function renderHand(force) {
+  const signature = handState();
+  if (!force && signature === handSignature) { refreshAffordability(); return; }
+  handSignature = signature;
+
   const el = $('hand'); el.innerHTML = '';
   const elixir = STATE ? STATE.you.elixir : 0;
   (STATE ? STATE.you.hand : []).forEach((c) => {
@@ -262,7 +338,16 @@ function renderHand() {
                 + `<div class="co">${c.cost}</div>`
                 + (c.evo ? '<div class="ev">EVO</div>'
                          : c.hasEvo ? '<div class="ev" style="color:#8b949e">evo</div>' : '');
-    d.onclick = () => { selected = (selected === c.name) ? null : c.name; renderHand(); };
+    d.dataset.cost = c.cost;
+    d.dataset.card = c.name;
+    // pointerdown, not click: it starts the drag *and* selects, so one gesture
+    // does both -- press a card, move onto the board, release to place.
+    d.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      selected = (selected === c.name) ? null : c.name;
+      dragging = selected !== null;
+      renderHand(true);
+    });
     el.appendChild(d);
   });
 }
@@ -318,23 +403,34 @@ function renderStatus() {
 
 // ---------------------------------------------------------------- events
 
-board.addEventListener('mousemove', (ev) => {
+function trackPointer(ev) {
   const r = board.getBoundingClientRect();
   hover = [(ev.clientX - r.left) * board.width / r.width,
            (ev.clientY - r.top) * board.height / r.height];
-});
-board.addEventListener('mouseleave', () => { hover = null; });
+}
 
-board.addEventListener('click', async (ev) => {
-  if (!selected) { message('pick a card first'); return; }
-  const r = board.getBoundingClientRect();
-  const px = (ev.clientX - r.left) * board.width / r.width;
-  const py = (ev.clientY - r.top) * board.height / r.height;
-  const [x, y] = screenToWorld(px, py);
-  const res = await api('/api/play', {card: selected, x, y});
-  if (res.ok) { selected = null; message(''); renderHand(); }
+// Tracked on the window, not the canvas: a drag that began on a card is
+// already outside the board when it starts moving, and a canvas-only listener
+// never sees it.
+window.addEventListener('pointermove', trackPointer);
+
+async function place() {
+  const tile = snapped();
+  if (!selected || !tile) return;
+  const res = await api('/api/play', {card: selected, x: tile[0], y: tile[1]});
+  if (res.ok) { selected = null; dragging = false; message(''); renderHand(true); }
   else message(res.reason || 'could not place that');
+}
+
+board.addEventListener('pointerup', (ev) => {
+  trackPointer(ev);
+  if (selected) place();
 });
+
+// Click-to-select then click-to-place still works, for anyone who does not
+// want to hold the button down across the whole gesture.
+board.addEventListener('click', (ev) => { if (selected && !dragging) { trackPointer(ev); place(); } });
+window.addEventListener('pointerup', () => { dragging = false; });
 
 $('pause').onclick = async () => {
   const res = await api('/api/control', {paused: !(STATE && STATE.paused)});
@@ -362,7 +458,7 @@ async function poll() {
   try {
     STATE = await api('/api/state');
     renderStatus();
-    renderHand();
+    renderHand(false);
   } catch (err) { /* a dropped poll costs one frame, not the match */ }
   setTimeout(poll, 100);
 }

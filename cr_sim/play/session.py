@@ -295,6 +295,11 @@ class PlaySession:
                 entry is not None and player is not None and player.evolution_ready(entry)
             ),
             "hasEvo": bool(entry is not None and entry.evolution),
+            # The page previews legality while you aim. The server still
+            # decides on the click -- this only avoids drawing a green marker
+            # on a tile that is about to be refused.
+            "anywhere": bool(entry is not None and entry.can_deploy_on_enemy_side),
+            "water": bool(entry is not None and entry.can_place_on_water),
         }
 
     def _result(self) -> dict[str, Any] | None:

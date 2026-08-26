@@ -69,7 +69,18 @@ class PlayServer:
         self.levels = build_level_table(self.data)
         self.registry = build_card_registry(self.data)
         self.arena = load_arena(self.data)
-        self.icons = build_icon_map(self.registry)
+        # Kept as real paths here and exposed to the page as URLs. The map
+        # gives filesystem paths, which a browser will not load from an <img>
+        # -- the replay viewer inlines them as data URIs instead, but that
+        # would put a couple of megabytes into every page load for a server
+        # that is already right there to serve the files.
+        self.icon_paths = build_icon_map(self.registry)
+        self.icons = {
+            name: "/icon/" + Path(path).name for name, path in self.icon_paths.items()
+        }
+        self._icon_files = {
+            Path(path).name: Path(path) for path in self.icon_paths.values()
+        }
         self.checkpoint = checkpoint
         self.lock = threading.Lock()
         self.session = self._new_session(DEFAULT_DECK, DEFAULT_DECK, seed=0)
@@ -204,6 +215,19 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         if self.path in ("/", "/index.html"):
             self._send(PAGE.encode("utf-8"), "text/html; charset=utf-8")
+            return
+        if self.path.startswith("/icon/"):
+            play = self.server.play  # type: ignore[attr-defined]
+            # Looked up in a map built from the icon pack rather than joined
+            # onto a directory, so a crafted path cannot reach outside it.
+            path = play._icon_files.get(self.path[len("/icon/"):])
+            if path is None or not path.is_file():
+                self.send_error(404)
+                return
+            self._send(path.read_bytes(), "image/png")
+            return
+        if not self.path.startswith("/api/"):
+            self.send_error(404)
             return
         self._send(self.server.play.handle(self.path, {}))  # type: ignore[attr-defined]
 

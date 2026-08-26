@@ -278,3 +278,39 @@ def test_a_checkpoint_path_resolves_against_the_project_root():
     existing = Path("pyproject.toml")
     assert _resolve(existing) in (existing, ROOT / existing)
     assert _resolve(Path("nope/nope.pt")) == Path("nope/nope.pt")
+
+
+# ------------------------------------------------------------------ icons
+
+
+def test_icons_are_urls_the_browser_can_fetch(server):
+    """The icon map gives filesystem paths, which an <img> will not load.
+
+    The replay viewer inlines them as data URIs instead; doing that here would
+    put megabytes into every page load for a server that is already sitting
+    there able to serve the files.
+    """
+    icons = server.setup()["icons"]
+    assert icons, "no icons at all"
+    assert all(url.startswith("/icon/") for url in icons.values()), "a raw path leaked"
+    assert "Knight" in icons
+
+
+def test_every_icon_url_resolves_to_a_real_file(server):
+    for name, url in server.setup()["icons"].items():
+        path = server._icon_files.get(url[len("/icon/"):])
+        assert path is not None and path.is_file(), f"{name} -> {url}"
+
+
+def test_icons_are_looked_up_by_name_not_by_joining_a_path(server):
+    """So a crafted name cannot reach outside the icon pack."""
+    for hostile in ("../pyproject.toml", "..\pyproject.toml", "/etc/passwd"):
+        assert server._icon_files.get(hostile) is None
+
+
+def test_a_hand_card_carries_its_placement_rules(server):
+    """The page previews legality while you aim; the server still decides."""
+    hand = server.handle("/api/state", {})["you"]["hand"]
+    assert hand
+    for card in hand:
+        assert set(card) >= {"name", "cost", "kind", "evo", "hasEvo", "anywhere", "water"}
