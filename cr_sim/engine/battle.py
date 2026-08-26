@@ -532,11 +532,12 @@ class Battle:
                     # the far side of the board.
                     ox, oy = explicit[index]
                     ox, oy = ox * 18, oy * 18 * (1 if team is Team.BLUE else -1)
+                px, py = self._settle(x + ox, y + oy, flying=spec.flying)
                 unit = Entity(
                     kind=spec.kind,
                     team=team,
-                    x=x + ox,
-                    y=y + oy,
+                    x=px,
+                    y=py,
                     hitpoints=spec.hitpoints,
                     spec=spec,
                     spawn_tick=self.tick,
@@ -1798,11 +1799,12 @@ class Battle:
         spawned: list[Entity] = []
         for index in range(count):
             ox, oy = offsets[index] if index < len(offsets) else (0, 0)
+            px, py = self._settle(x + ox, y + oy, flying=spec.flying)
             unit = Entity(
                 kind=spec.kind,
                 team=team,
-                x=x + ox,
-                y=y + oy,
+                x=px,
+                y=py,
                 hitpoints=spec.hitpoints,
                 spec=spec,
                 spawn_tick=self.tick,
@@ -1881,6 +1883,28 @@ class Battle:
         clone.is_clone = True
         self._register(clone)
         return clone
+
+    def _settle(self, x: int, y: int, *, flying: bool) -> tuple[int, int]:
+        """Nudge a spawn point to somewhere the unit can actually stand.
+
+        Movement has always guarded this; spawning never did. Every offset that
+        places a unit relative to a point can push it off legal ground -- a
+        swarm's ring, a death spawn's radius, a Graveyard skeleton's annulus --
+        and a soak run found troops standing in the river in 2.5% of matches
+        because of it.
+
+        Searched outward in half-tile rings and capped: a point with nothing
+        legal near it returns unchanged, because a unit slightly out of place
+        is a smaller wrong than one teleported across the board.
+        """
+        if self.arena.is_walkable(x, y, flying=flying):
+            return x, y
+        half = SUBTILES_PER_TILE // 2
+        for ring in range(1, 5):
+            for dx, dy in ring_offsets(8, ring * half):
+                if self.arena.is_walkable(x + dx, y + dy, flying=flying):
+                    return x + dx, y + dy
+        return x, y
 
     def _begin_actions(self, entity: Entity) -> None:
         """Fire an entity's ``OnStartingAction``, if it has one."""

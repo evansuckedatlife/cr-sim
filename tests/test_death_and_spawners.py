@@ -20,7 +20,7 @@ from cr_sim.data.leveling import build_level_table
 from cr_sim.data.source import LogicData
 from cr_sim.engine.battle import Battle, BattleConfig
 from cr_sim.engine.entity import Entity, EntityKind, Team
-from cr_sim.engine.fixed import tiles
+from cr_sim.engine.fixed import tiles, to_tiles
 from cr_sim.engine.specs import build_unit_spec
 
 from .test_data_pipeline import BUILD
@@ -230,3 +230,44 @@ def test_a_spawner_produces_nothing_while_it_is_still_landing(world):
     while witch.is_deploying:
         battle.step()
         assert not _living(battle, "Skeleton"), "spawned mid-deploy"
+
+
+# ------------------------------------------------------------ legal ground
+
+
+def test_a_death_spawn_never_lands_in_the_river(world):
+    """Movement has always guarded this; spawning never did.
+
+    Every offset that places a unit relative to a point can push it off legal
+    ground -- a swarm's ring, a death spawn's radius, a Graveyard skeleton's
+    annulus. A soak run found troops standing in the river in 2.5% of matches.
+    """
+    battle = _battle(world, "Tombstone")
+    top, bottom = battle.arena.river_band()
+    # Killed on the near bank, so the spawn ring reaches across the water.
+    battle._spawn_units(
+        team=Team.BLUE, character="Skeleton", count=8,
+        x=tiles(9), y=top + (bottom - top) // 2, radius=tiles(2), rarity="Common",
+    )
+    for entity in battle.entities:
+        if entity.spec is not None and entity.spec.name == "Skeleton":
+            assert battle.arena.is_walkable(entity.x, entity.y, flying=False), (
+                f"skeleton spawned on impassable ground at "
+                f"({to_tiles(entity.x):.2f}, {to_tiles(entity.y):.2f})"
+            )
+
+
+def test_settling_leaves_a_legal_point_alone(world):
+    """It is a nudge, not a snap. A unit slightly out of place is a smaller
+    wrong than one teleported across the board."""
+    battle = _battle(world, "Tombstone")
+    point = (tiles(9), tiles(10))
+    assert battle._settle(*point, flying=False) == point
+
+
+def test_a_flying_unit_is_settled_against_its_own_rules(world):
+    """The river is walkable for something with wings."""
+    battle = _battle(world, "Tombstone")
+    top, bottom = battle.arena.river_band()
+    over_water = (tiles(9), top + (bottom - top) // 2)
+    assert battle._settle(*over_water, flying=True) == over_water
