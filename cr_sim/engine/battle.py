@@ -74,7 +74,14 @@ from .specs import UnitSpec, build_tower_spec, build_unit_spec
 __all__ = [
     "Battle", "BattleConfig", "Player", "BattleResult", "KING_ACTIVATION_MS",
     "CLONE_HITPOINTS",
+    "MIRROR_EXTRA_ELIXIR",
 ]
+
+#: What Mirror adds to the cost of the card it copies. Not in the build: the
+#: card's own ManaCost is 1, which is what it would cost if it deployed
+#: nothing, and the globals carry the level offset but not the price. Recorded
+#: as an anchor rather than presented as read.
+MIRROR_EXTRA_ELIXIR = 1
 
 #: A clone's hitpoints. Every other number the Clone spell needs is in the
 #: build -- the offset, the shield rule, whether a clone may be cloned -- but
@@ -105,6 +112,9 @@ class Player:
     crowns: int = 0
     #: Card names in draw order; the hand is the first four.
     cycle: list[str] = field(default_factory=list)
+    #: The last card actually deployed, for Mirror to replay. Mirror itself is
+    #: never recorded: mirroring a Mirror has nothing to copy.
+    last_played: str | None = None
     #: Card names this deck slotted as evolutions. Empty by default: having an
     #: evolution available is a deck-building choice, not a property of owning
     #: the card.
@@ -370,6 +380,13 @@ class Battle:
         cycle = list(deck)
         # The opening hand is shuffled; the cycle order after that is fixed.
         self.rng.stream(f"deck:{team.name}").shuffle(cycle)
+        # Mirror carries OmitFromStartingHand, and the reason is plain: with
+        # nothing yet played it has nothing to copy, so dealing it into the
+        # opening hand would be dealing a dead card.
+        held = [n for n in cycle[:4] if (c := self.registry.get(n)) and c.omit_from_starting_hand]
+        for name in held:
+            cycle.remove(name)
+            cycle.append(name)
         slotted = (
             self.config.blue_evolutions if team is Team.BLUE else self.config.red_evolutions
         )
@@ -443,8 +460,8 @@ class Battle:
             return pack_offsets(total, unit_radius)
         return ring_offsets(total, radius)
 
-    def _spec(self, name: str, *, rarity: str) -> UnitSpec:
-        key = f"{name}@{rarity}"
+    def _spec(self, name: str, *, rarity: str, level_offset: int = 0) -> UnitSpec:
+        key = f"{name}@{rarity}@{level_offset}"
         spec = self._specs.get(key)
         if spec is None:
             scale = self.levels.get(rarity)
@@ -452,7 +469,7 @@ class Battle:
                 self.data,
                 self.levels,
                 name,
-                level=scale.internal_level(self.config.level),
+                level=scale.internal_level(self.config.level + level_offset),
                 rarity=rarity,
                 clock=self.clock,
             )
@@ -470,7 +487,24 @@ class Battle:
         card: Card | None = self.registry.get(card_name)
         if card is None or card_name not in player.hand:
             return False
-        if not player.elixir.can_afford(card.mana_cost):
+
+        # Mirror is a reference, not a card. It costs whatever it is copying
+        # plus one and deploys that at a level higher, so both the price and
+        # the placement rules have to come from the copied card rather than
+        # from Mirror's own row -- Mirror says one elixir and "anywhere", and
+        # neither is true of what it actually puts down.
+        mirrored: Card | None = None
+        level_offset = 0
+        cost = card.mana_cost
+        if card.is_mirror:
+            mirrored = self.registry.get(player.last_played or "")
+            if mirrored is None or mirrored.is_mirror:
+                return False
+            cost = mirrored.mana_cost + MIRROR_EXTRA_ELIXIR
+            level_offset = self._mirror_level_offset()
+            card = mirrored
+
+        if not player.elixir.can_afford(cost):
             return False
         # Honour the card's own placement rules. Without this a Fireball
         # cannot be cast on the enemy half at all -- the only place anyone
@@ -485,8 +519,11 @@ class Battle:
         ):
             return False
 
-        player.elixir.spend(card.mana_cost)
+        player.elixir.spend(cost)
         player.play(card_name)
+        if mirrored is None:
+            # Mirror never becomes the thing it would copy next.
+            player.last_played = card.name
 
         # An evolution slot deploys a different card entirely -- Evo Barbarians
         # summons Barbarian_EV1, five of them instead of four -- while costing
@@ -505,10 +542,14 @@ class Battle:
         if played.kind is CardKind.SPELL:
             self._cast(team, played, x, y)
         else:
-            self._deploy(team, played, x, y)
+            self._deploy(team, played, x, y, level_offset)
         return True
 
-    def _deploy(self, team: Team, card: Card, x: int, y: int) -> None:
+    def _mirror_level_offset(self) -> int:
+        value = self.data.globals_map().get("MIRROR_LEVEL_OFFSET", 1)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 1
+
+    def _deploy(self, team: Team, card: Card, x: int, y: int, level_offset: int = 0) -> None:
         """Place a card's units, spread and staggered as the card specifies.
 
         Two details that look cosmetic but are not. ``SummonRadius`` spaces a
@@ -522,7 +563,7 @@ class Battle:
         index = 0
         for character, count in card.summons():
             try:
-                spec = self._spec(character, rarity=card.rarity)
+                spec = self._spec(character, rarity=card.rarity, level_offset=level_offset)
             except Exception:
                 continue
             for _ in range(count):

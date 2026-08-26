@@ -70,6 +70,11 @@ class Card:
     #: ``DarkElixirCost``. One means every second play is evolved, two every
     #: third. Zero for a card with no evolution.
     evolution_cycles: int = 0
+    #: Replays the last card played instead of deploying anything of its own.
+    is_mirror: bool = False
+    #: Never dealt into the opening hand. Mirror with nothing to mirror would
+    #: be a dead card on the first cycle.
+    omit_from_starting_hand: bool = False
     not_in_use: bool = False
     not_visible: bool = False
 
@@ -232,6 +237,8 @@ def build_card_registry(data: LogicData) -> CardRegistry:
                     is_evolution=is_evo,
                     is_hero_form=is_hero,
                     evolution=_first_evolution(row.get("EvolvedSpells")),
+                    is_mirror=row.get("Mirror") is True,
+                    omit_from_starting_hand=row.get("OmitFromStartingHand") is True,
                     not_in_use=bool(row.get("NotInUse", False)),
                     not_visible=bool(row.get("NotVisible", False)),
                     summon_character=row.get("SummonCharacter"),

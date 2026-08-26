@@ -264,6 +264,14 @@
       "status": "open",
       "how_to_resolve": "Clone a Knight in-game and hit the clone once with anything. The engine uses 1, which is the card's universally documented behaviour, but it is applied as known behaviour rather than read from the files and should be confirmed.",
       "note": "Searched ACTION.CloneAction, BUFF.Clone and every CLONE_* global in this build; none carries a hitpoint value. Likely hardcoded client-side."
+    },
+    {
+      "id": "mirror-extra-elixir",
+      "question": "What Mirror adds to the cost of the card it copies. The engine uses +1.",
+      "why_it_matters": "It is the card's entire cost model. Mirror's own ManaCost is 1, which is what it would cost if it deployed nothing, and the globals carry MIRROR_LEVEL_OFFSET but no price.",
+      "status": "open",
+      "how_to_resolve": "Play a card in-game, then Mirror it, and read the elixir spent. +1 is the universally documented behaviour and is what the engine uses, but it is applied as known behaviour rather than read from the files.",
+      "note": "Searched the Mirror row and every MIRROR_* global in this build; none carries a cost delta. MIRROR_LEVEL_OFFSET (1), MIRROR_CAP_TO_MAX_LEVEL (False) and MIRROR_IGNORE_CHAMPIONS (False) are all present and all implemented."
     }
   ]
 }
