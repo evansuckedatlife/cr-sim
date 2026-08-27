@@ -36,3 +36,5 @@ out.html
 demo-*.out
 demo-*.err
 data_cache/demos/
+scratch_*.js
+progress.json
