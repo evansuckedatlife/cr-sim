@@ -108,6 +108,15 @@ def build_parser() -> argparse.ArgumentParser:
              "damage is worth about 0.02 against 1.0 per crown, so the reward is "
              "effectively sparse; raise it to give credit between crowns.",
     )
+    parser.add_argument(
+        "--device", default="auto",
+        help="where the network runs: cpu, cuda, xpu (Intel), or auto to take "
+             "the best available. Worth more than it looks -- with the "
+             "environments spread over worker processes, the parent spends "
+             "roughly 40-50%% of every update in the network, nearly all of "
+             "it in the PPO gradient step. Requires a torch build with that "
+             "backend compiled in; the plain wheel is CPU-only.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=ROOT / "runs")
     parser.add_argument("--name", default="ppo")
@@ -129,10 +138,12 @@ def build_parser() -> argparse.ArgumentParser:
              "exactly instead of weighting proxies for it.",
     )
     parser.add_argument(
-        "--eval-every", type=int, default=10,
-        help="updates between honest evaluations against a random control. The "
-             "trainer's own return is measured while exploring and has run "
-             "eighteen points optimistic; this is the number to watch.",
+        "--eval-every", type=int, default=20,
+        help="updates between honest evaluations against a random control. "
+             "Pure overhead: an evaluation plays 40 paired battles and a "
+             "ladder 30 more, so at every 10 updates a long run spends about "
+             "a quarter of itself measuring. Every 20 still gives dozens of "
+             "readings, which is more than enough to see a trend.",
     )
     parser.add_argument("--eval-episodes", type=int, default=40)
     parser.add_argument(
@@ -164,6 +175,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_device(name: str) -> str:
+    """Pick a device, and say plainly when the asked-for one is unavailable.
+
+    Silently falling back to CPU would leave a run quietly three times slower
+    than intended, with nothing on the page to say so -- which is the failure
+    mode this project keeps producing.
+    """
+    if name != "auto":
+        if name.startswith("cuda") and not torch.cuda.is_available():
+            raise SystemExit(
+                "cuda requested but this torch has no CUDA "
+                f"({torch.__version__}). Install a CUDA build, or use --device cpu."
+            )
+        if name.startswith("xpu") and not getattr(
+            getattr(torch, "xpu", None), "is_available", lambda: False
+        )():
+            raise SystemExit(
+                "xpu requested but this torch has no XPU "
+                f"({torch.__version__}). Install the Intel build with "
+                "pip install torch --index-url "
+                "https://download.pytorch.org/whl/xpu, or use --device cpu."
+            )
+        return name
+    if torch.cuda.is_available():
+        return "cuda"
+    xpu = getattr(torch, "xpu", None)
+    if xpu is not None and xpu.is_available():
+        return "xpu"
+    return "cpu"
+
+
 def _reward_weights(args):
     """The weights object whose type selects the reward."""
     if args.reward == "five-term":
@@ -181,6 +223,10 @@ def main(argv: list[str] | None = None) -> int:
     out = args.out / args.name
     out.mkdir(parents=True, exist_ok=True)
     metrics_path = out / "metrics.jsonl"
+
+    device = _resolve_device(args.device)
+    if device != "cpu":
+        print(f"network on {device}", flush=True)
 
     data = LogicData.load(args.build)
     levels = build_level_table(data)
@@ -433,6 +479,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             net = train(
                 make_env, config,
+                device=device,
                 on_update=record,
                 on_net=_on_net,
                 opponents=snapshots,

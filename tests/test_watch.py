@@ -310,3 +310,82 @@ def test_the_page_offers_a_split_view_only_when_there_is_something_to_compare():
     page = render_multi([("only", [_row(1, 1000)], True)])
     assert "split-toggle" in page
     assert "order.length < 2" in page, "the toggle is never hidden for one run"
+
+
+def test_runs_are_ordered_by_when_they_started(tmp_path):
+    """Chronological, not alphabetical.
+
+    Sorting by name puts today's run between two from last week, and the
+    question this page answers is almost always what changed since the
+    previous one -- which only reads in the order they happened.
+    """
+    import os
+
+    from cr_sim.train.watch import _started_at
+
+    # Deliberately reverse-alphabetical, so a name sort would fail this.
+    order = ["zulu", "mike", "alpha"]
+    for i, name in enumerate(order):
+        run = tmp_path / name
+        run.mkdir()
+        (run / "metrics.jsonl").write_text(
+            json.dumps(_row(1, 1000)) + chr(10), encoding="utf-8")
+        config = run / "config.json"
+        config.write_text("{}", encoding="utf-8")
+        # Backdated, so the real _started_at (which takes the earlier of
+        # creation and modification) reads these as the start times.
+        stamp = 1_000_000 + i * 3600
+        os.utime(config, (stamp, stamp))
+
+    found = sorted((d for d in tmp_path.iterdir() if d.is_dir()), key=_started_at)
+    assert [d.name for d in found] == order
+    assert found != sorted(tmp_path.iterdir()), "this would pass on a name sort"
+
+
+def test_a_run_without_a_config_still_sorts(tmp_path):
+    """Runs from before the config was written must not crash the ordering."""
+    from cr_sim.train.watch import _started_at
+
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    (bare / "metrics.jsonl").write_text(
+        json.dumps(_row(1, 1000)) + chr(10), encoding="utf-8")
+    assert _started_at(bare) > 0
+    assert _started_at(tmp_path / "missing") == 0.0
+
+
+# ------------------------------------------------------------------ the ladder
+
+
+def test_the_ladder_reaches_the_page():
+    """Self-play measures itself against its own past, and that has to show.
+
+    It is the most sensitive number available: the reference is fixed and
+    roughly the right difficulty, where lift against a random control has a
+    spread wide enough that a +0.375 reading on this project measured -0.033
+    when replayed over 300 battles.
+    """
+    from cr_sim.train.watch import render_multi
+
+    rows = [
+        _row(1, 1000, ancestor_win=0.30, ancestor_loss=0.50, ancestor_age=1),
+        _row(2, 2000, ancestor_win=0.62, ancestor_loss=0.21, ancestor_age=3),
+    ]
+    page = render_multi([("sp", rows, True)])
+    payload = json.loads(page.split("const DATA = ", 1)[1].split(";\n", 1)[0])
+    run = payload["runs"]["sp"]
+    assert run["series"]["ancestor_win"] == [[1000, 0.30], [2000, 0.62]]
+    assert run["summary"]["ancestor_win"] == 0.62
+    assert run["summary"]["ancestor_age"] == 3
+
+
+def test_a_run_without_a_ladder_says_so_rather_than_showing_zero():
+    """Most runs were not self-play. Reporting 0% would read as 'it loses
+    every one', which is a different claim from 'this was never measured'."""
+    from cr_sim.train.watch import render_multi
+
+    payload = json.loads(
+        render_multi([("plain", [_row(1, 1000)], True)])
+        .split("const DATA = ", 1)[1].split(";\n", 1)[0])
+    assert payload["runs"]["plain"]["summary"]["ancestor_win"] is None
+    assert payload["runs"]["plain"]["series"]["ancestor_win"] == []

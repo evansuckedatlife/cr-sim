@@ -112,6 +112,33 @@ dl.gloss dt{font-family:Archivo,sans-serif;font-weight:700;margin-top:20px;font-
 dl.gloss dd{margin:5px 0 0;color:var(--soft);font-size:14.5px;max-width:80ch}
 dl.gloss dd.read{margin-top:7px;font-size:13.5px;color:var(--muted);padding-left:13px;border-left:2px solid var(--hair)}
 code{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.87em;background:var(--accentw);color:var(--accent);padding:1px 5px;border-radius:2px}
+.tabbar{display:flex;align-items:flex-end;gap:12px;margin-top:30px;
+  border-bottom:1px solid var(--rule);flex-wrap:wrap}
+.tabs{display:flex;gap:2px;flex-wrap:wrap;flex:1}
+.tab{appearance:none;border:1px solid transparent;border-bottom:0;background:none;
+  font-family:Archivo,sans-serif;font-size:13.5px;font-weight:600;color:var(--muted);
+  padding:9px 14px;border-radius:3px 3px 0 0;cursor:pointer;display:flex;align-items:center;gap:8px}
+.tab:hover{color:var(--ink);background:var(--panel2)}
+.tab[aria-selected="true"]{background:var(--panel);border-color:var(--rule);color:var(--ink);
+  margin-bottom:-1px;padding-bottom:10px}
+.tab .pip{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:none}
+.tab .pip.on{background:var(--good);box-shadow:0 0 0 3px var(--goodw)}
+.tab .val{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:12px;font-variant-numeric:tabular-nums}
+.split-toggle{appearance:none;background:var(--panel);border:1px solid var(--rule);border-radius:3px;
+  font-family:Archivo,sans-serif;font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--soft);
+  padding:7px 13px;cursor:pointer;margin-bottom:8px}
+.split-toggle:hover{color:var(--ink);border-color:var(--accent)}
+.split-toggle[aria-pressed="true"]{background:var(--accentw);color:var(--accent);border-color:var(--accent)}
+.panes{display:grid;grid-template-columns:1fr;gap:20px;margin-top:22px}
+.panes.split{grid-template-columns:1fr 1fr}
+@media (max-width:900px){.panes.split{grid-template-columns:1fr}}
+.pane{min-width:0}
+.pane-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.pane-head select{font-family:Archivo,sans-serif;font-size:13.5px;font-weight:600;color:var(--ink);
+  background:var(--panel);border:1px solid var(--rule);border-radius:3px;padding:6px 9px}
+.panes.split .chart svg{max-height:170px}
+.panes.split .readout-grid{grid-template-columns:repeat(auto-fit,minmax(96px,1fr))}
+.panes.split .hero .v{font-size:34px}
 footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--rule);font-size:13px;color:var(--muted)}
 </style></head><body>
 <div class="wrap">
@@ -119,7 +146,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--rule);font-si
 <header>
   <div class="lbl"><a id="back" href="#" style="color:var(--accent);text-decoration:none;display:none">&larr; all runs</a><span id="eyebrow">cr-sim &middot; reinforcement learning</span></div>
   <h1 id="title">cr-sim training</h1>
-  <p class="dek">A PPO agent learning Clash Royale against frozen copies of itself, rewarded by the change in what the board is already worth.</p>
+  <p class="dek">A PPO agent learning Clash Royale, rewarded by the change in what the board is already worth.</p>
   <div class="meta">
     <span class="live"><span class="dot"></span> live</span>
     <span>reloads every 20s</span>
@@ -127,21 +154,12 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--rule);font-si
   </div>
 </header>
 
-<div class="readout">
-  <div class="readout-head"><span class="lbl" style="color:var(--ink)" id="runname">run</span></div>
-  <div class="bar"><i id="bar" style="width:0%"></i></div>
-  <div class="readout-grid" id="general"></div>
+<div class="tabbar">
+  <div class="tabs" id="tabs" role="tablist"></div>
+  <button class="split-toggle" id="split" aria-pressed="false">Split view</button>
 </div>
 
-<h2>Is it learning</h2>
-<p class="lede">One number decides this, and it is not the win rate. Everything else on the page explains or qualifies it.</p>
-<div id="hero"></div>
-<div class="tiles" id="tiles"></div>
-<div id="charts1"></div>
-
-<h2>Is the critic working</h2>
-<p class="lede">PPO learns from the gap between what happened and what the critic expected. A critic that predicts nothing turns that gap into noise, and the policy gets pushed in near-random directions &mdash; which is what stalled the previous run.</p>
-<div id="charts2"></div>
+<div class="panes" id="panes"></div>
 
 <h2>What each number means</h2>
 <p class="lede">Written out because most of these are easy to misread, and two of them were misread on this project already.</p>
@@ -180,7 +198,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--rule);font-si
 </div>
 
 <script>
-const DATA = {"series": {"steps": [1536, 3072, 4608, 6144, 7680, 9216, 10752, 12288, 13824, 15360, 16896, 18432, 19968, 21504, 23040, 24576, 26112, 27648, 29184, 30720, 32256, 33792, 35328, 36864, 38400, 39936, 41472, 43008, 44544, 46080, 47616, 49152, 50688, 52224, 53760, 55296, 56832, 58368, 59904, 61440, 62976, 64512, 66048, 67584, 69120, 70656, 72192, 73728, 75264, 76800, 78336, 79872, 81408, 82944, 84480, 86016, 87552, 89088, 90624, 92160, 93696, 95232, 96768, 98304, 99840, 101376, 102912], "lift": [[15360, 0.16243462069477782], [30720, 0.23192025343507738], [46080, -0.11987722008493701], [61440, -0.08512202824071569], [76800, 0.19493178417946389], [92160, -0.12242675961149099]], "win": [[15360, 0.425], [30720, 0.35], [46080, 0.275], [61440, 0.3], [76800, 0.4], [92160, 0.25]], "control": [[15360, 0.3], [30720, 0.3], [46080, 0.3], [61440, 0.3], [76800, 0.3], [92160, 0.3]], "entropy": [[1536, 4.374667167663574], [3072, 4.364427089691162], [4608, 4.340724468231201], [6144, 4.287002086639404], [7680, 4.326674938201904], [9216, 4.318586826324463], [10752, 4.289457321166992], [12288, 4.290485858917236], [13824, 4.377610206604004], [15360, 4.323667049407959], [16896, 4.27797269821167], [18432, 4.298269748687744], [19968, 4.3192620277404785], [21504, 4.295341491699219], [23040, 4.27528715133667], [24576, 4.354054927825928], [26112, 4.296803951263428], [27648, 4.249642848968506], [29184, 4.225522518157959], [30720, 4.248920917510986], [32256, 4.295377731323242], [33792, 4.320774555206299], [35328, 4.321206569671631], [36864, 4.2668352127075195], [38400, 4.332435131072998], [39936, 4.328413486480713], [41472, 4.264623165130615], [43008, 4.307914733886719], [44544, 4.323557376861572], [46080, 4.236715793609619], [47616, 4.2734808921813965], [49152, 4.222801208496094], [50688, 4.219320774078369], [52224, 4.182014465332031], [53760, 4.206482410430908], [55296, 4.142427444458008], [56832, 4.192453384399414], [58368, 4.141599178314209], [59904, 4.147772312164307], [61440, 4.101512432098389], [62976, 4.155855178833008], [64512, 4.196194171905518], [66048, 4.196519374847412], [67584, 4.295076847076416], [69120, 4.225343704223633], [70656, 4.215326309204102], [72192, 4.109855651855469], [73728, 4.142295837402344], [75264, 4.148784160614014], [76800, 4.1740264892578125], [78336, 4.062948703765869], [79872, 4.107787609100342], [81408, 4.105020046234131], [82944, 4.1708292961120605], [84480, 4.173136234283447], [86016, 4.06784200668335], [87552, 4.050334453582764], [89088, 4.065800189971924], [90624, 3.991579055786133], [92160, 4.041970729827881], [93696, 4.066147327423096], [95232, 4.095337867736816], [96768, 4.202641487121582], [98304, 4.165167331695557], [99840, 4.162115097045898], [101376, 4.121084213256836], [102912, 4.205910682678223]], "value_loss": [[1536, 1.8729057312011719], [3072, 5.944141387939453], [4608, 5.507359027862549], [6144, 5.270884037017822], [7680, 8.944193840026855], [9216, 5.456034183502197], [10752, 8.626442909240723], [12288, 5.5017218589782715], [13824, 4.6483378410339355], [15360, 5.21320104598999], [16896, 4.118589878082275], [18432, 4.762368202209473], [19968, 4.917858123779297], [21504, 5.602353572845459], [23040, 5.312483310699463], [24576, 4.829191207885742], [26112, 6.703196048736572], [27648, 5.265225887298584], [29184, 5.419557571411133], [30720, 4.830206871032715], [32256, 6.283257961273193], [33792, 9.905957221984863], [35328, 6.428354263305664], [36864, 6.398131847381592], [38400, 5.118416786193848], [39936, 4.041073322296143], [41472, 3.215733528137207], [43008, 5.475423336029053], [44544, 7.4623236656188965], [46080, 9.031523704528809], [47616, 2.6755332946777344], [49152, 5.807882785797119], [50688, 5.811622619628906], [52224, 7.692083835601807], [53760, 5.778106212615967], [55296, 4.640573024749756], [56832, 6.085434436798096], [58368, 5.7448906898498535], [59904, 6.5093092918396], [61440, 5.267384052276611], [62976, 8.31711483001709], [64512, 8.27816104888916], [66048, 5.561320781707764], [67584, 6.098013401031494], [69120, 4.43351936340332], [70656, 4.5231194496154785], [72192, 8.338400840759277], [73728, 6.472330570220947], [75264, 3.5845229625701904], [76800, 6.022157192230225], [78336, 8.11145305633545], [79872, 6.84845495223999], [81408, 7.507486820220947], [82944, 5.386478424072266], [84480, 6.038296222686768], [86016, 7.9299540519714355], [87552, 5.2192864418029785], [89088, 4.883322238922119], [90624, 5.0860676765441895], [92160, 9.129578590393066], [93696, 9.14251708984375], [95232, 5.937981128692627], [96768, 5.49668550491333], [98304, 9.37935733795166], [99840, 6.72649621963501], [101376, 6.131503582000732], [102912, 4.266621112823486]], "rollout_win": [[1536, 0.12280701754385964], [3072, 0.14634146341463414], [4608, 0.13114754098360656], [6144, 0.125], [7680, 0.145], [9216, 0.14], [10752, 0.155], [12288, 0.15], [13824, 0.15], [15360, 0.14], [16896, 0.135], [18432, 0.13], [19968, 0.15], [21504, 0.165], [23040, 0.185], [24576, 0.175], [26112, 0.17], [27648, 0.145], [29184, 0.1], [30720, 0.1], [32256, 0.115], [33792, 0.12], [35328, 0.135], [36864, 0.125], [38400, 0.16], [39936, 0.16], [41472, 0.145], [43008, 0.13], [44544, 0.145], [46080, 0.19], [47616, 0.195], [49152, 0.155], [50688, 0.135], [52224, 0.125], [53760, 0.17], [55296, 0.17], [56832, 0.185], [58368, 0.155], [59904, 0.165], [61440, 0.16], [62976, 0.18], [64512, 0.17], [66048, 0.205], [67584, 0.19], [69120, 0.175], [70656, 0.13], [72192, 0.15], [73728, 0.19], [75264, 0.19], [76800, 0.16], [78336, 0.16], [79872, 0.175], [81408, 0.175], [82944, 0.195], [84480, 0.18], [86016, 0.19], [87552, 0.175], [89088, 0.185], [90624, 0.18], [92160, 0.195], [93696, 0.195], [95232, 0.185], [96768, 0.18], [98304, 0.165], [99840, 0.17], [101376, 0.165], [102912, 0.14]], "explained_variance": [], "ret_std": [], "noop": [[1536, 0.01692708395421505], [3072, 0.013671875], [4608, 0.013020833022892475], [6144, 0.01692708395421505], [7680, 0.015625], [9216, 0.0234375], [10752, 0.02213541604578495], [12288, 0.02083333395421505], [13824, 0.02213541604578495], [15360, 0.014973958022892475], [16896, 0.01692708395421505], [18432, 0.01692708395421505], [19968, 0.014973958022892475], [21504, 0.02018229104578495], [23040, 0.02799479104578495], [24576, 0.01953125], [26112, 0.01822916604578495], [27648, 0.015625], [29184, 0.014973958022892475], [30720, 0.012369791977107525], [32256, 0.008463541977107525], [33792, 0.012369791977107525], [35328, 0.01171875], [36864, 0.013671875], [38400, 0.013020833022892475], [39936, 0.014322916977107525], [41472, 0.014322916977107525], [43008, 0.013671875], [44544, 0.01888020895421505], [46080, 0.013020833022892475], [47616, 0.01888020895421505], [49152, 0.02018229104578495], [50688, 0.017578125], [52224, 0.01953125], [53760, 0.02083333395421505], [55296, 0.02669270895421505], [56832, 0.009765625], [58368, 0.014322916977107525], [59904, 0.01692708395421505], [61440, 0.017578125], [62976, 0.013020833022892475], [64512, 0.014973958022892475], [66048, 0.01953125], [67584, 0.02278645895421505], [69120, 0.02018229104578495], [70656, 0.01888020895421505], [72192, 0.02734375], [73728, 0.01692708395421505], [75264, 0.02083333395421505], [76800, 0.01627604104578495], [78336, 0.02083333395421505], [79872, 0.02018229104578495], [81408, 0.0325520820915699], [82944, 0.029296875], [84480, 0.02408854104578495], [86016, 0.02083333395421505], [87552, 0.033203125], [89088, 0.01692708395421505], [90624, 0.01171875], [92160, 0.009114583022892475], [93696, 0.017578125], [95232, 0.011067708022892475], [96768, 0.01822916604578495], [98304, 0.010416666977107525], [99840, 0.012369791977107525], [101376, 0.013020833022892475], [102912, 0.01171875]]}, "summary": {"updates": 67, "steps": 102912, "episodes": 4197, "steps_per_second": 18.157033834803904, "entropy": 4.205910682678223, "evaluations": 6, "latest_lift": -0.12242675961149099, "latest_win": 0.25, "control_win": 0.3, "best_lift": 0.23192025343507738, "best_at_steps": 30720, "total_steps": null, "elapsed_seconds": null, "eta_hours": null}, "title": "overnight-selfplay", "back": "index.html"};
+const DATA = {"runs": {"overnight-selfplay": {"series": {"steps": [1536, 3072, 4608, 6144, 7680, 9216, 10752, 12288, 13824, 15360, 16896, 18432, 19968, 21504, 23040, 24576, 26112, 27648, 29184, 30720, 32256, 33792, 35328, 36864, 38400, 39936, 41472, 43008, 44544, 46080, 47616, 49152, 50688, 52224, 53760, 55296, 56832, 58368, 59904, 61440, 62976, 64512, 66048, 67584, 69120, 70656, 72192, 73728, 75264, 76800, 78336, 79872, 81408, 82944, 84480, 86016, 87552, 89088, 90624, 92160, 93696, 95232, 96768, 98304, 99840, 101376, 102912], "lift": [[15360, 0.16243462069477782], [30720, 0.23192025343507738], [46080, -0.11987722008493701], [61440, -0.08512202824071569], [76800, 0.19493178417946389], [92160, -0.12242675961149099]], "win": [[15360, 0.425], [30720, 0.35], [46080, 0.275], [61440, 0.3], [76800, 0.4], [92160, 0.25]], "control": [[15360, 0.3], [30720, 0.3], [46080, 0.3], [61440, 0.3], [76800, 0.3], [92160, 0.3]], "entropy": [[1536, 4.374667167663574], [3072, 4.364427089691162], [4608, 4.340724468231201], [6144, 4.287002086639404], [7680, 4.326674938201904], [9216, 4.318586826324463], [10752, 4.289457321166992], [12288, 4.290485858917236], [13824, 4.377610206604004], [15360, 4.323667049407959], [16896, 4.27797269821167], [18432, 4.298269748687744], [19968, 4.3192620277404785], [21504, 4.295341491699219], [23040, 4.27528715133667], [24576, 4.354054927825928], [26112, 4.296803951263428], [27648, 4.249642848968506], [29184, 4.225522518157959], [30720, 4.248920917510986], [32256, 4.295377731323242], [33792, 4.320774555206299], [35328, 4.321206569671631], [36864, 4.2668352127075195], [38400, 4.332435131072998], [39936, 4.328413486480713], [41472, 4.264623165130615], [43008, 4.307914733886719], [44544, 4.323557376861572], [46080, 4.236715793609619], [47616, 4.2734808921813965], [49152, 4.222801208496094], [50688, 4.219320774078369], [52224, 4.182014465332031], [53760, 4.206482410430908], [55296, 4.142427444458008], [56832, 4.192453384399414], [58368, 4.141599178314209], [59904, 4.147772312164307], [61440, 4.101512432098389], [62976, 4.155855178833008], [64512, 4.196194171905518], [66048, 4.196519374847412], [67584, 4.295076847076416], [69120, 4.225343704223633], [70656, 4.215326309204102], [72192, 4.109855651855469], [73728, 4.142295837402344], [75264, 4.148784160614014], [76800, 4.1740264892578125], [78336, 4.062948703765869], [79872, 4.107787609100342], [81408, 4.105020046234131], [82944, 4.1708292961120605], [84480, 4.173136234283447], [86016, 4.06784200668335], [87552, 4.050334453582764], [89088, 4.065800189971924], [90624, 3.991579055786133], [92160, 4.041970729827881], [93696, 4.066147327423096], [95232, 4.095337867736816], [96768, 4.202641487121582], [98304, 4.165167331695557], [99840, 4.162115097045898], [101376, 4.121084213256836], [102912, 4.205910682678223]], "value_loss": [[1536, 1.8729057312011719], [3072, 5.944141387939453], [4608, 5.507359027862549], [6144, 5.270884037017822], [7680, 8.944193840026855], [9216, 5.456034183502197], [10752, 8.626442909240723], [12288, 5.5017218589782715], [13824, 4.6483378410339355], [15360, 5.21320104598999], [16896, 4.118589878082275], [18432, 4.762368202209473], [19968, 4.917858123779297], [21504, 5.602353572845459], [23040, 5.312483310699463], [24576, 4.829191207885742], [26112, 6.703196048736572], [27648, 5.265225887298584], [29184, 5.419557571411133], [30720, 4.830206871032715], [32256, 6.283257961273193], [33792, 9.905957221984863], [35328, 6.428354263305664], [36864, 6.398131847381592], [38400, 5.118416786193848], [39936, 4.041073322296143], [41472, 3.215733528137207], [43008, 5.475423336029053], [44544, 7.4623236656188965], [46080, 9.031523704528809], [47616, 2.6755332946777344], [49152, 5.807882785797119], [50688, 5.811622619628906], [52224, 7.692083835601807], [53760, 5.778106212615967], [55296, 4.640573024749756], [56832, 6.085434436798096], [58368, 5.7448906898498535], [59904, 6.5093092918396], [61440, 5.267384052276611], [62976, 8.31711483001709], [64512, 8.27816104888916], [66048, 5.561320781707764], [67584, 6.098013401031494], [69120, 4.43351936340332], [70656, 4.5231194496154785], [72192, 8.338400840759277], [73728, 6.472330570220947], [75264, 3.5845229625701904], [76800, 6.022157192230225], [78336, 8.11145305633545], [79872, 6.84845495223999], [81408, 7.507486820220947], [82944, 5.386478424072266], [84480, 6.038296222686768], [86016, 7.9299540519714355], [87552, 5.2192864418029785], [89088, 4.883322238922119], [90624, 5.0860676765441895], [92160, 9.129578590393066], [93696, 9.14251708984375], [95232, 5.937981128692627], [96768, 5.49668550491333], [98304, 9.37935733795166], [99840, 6.72649621963501], [101376, 6.131503582000732], [102912, 4.266621112823486]], "rollout_win": [[1536, 0.12280701754385964], [3072, 0.14634146341463414], [4608, 0.13114754098360656], [6144, 0.125], [7680, 0.145], [9216, 0.14], [10752, 0.155], [12288, 0.15], [13824, 0.15], [15360, 0.14], [16896, 0.135], [18432, 0.13], [19968, 0.15], [21504, 0.165], [23040, 0.185], [24576, 0.175], [26112, 0.17], [27648, 0.145], [29184, 0.1], [30720, 0.1], [32256, 0.115], [33792, 0.12], [35328, 0.135], [36864, 0.125], [38400, 0.16], [39936, 0.16], [41472, 0.145], [43008, 0.13], [44544, 0.145], [46080, 0.19], [47616, 0.195], [49152, 0.155], [50688, 0.135], [52224, 0.125], [53760, 0.17], [55296, 0.17], [56832, 0.185], [58368, 0.155], [59904, 0.165], [61440, 0.16], [62976, 0.18], [64512, 0.17], [66048, 0.205], [67584, 0.19], [69120, 0.175], [70656, 0.13], [72192, 0.15], [73728, 0.19], [75264, 0.19], [76800, 0.16], [78336, 0.16], [79872, 0.175], [81408, 0.175], [82944, 0.195], [84480, 0.18], [86016, 0.19], [87552, 0.175], [89088, 0.185], [90624, 0.18], [92160, 0.195], [93696, 0.195], [95232, 0.185], [96768, 0.18], [98304, 0.165], [99840, 0.17], [101376, 0.165], [102912, 0.14]], "explained_variance": [], "ret_std": [], "noop": [[1536, 0.01692708395421505], [3072, 0.013671875], [4608, 0.013020833022892475], [6144, 0.01692708395421505], [7680, 0.015625], [9216, 0.0234375], [10752, 0.02213541604578495], [12288, 0.02083333395421505], [13824, 0.02213541604578495], [15360, 0.014973958022892475], [16896, 0.01692708395421505], [18432, 0.01692708395421505], [19968, 0.014973958022892475], [21504, 0.02018229104578495], [23040, 0.02799479104578495], [24576, 0.01953125], [26112, 0.01822916604578495], [27648, 0.015625], [29184, 0.014973958022892475], [30720, 0.012369791977107525], [32256, 0.008463541977107525], [33792, 0.012369791977107525], [35328, 0.01171875], [36864, 0.013671875], [38400, 0.013020833022892475], [39936, 0.014322916977107525], [41472, 0.014322916977107525], [43008, 0.013671875], [44544, 0.01888020895421505], [46080, 0.013020833022892475], [47616, 0.01888020895421505], [49152, 0.02018229104578495], [50688, 0.017578125], [52224, 0.01953125], [53760, 0.02083333395421505], [55296, 0.02669270895421505], [56832, 0.009765625], [58368, 0.014322916977107525], [59904, 0.01692708395421505], [61440, 0.017578125], [62976, 0.013020833022892475], [64512, 0.014973958022892475], [66048, 0.01953125], [67584, 0.02278645895421505], [69120, 0.02018229104578495], [70656, 0.01888020895421505], [72192, 0.02734375], [73728, 0.01692708395421505], [75264, 0.02083333395421505], [76800, 0.01627604104578495], [78336, 0.02083333395421505], [79872, 0.02018229104578495], [81408, 0.0325520820915699], [82944, 0.029296875], [84480, 0.02408854104578495], [86016, 0.02083333395421505], [87552, 0.033203125], [89088, 0.01692708395421505], [90624, 0.01171875], [92160, 0.009114583022892475], [93696, 0.017578125], [95232, 0.011067708022892475], [96768, 0.01822916604578495], [98304, 0.010416666977107525], [99840, 0.012369791977107525], [101376, 0.013020833022892475], [102912, 0.01171875]]}, "summary": {"updates": 67, "steps": 102912, "episodes": 4197, "steps_per_second": 18.157033834803904, "entropy": 4.205910682678223, "evaluations": 6, "latest_lift": -0.12242675961149099, "latest_win": 0.25, "control_win": 0.3, "best_lift": 0.23192025343507738, "best_at_steps": 30720, "total_steps": null, "elapsed_seconds": null, "eta_hours": null}, "live": true}}, "order": ["overnight-selfplay"], "back": "index.html"};
 
 function num(x,d){return (x===null||x===undefined||isNaN(x))?'--':Number(x).toFixed(d===undefined?2:d);}
 function pct(x){return (x===null||x===undefined)?'--':(x*100).toFixed(0)+'%';}
@@ -197,9 +215,10 @@ function cell(v,k,sm){
   return '<div class="cell"><span class="kpi-n">'+v+(sm?' <small>'+sm+'</small>':'')+'</span><span class="lbl">'+k+'</span></div>';
 }
 
-function renderGeneral(s,S){
+function renderGeneral(s,S,pane){
   var doneFrac = s.total_steps ? Math.min(1, (s.steps||0)/s.total_steps) : 0;
-  document.getElementById('bar').style.width = (doneFrac*100).toFixed(1)+'%';
+  var bar = pane ? pane.querySelector('[data-role="bar"]') : null;
+  if (bar) bar.style.width = (doneFrac*100).toFixed(1)+'%';
   var remain = (s.total_steps && s.steps_per_second)
       ? (s.total_steps-s.steps)/s.steps_per_second : null;
   return [
@@ -328,38 +347,44 @@ function chart(title,note,series,opts){
     +'<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="'+esc(title)+'">'+body+'</svg></div>';
 }
 
-(function start(){
-  var S=DATA.series, s=DATA.summary;
-  document.getElementById('title').textContent=DATA.title;
-  if (DATA.back) {
-    var b=document.getElementById('back');
-    b.href=DATA.back; b.style.display='inline';
-    document.getElementById('eyebrow').style.display='none';
-  }
-  document.getElementById('runname').textContent='run "'+DATA.title+'"';
-  document.getElementById('stamp').textContent='updated '+new Date().toLocaleTimeString();
-  document.getElementById('general').innerHTML=renderGeneral(s,S);
-  document.getElementById('hero').innerHTML=renderHero(s);
-  document.getElementById('tiles').innerHTML=renderTiles(s,S);
+function paneMarkup(id){
+  return '<div class="pane" data-pane="'+id+'">'
+    + '<div class="pane-head"><span class="lbl">showing</span>'
+    + '<select data-role="pick"></select></div>'
+    + '<div class="readout"><div class="readout-head"><span class="lbl" style="color:var(--ink)" data-role="name"></span></div>'
+    + '<div class="bar"><i data-role="bar" style="width:0%"></i></div>'
+    + '<div class="readout-grid" data-role="general"></div></div>'
+    + '<h2>Is it learning</h2><div data-role="hero"></div>'
+    + '<div class="tiles" data-role="tiles"></div><div data-role="charts1"></div>'
+    + '<h2>Is the critic working</h2><div data-role="charts2"></div></div>';
+}
+
+function fillPane(pane, name){
+  var run = DATA.runs[name];
+  if (!run) return;
+  var S = run.series, s = run.summary;
+  var q = function(role){ return pane.querySelector('[data-role="'+role+'"]'); };
+  q('name').textContent = 'run "'+name+'"'+(run.live ? '' : ' (finished)');
+  q('general').innerHTML = renderGeneral(s, S, pane);
+  q('hero').innerHTML = renderHero(s);
+  q('tiles').innerHTML = renderTiles(s, S);
 
   var A='#2E86AB', B='#8A6516', C='#A2352C', D='#26704F', G='#8695A4';
-
-  document.getElementById('charts1').innerHTML =
+  q('charts1').innerHTML =
       chart('Lift vs control',
         'Each point is 40 fixed battles against a random agent, paired so both sides play the same ones. Zero is the line that matters.',
         [{name:'lift',color:A,points:S.lift}], {zero:true, fill:true})
     + '<div class="grid2">'
     + chart('Win rate, agent against the random control',
-        'Both are low because most matches end 0-0, and a draw is not a win.',
+        'Draws are not wins, so the control&rsquo;s own rate is the bar.',
         [{name:'agent',color:A,points:S.win},{name:'random',color:G,points:S.control}], {asPct:true})
     + chart('Rollout win rate',
         'Measured while exploring, and about eighteen points optimistic on this project.',
         [{name:'rollout win',color:B,points:S.rollout_win}], {asPct:true, emptyText:'not enough updates yet'})
     + '</div>';
-
-  document.getElementById('charts2').innerHTML =
+  q('charts2').innerHTML =
       chart('Explained variance',
-        'Share of the outcome the critic can predict. 0 is no better than guessing the average; it sat near 0.06 on the last run.',
+        'Share of the outcome the critic can predict. 0 is no better than guessing the average.',
         [{name:'explained var',color:D,points:S.explained_variance}], {zero:true, fill:true, emptyText:'not enough updates yet'})
     + '<div class="grid2">'
     + chart('Critic error and what it is fitting',
@@ -371,16 +396,82 @@ function chart(title,note,series,opts){
         [{name:'entropy',color:B,points:S.entropy},{name:'pass',color:G,points:S.noop}],
         {emptyText:'not enough updates yet'})
     + '</div>';
+}
 
-  document.getElementById('foot').textContent = s.updates
-    ? s.updates+' updates recorded, '+s.evaluations+' evaluations. Every figure is read from the run’s own metrics file; none is estimated except the remaining-time figure, which assumes the current rate holds.'
-    : 'No updates recorded yet.';
+function remember(key, value){ try{ localStorage.setItem(key, value); }catch(e){} }
+function recall(key, fallback){
+  try{ var v = localStorage.getItem(key); return v === null ? fallback : v; }catch(e){ return fallback; }
+}
+
+(function start(){
+  var order = DATA.order, panesEl = document.getElementById('panes');
+  document.getElementById('stamp').textContent='updated '+new Date().toLocaleTimeString();
+  if (DATA.back) {
+    var b=document.getElementById('back');
+    b.href=DATA.back; b.style.display='inline';
+    document.getElementById('eyebrow').style.display='none';
+  }
+
+  var split = recall('crsim-split','0') === '1' && order.length > 1;
+  var picked = [
+    recall('crsim-pane0', order[0]),
+    recall('crsim-pane1', order[Math.min(1, order.length-1)])
+  ].map(function(n){ return DATA.runs[n] ? n : order[0]; });
+
+  function paintTabs(){
+    document.getElementById('tabs').innerHTML = order.map(function(n){
+      var r = DATA.runs[n], lift = r.summary.latest_lift;
+      var val = (lift === null || lift === undefined) ? '' :
+        '<span class="val">'+(lift>0?'+':'')+Number(lift).toFixed(2)+'</span>';
+      var on = picked.slice(0, split ? 2 : 1).indexOf(n) >= 0;
+      return '<button class="tab" role="tab" data-run="'+n+'" aria-selected="'+on+'">'
+        + '<span class="pip'+(r.live?' on':'')+'"></span>'+n+val+'</button>';
+    }).join('');
+    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function(t){
+      t.addEventListener('click', function(){
+        picked[0] = t.dataset.run; remember('crsim-pane0', picked[0]); draw();
+      });
+    });
+  }
+
+  function draw(){
+    document.getElementById('title').textContent = split ? 'cr-sim training' : picked[0];
+    panesEl.className = 'panes' + (split ? ' split' : '');
+    panesEl.innerHTML = paneMarkup(0) + (split ? paneMarkup(1) : '');
+    for (var i = 0; i < (split ? 2 : 1); i++) {
+      (function(i){
+        var pane = panesEl.querySelector('[data-pane="'+i+'"]');
+        var pick = pane.querySelector('[data-role="pick"]');
+        pick.innerHTML = order.map(function(n){
+          return '<option value="'+n+'"'+(n===picked[i]?' selected':'')+'>'+n+'</option>';
+        }).join('');
+        pick.addEventListener('change', function(){
+          picked[i] = pick.value; remember('crsim-pane'+i, pick.value);
+          fillPane(pane, picked[i]); paintTabs();
+        });
+        pane.querySelector('.pane-head').style.display = split ? 'flex' : 'none';
+        fillPane(pane, picked[i]);
+      })(i);
+    }
+    paintTabs();
+  }
+
+  var toggle = document.getElementById('split');
+  toggle.setAttribute('aria-pressed', String(split));
+  if (order.length < 2) toggle.style.display = 'none';
+  toggle.addEventListener('click', function(){
+    split = !split; remember('crsim-split', split ? '1' : '0');
+    toggle.setAttribute('aria-pressed', String(split));
+    draw();
+  });
+
+  draw();
 
   try{
-    var y=sessionStorage.getItem('crsim-scroll');
+    var y=localStorage.getItem('crsim-scroll');
     if(y) window.scrollTo(0, parseInt(y,10));
     window.addEventListener('beforeunload', function(){
-      try{ sessionStorage.setItem('crsim-scroll', String(window.scrollY)); }catch(e){}
+      try{ localStorage.setItem('crsim-scroll', String(window.scrollY)); }catch(e){}
     });
   }catch(e){}
 })();

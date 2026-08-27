@@ -58,8 +58,13 @@ def collect(runs_dir: Path) -> list[dict[str, Any]]:
     those files are still on disk. Averaging over them would count each update
     twice, which is exactly the reading that made a stalled run look busy.
     """
+    from .watch import _started_at
+
     found: list[dict[str, Any]] = []
-    for run in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
+    # Chronological, matching the live page. A comparison table sorted by name
+    # puts this week's run between two from last week, and the question being
+    # asked is what changed since the previous one.
+    for run in sorted((p for p in runs_dir.iterdir() if p.is_dir()), key=_started_at):
         rows = read_metrics(run / "metrics.jsonl")
         if not rows:
             continue

@@ -76,6 +76,15 @@ def summarise(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "best_at_steps": best.get("steps") if best else None,
         "total_steps": last.get("total_steps"),
         "elapsed_seconds": last.get("elapsed_seconds"),
+        "ancestor_win": (
+            [r["ancestor_win"] for r in rows if "ancestor_win" in r] or [None]
+        )[-1],
+        "ancestor_loss": (
+            [r["ancestor_loss"] for r in rows if "ancestor_loss" in r] or [None]
+        )[-1],
+        "ancestor_age": (
+            [r["ancestor_age"] for r in rows if "ancestor_age" in r] or [None]
+        )[-1],
         # Hours left at the current rate. Wrong the moment the rate changes,
         # which is why it is labelled as an estimate rather than a countdown.
         "eta_hours": (
@@ -84,6 +93,26 @@ def summarise(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
             if last.get("total_steps") else None
         ),
     }
+
+
+
+def _started_at(run: Path) -> float:
+    """When a run began, as a timestamp.
+
+    Taken from config.json, which is written once before the first update, so
+    it dates the start rather than the most recent write. Falls back to the
+    metrics file for runs that predate the config being written at all.
+    """
+    for name in ("config.json", "metrics.jsonl"):
+        path = run / name
+        if path.is_file():
+            stat = path.stat()
+            # st_ctime is creation time on Windows and metadata-change time
+            # elsewhere; either dates the start closely enough to order by,
+            # and st_mtime would sort by last write, which is a different
+            # question.
+            return min(stat.st_ctime, stat.st_mtime)
+    return 0.0
 
 
 def _series_of(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -105,6 +134,10 @@ def _series_of(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "explained_variance": pair("explained_variance"),
         "ret_std": pair("ret_std"),
         "noop": pair("noop_fraction"),
+        # The ladder: how the policy fares against the oldest version of
+        # itself still in the pool. Only self-play runs record it.
+        "ancestor_win": pair("ancestor_win"),
+        "ancestor_loss": pair("ancestor_loss"),
     }
 
 
@@ -314,6 +347,18 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--rule);font-si
   <dd>The only number that says whether the agent is any good. It plays a <b>uniform-random opponent</b> over 40 fixed battles, and a random agent plays the <em>same</em> 40. The gap is divided by how much the random agent&rsquo;s own score bounces around, so the unit is standard deviations of noise.</dd>
   <dd class="read">0 means no better than random, whatever the win rate says. Roughly 0.5 is a real effect. Below about 0.25 is inside the noise and should not be believed.</dd>
 
+  <dt>Beats its past self</dt>
+  <dd>Self-play only. Every so often the policy plays 30 battles against the
+  <b>oldest version of itself</b> still kept in the opponent pool, and this is
+  how it did.</dd>
+  <dd class="read">The most sensitive measure here, because the reference is
+  fixed, deterministic, and roughly the right difficulty. Lift against a random
+  control has a spread wide enough that a +0.375 reading on this project
+  measured &minus;0.033 when replayed over 300 battles. Read it for what it is
+  though: beating your past self is evidence of movement, not of skill &mdash;
+  two policies can trade wins while both stay hopeless, which is why the random
+  control stays as an anchor.</dd>
+
   <dt>Win rate vs control win rate</dt>
   <dd>Share of those 40 battles each side won. Both look low because most 120-second matches end 0&ndash;0 with no tower falling, and a draw is not a win &mdash; so the control&rsquo;s own rate, not 50%, is the bar to clear.</dd>
 
@@ -424,7 +469,16 @@ function renderTiles(s,S){
       'How often it declined to play. Never punished, so a run can quietly collapse into it.',
       (np!==null&&np>0.5)?'crit':''),
     tile('rollout win rate', rw===null?'--':pct(rw),
-      'Measured while exploring, and about eighteen points optimistic here. Do not steer by it.', 'dim')
+      'Measured while exploring, and about eighteen points optimistic here. Do not steer by it.', 'dim'),
+    tile('beats its past self',
+      (s.ancestor_win===null||s.ancestor_win===undefined)?'--':
+        (pct(s.ancestor_win)+' <span class="dim" style="font-size:17px">w / '+pct(s.ancestor_loss)+' l</span>'),
+      (s.ancestor_win===null||s.ancestor_win===undefined)
+        ? 'Self-play runs only. Nothing to climb against yet.'
+        : ('Against generation <b>'+s.ancestor_age+'</b>, the oldest version kept. '
+           +'Above 50% of decided battles means it is genuinely moving.'),
+      (s.ancestor_win===null||s.ancestor_win===undefined) ? 'dim'
+        : (s.ancestor_win > s.ancestor_loss ? 'good' : 'warn'))
   ].join('');
 }
 
@@ -517,7 +571,11 @@ function fillPane(pane, name){
 
   var A='#2E86AB', B='#8A6516', C='#A2352C', D='#26704F', G='#8695A4';
   q('charts1').innerHTML =
-      chart('Lift vs control',
+      chart('Beating its own past',
+        'Wins and losses against the oldest version of itself still in the pool. A fixed, non-noisy reference at roughly the right difficulty -- unlike the random control, whose spread turned a +0.375 reading into -0.033 on retest. Empty for runs that were not self-play.',
+        [{name:'wins',color:D,points:S.ancestor_win},{name:'losses',color:C,points:S.ancestor_loss}],
+        {asPct:true, emptyText:'not a self-play run'})
+    + chart('Lift vs control',
         'Each point is 40 fixed battles against a random agent, paired so both sides play the same ones. Zero is the line that matters.',
         [{name:'lift',color:A,points:S.lift}], {zero:true, fill:true})
     + '<div class="grid2">'
@@ -667,10 +725,15 @@ def main(argv: list[str] | None = None) -> int:
         root = ROOT / "runs"
         if not root.is_dir():
             return []
-        return sorted(
+        found = [
             d for d in root.iterdir()
             if d.is_dir() and (d / "metrics.jsonl").is_file()
-        )
+        ]
+        # Ordered by when each run started, not by name. Alphabetical put
+        # today's run between two from last week, and the question being
+        # asked of this page is almost always "what changed since the last
+        # one" -- which only reads properly in the order they happened.
+        return sorted(found, key=_started_at)
 
     runs = discover()
     if not runs:

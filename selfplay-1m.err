@@ -1,0 +1,18 @@
+Process SpawnProcess-6:
+Traceback (most recent call last):
+  File "C:\Users\evanP\AppData\Local\Python\pythoncore-3.14-64\Lib\multiprocessing\process.py", line 320, in _bootstrap
+    self.run()
+    ~~~~~~~~^^
+  File "C:\Users\evanP\AppData\Local\Python\pythoncore-3.14-64\Lib\multiprocessing\process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\evanP\cr-sim\cr_sim\api\vec.py", line 192, in _worker
+    conn.send(out)
+    ~~~~~~~~~^^^^^
+  File "C:\Users\evanP\AppData\Local\Python\pythoncore-3.14-64\Lib\multiprocessing\connection.py", line 212, in send
+    self._send_bytes(_ForkingPickler.dumps(obj))
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\evanP\AppData\Local\Python\pythoncore-3.14-64\Lib\multiprocessing\connection.py", line 295, in _send_bytes
+    ov, err = _winapi.WriteFile(self._handle, buf, overlapped=True)
+              ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+BrokenPipeError: [WinError 232] The pipe is being closed

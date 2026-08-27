@@ -54,7 +54,7 @@ from ..engine.entity import Team
 from .encoding import NOOP_SLOT
 from .env import CRSimEnv
 
-__all__ = ["VecEnvConfig", "CRSimVecEnv"]
+__all__ = ["VecEnvConfig", "CRSimVecEnv", "WorkerDied"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +209,23 @@ def _worker(config: VecEnvConfig, conn) -> None:
         conn.close()
 
 
+
+class WorkerDied(RuntimeError):
+    """A worker process stopped answering.
+
+    Raised rather than waited on. A plain ``recv`` on a dead worker's pipe
+    blocks for ever, and the whole run then sits at full memory and no CPU
+    looking exactly like a slow update -- which is how a self-play run went
+    unnoticed for four minutes before anyone checked whether it was alive.
+    """
+
+
+#: How long to wait for a worker before concluding it is gone. Generous: a
+#: single step can take a second or two on a crowded machine, and killing a
+#: healthy run is worse than being slow to notice a dead one.
+_WORKER_TIMEOUT = 120.0
+
+
 class CRSimVecEnv:
     """``num_envs`` independent :class:`~cr_sim.api.env.CRSimEnv` instances,
     each in its own worker process, stepped in lockstep.
@@ -268,6 +285,24 @@ class CRSimVecEnv:
             self._procs.append(proc)
         self._closed = False
 
+    def _recv(self, conn, proc):
+        """Receive one reply, or say which worker died instead of hanging."""
+        if not conn.poll(_WORKER_TIMEOUT):
+            alive = proc.is_alive()
+            raise WorkerDied(
+                f"worker pid={proc.pid} sent nothing in {_WORKER_TIMEOUT:.0f}s "
+                f"(alive={alive}, exitcode={proc.exitcode}). A worker that "
+                "dies takes its traceback with it; run with --workers 0 to "
+                "see the error in this process."
+            )
+        try:
+            return conn.recv()
+        except EOFError as exc:
+            raise WorkerDied(
+                f"worker pid={proc.pid} closed its pipe "
+                f"(exitcode={proc.exitcode})"
+            ) from exc
+
     def reset(self, seeds: Sequence[int | None] | None = None):
         """Reset every environment. Returns ``(observations, masks)``."""
         seeds = list(seeds) if seeds is not None else [None] * self.num_envs
@@ -276,8 +311,8 @@ class CRSimVecEnv:
         for i, conn in enumerate(self._conns):
             conn.send(("reset", seeds[i * self._shard:(i + 1) * self._shard]))
         obs, masks = [], []
-        for conn in self._conns:
-            for o, m in conn.recv():
+        for conn, proc in zip(self._conns, self._procs):
+            for o, m in self._recv(conn, proc):
                 obs.append(o)
                 masks.append(m)
         return obs, masks
@@ -300,8 +335,8 @@ class CRSimVecEnv:
         dones = np.zeros(self.num_envs, dtype=np.float32)
         crowns = np.zeros(self.num_envs, dtype=np.int64)
         index = 0
-        for conn in self._conns:
-            for o, r, d, c, m in conn.recv():
+        for conn, proc in zip(self._conns, self._procs):
+            for o, r, d, c, m in self._recv(conn, proc):
                 obs.append(o)
                 masks.append(m)
                 rewards[index] = r
@@ -321,8 +356,8 @@ class CRSimVecEnv:
         payload = {k: v.detach().cpu().clone() for k, v in state_dict.items()}
         for conn in self._conns:
             conn.send(("set_opponent", payload))
-        for conn in self._conns:
-            conn.recv()
+        for conn, proc in zip(self._conns, self._procs):
+            self._recv(conn, proc)
 
     def close(self) -> None:
         if self._closed:
