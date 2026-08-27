@@ -20,3 +20,10 @@ report.html
 watch.out
 watch.err
 projected-v2.*
+ab-*.out
+ab-*.err
+play.log
+play.err
+poc.out
+poc.err
+progress.html

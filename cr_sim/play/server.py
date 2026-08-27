@@ -67,7 +67,13 @@ def _resolve(path: Path | None) -> Path | None:
 class PlayServer:
     """Holds the one live session and the data every page load needs."""
 
-    def __init__(self, build: Path, checkpoint: Path | None = None) -> None:
+    def __init__(self, build: Path, checkpoint: Path | None = None,
+                 tower_level: int = 11) -> None:
+        # Matters more than it looks: a policy trained against level 5
+        # towers has only ever seen matches that resolve, and playing it
+        # at 11 puts it somewhere it has never been. Set this to whatever
+        # the checkpoint trained at.
+        self.tower_level = tower_level
         self.data = LogicData.load(build)
         self.levels = build_level_table(self.data)
         self.registry = build_card_registry(self.data)
@@ -121,6 +127,7 @@ class PlayServer:
             config=SessionConfig(
                 human_deck=tuple(human), ai_deck=tuple(ai), seed=seed,
                 human_evolutions=tuple(human_evolutions),
+                tower_level=self.tower_level,
             ),
             controller=controller,
         )
@@ -270,12 +277,14 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(self.server.play.handle(self.path, body))  # type: ignore[attr-defined]
 
 
-def serve(build: Path, port: int, checkpoint: Path | None, open_browser: bool = True) -> None:
+def serve(build: Path, port: int, checkpoint: Path | None,
+          open_browser: bool = True, tower_level: int = 11) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-    server.play = PlayServer(build, checkpoint)  # type: ignore[attr-defined]
+    server.play = PlayServer(build, checkpoint, tower_level)  # type: ignore[attr-defined]
     url = f"http://127.0.0.1:{port}/"
     print(f"cr-sim play -> {url}")
     print(f"  opponent: {getattr(server.play.session, 'opponent_label', 'random')}")
+    print(f"  tower level: {server.play.tower_level}")
     print("  ctrl-c to stop")
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
@@ -293,9 +302,17 @@ def main(argv: list[str] | None = None) -> int:
         "--policy", type=Path, default=None,
         help="a trained checkpoint to play against; random play if omitted",
     )
+    parser.add_argument(
+        "--tower-level", type=int, default=11,
+        help="Crown Tower level. Set it to whatever the checkpoint was "
+             "trained at -- a policy that only ever saw level 5 towers "
+             "has never played a match that lasts, and 11 is out of its "
+             "distribution. 11 is the real game.",
+    )
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
-    serve(args.build, args.port, _resolve(args.policy), open_browser=not args.no_browser)
+    serve(args.build, args.port, _resolve(args.policy),
+          open_browser=not args.no_browser, tower_level=args.tower_level)
     return 0
 
 

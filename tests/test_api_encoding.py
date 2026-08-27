@@ -31,6 +31,7 @@ from cr_sim.api.encoding import (
     NOOP_SLOT,
     NUM_CARD_SLOTS,
     PLACEMENT_TILE_SPAN,
+    _placement_grid,
     action_grid_shape,
     build_encoding_config,
     cell_to_world,
@@ -245,6 +246,111 @@ def test_legal_mask_matches_actual_play_card_legality(world):
     # anything.
     assert legal_checked > 0, "sample contained no legal actions to check"
     assert illegal_checked > 0, "sample contained no illegal actions to check"
+
+
+def _red_left_princess(battle):
+    """RED's left-lane Princess Tower -- the one BLUE's expanded-zone tests
+    below take down. Read from ``battle._towers`` (not ``battle.entities``),
+    the same index ``Battle._king`` and ``Battle.fallen_enemy_towers`` use,
+    since a destroyed tower is retired out of the live entity list.
+    """
+    return min(
+        (t for t in battle._towers[Team.RED] if "King" not in t.spec.name),
+        key=lambda t: t.x,
+    )
+
+
+def test_legal_mask_grows_once_a_princess_tower_falls(world):
+    """An RL agent only ever samples from this mask -- if destroying a tower
+    does not make it grow, the agent can never learn to use the expanded
+    zone, however good the resulting push would be.
+
+    Both calls run against the very same ``Battle`` (and therefore the very
+    same ``Arena`` object): this is also the sharpest check that
+    ``_placement_grid``'s cache is not serving the pre-kill grid back for the
+    second call, since nothing about object identity changes between them --
+    only which towers are dead.
+    """
+    data, levels, registry = world
+    arena = load_arena(data)
+    config = build_encoding_config(arena, DECK, DECK)
+    knight_slot = HAND.index("Knight")
+
+    battle = _battle(world, seed=5, hand=HAND)
+    before = legal_action_mask(battle, Team.BLUE, registry, config)
+
+    _red_left_princess(battle).kill()
+    battle.step()
+    after = legal_action_mask(battle, Team.BLUE, registry, config)
+
+    assert after[knight_slot].sum() > before[knight_slot].sum(), (
+        "the mask did not grow after a Princess Tower fell -- either the "
+        "expanded zone is not implemented, or the placement-grid cache is "
+        "serving a stale, pre-kill grid"
+    )
+
+
+def test_legal_mask_reflects_the_expanded_zone_and_agrees_with_play_card(world):
+    """The mask growing (previous test) is only half the story -- the new
+    cells it marks legal have to actually BE legal, checked the same way
+    ``test_legal_mask_matches_actual_play_card_legality`` checks the rest of
+    the mask: against ``Battle.play_card`` itself.
+    """
+    data, levels, registry = world
+    arena = load_arena(data)
+    config = build_encoding_config(arena, DECK, DECK)
+    knight_slot = HAND.index("Knight")
+
+    before = legal_action_mask(_battle(world, seed=5, hand=HAND), Team.BLUE, registry, config)
+
+    mask_battle = _battle(world, seed=5, hand=HAND)
+    _red_left_princess(mask_battle).kill()
+    mask_battle.step()
+    after = legal_action_mask(mask_battle, Team.BLUE, registry, config)
+
+    newly_legal = np.argwhere(after[knight_slot] & ~before[knight_slot])
+    assert newly_legal.size > 0, "destroying a Princess Tower added no new legal cells"
+
+    gx, gy = (int(v) for v in newly_legal[0])
+    x, y = cell_to_world(gx, gy, Team.BLUE, arena, span=PLACEMENT_TILE_SPAN)
+
+    play_battle = _battle(world, seed=5, hand=HAND)
+    _red_left_princess(play_battle).kill()
+    play_battle.step()
+    assert play_battle.play_card(Team.BLUE, "Knight", x, y), (
+        f"mask marked cell ({gx},{gy}) newly legal after a tower fell, but "
+        f"play_card refused it at the same point"
+    )
+
+
+def test_the_placement_grid_cache_does_not_serve_a_stale_zone(world):
+    """Direct check on ``_placement_grid`` itself -- the private cache the bug
+    report specifically called out. It is keyed on ``(arena, team, anywhere,
+    on_water, width, height, fallen_enemy_towers)``; two calls that differ
+    only in the last of those must not come back equal, and two calls that
+    agree on all of them (including an empty ``fallen_enemy_towers``) must
+    still hit the same cached grid rather than colliding with each other.
+    """
+    data, levels, registry = world
+    arena = load_arena(data)
+    config = build_encoding_config(arena, DECK, DECK)
+    width, height = config.action_width, config.action_height
+
+    red_left = min(arena.princess_towers(Team.RED), key=lambda t: t.x)
+
+    grid_before = _placement_grid(arena, Team.BLUE, False, False, width, height)
+    grid_after = _placement_grid(
+        arena, Team.BLUE, False, False, width, height, frozenset({red_left})
+    )
+    assert not np.array_equal(grid_before, grid_after), (
+        "the same arena/team/flags but a different fallen-tower set produced "
+        "an identical grid -- the cache key is not tracking tower state"
+    )
+    # Repeating the original, tower-less call afterwards must still return the
+    # unexpanded grid: the two keys must not collide with each other either.
+    assert np.array_equal(
+        _placement_grid(arena, Team.BLUE, False, False, width, height), grid_before
+    )
 
 
 def test_legal_mask_respects_affordability(world):

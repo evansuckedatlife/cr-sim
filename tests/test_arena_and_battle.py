@@ -223,6 +223,83 @@ def test_spells_may_be_cast_over_the_river(arena):
     assert arena.can_deploy(Team.BLUE, tiles(9), tiles(16), anywhere=True, on_water=True)
 
 
+# ------------------------------------------------------- expanded deploy zone
+#
+# In real Clash Royale, destroying an enemy Princess Tower expands the killer's
+# deploy zone into that side of the enemy's half -- not the whole half, and not
+# all the way to the King Tower. The shipped data does not name an exact
+# boundary for this (globals.csv and the tower TOML files were checked; nothing
+# there is scoped narrower than "the enemy half"), so ``Arena.can_deploy``
+# falls back to well-known community play: the new line sits roughly at the
+# destroyed tower's own row. That approximation is what these tests pin down.
+
+
+def test_placement_past_the_bridge_is_refused_while_both_enemy_towers_stand(arena):
+    """The reported bug, in miniature: with nothing destroyed yet, deep enemy
+    territory should still be exactly as off-limits as it always was."""
+    left = min(arena.princess_towers(Team.RED), key=lambda t: t.x)
+    assert not arena.can_deploy(Team.BLUE, left.x, left.y - tiles(1))
+
+
+def test_destroying_a_princess_tower_opens_its_own_lane_past_the_bridge(arena):
+    left = min(arena.princess_towers(Team.RED), key=lambda t: t.x)
+    just_inside_the_new_zone = left.y - tiles(0.5)
+    assert arena.can_deploy(
+        Team.BLUE, left.x, just_inside_the_new_zone,
+        fallen_enemy_towers=frozenset({left}),
+    )
+
+
+def test_a_fallen_tower_does_not_open_the_other_lane(arena):
+    """Each Princess Tower guards its own side of the river -- destroying the
+    left one must not also unlock deployment on the right."""
+    towers = arena.princess_towers(Team.RED)
+    left = min(towers, key=lambda t: t.x)
+    right = max(towers, key=lambda t: t.x)
+    assert left is not right
+    assert not arena.can_deploy(
+        Team.BLUE, right.x, left.y - tiles(0.5),
+        fallen_enemy_towers=frozenset({left}),
+    )
+
+
+def test_the_expanded_zone_stops_short_of_the_fallen_towers_own_row(arena):
+    """"Up to a line short of" the tower -- the row it stood on is still the
+    first illegal row, not the last legal one."""
+    left = min(arena.princess_towers(Team.RED), key=lambda t: t.x)
+    assert not arena.can_deploy(
+        Team.BLUE, left.x, left.y, fallen_enemy_towers=frozenset({left})
+    )
+
+
+def test_the_expanded_zone_does_not_reach_the_enemy_king_tower(arena):
+    """The King Tower's own row is well past the fallen Princess Tower's --
+    if the boundary were wrong in the generous direction, this is the case
+    that would catch it."""
+    left = min(arena.princess_towers(Team.RED), key=lambda t: t.x)
+    king = arena.king_tower(Team.RED)
+    assert king is not None
+    assert not arena.can_deploy(
+        Team.BLUE, left.x, king.y, fallen_enemy_towers=frozenset({left})
+    )
+
+
+def test_the_expanded_zone_is_symmetric_for_the_defending_side(arena):
+    """Losing a tower is not a one-way concession for BLUE -- it opens the
+    enemy's deploy zone into BLUE's own half exactly the same way."""
+    left = min(arena.princess_towers(Team.BLUE), key=lambda t: t.x)
+    just_inside_the_new_zone = left.y + tiles(0.5)
+    assert not arena.can_deploy(Team.RED, left.x, just_inside_the_new_zone)
+    assert arena.can_deploy(
+        Team.RED, left.x, just_inside_the_new_zone,
+        fallen_enemy_towers=frozenset({left}),
+    )
+    # And the row it stood on is still off-limits, same as for BLUE's side.
+    assert not arena.can_deploy(
+        Team.RED, left.x, left.y, fallen_enemy_towers=frozenset({left})
+    )
+
+
 # ------------------------------------------------------------------ routing
 
 
@@ -276,6 +353,52 @@ def test_cannot_play_a_card_you_cannot_afford(data, levels, registry):
     battle = make_battle(data, levels, registry, first_card="Musketeer")
     battle.players[Team.BLUE].elixir.amount = 0
     assert not battle.play_card(Team.BLUE, "Musketeer", tiles(3.5), tiles(12))
+
+
+# ---------------------------------------- expanded deploy zone, end to end
+#
+# Arena.can_deploy's own rule is covered above in isolation; these go through
+# Battle.play_card instead, which is the path the human player and the RL
+# agent both actually use -- a bug could hide in how (or whether) play_card
+# passes the fallen-tower state to can_deploy at all.
+
+
+def _red_princesses(battle):
+    return sorted(
+        (t for t in battle._towers[Team.RED] if "King" not in t.spec.name),
+        key=lambda t: t.x,
+    )
+
+
+def test_play_card_refuses_past_the_bridge_while_both_enemy_towers_stand(
+    data, levels, registry
+):
+    battle = make_battle(data, levels, registry, first_card="Knight")
+    left, _right = _red_princesses(battle)
+    assert not battle.play_card(Team.BLUE, "Knight", left.x, left.y - tiles(0.5))
+
+
+def test_play_card_allows_the_expanded_zone_once_that_towers_side_falls(
+    data, levels, registry
+):
+    battle = make_battle(data, levels, registry, first_card="Knight")
+    left, _right = _red_princesses(battle)
+    left.kill()
+    battle.step()  # finalises the death -- .kill() alone only zeroes hitpoints
+    assert left.dead
+
+    assert battle.play_card(Team.BLUE, "Knight", left.x, left.y - tiles(0.5))
+
+
+def test_play_card_still_refuses_the_other_lane_after_one_tower_falls(
+    data, levels, registry
+):
+    battle = make_battle(data, levels, registry, first_card="Knight")
+    left, right = _red_princesses(battle)
+    left.kill()
+    battle.step()
+
+    assert not battle.play_card(Team.BLUE, "Knight", right.x, left.y - tiles(0.5))
 
 
 def test_deploy_time_is_respected(data, levels, registry):

@@ -29,7 +29,7 @@ from ..data.cards import Card, CardKind, CardRegistry
 from ..data.leveling import LevelTable, build_tower_scales, tower_class_for
 from ..data.source import LogicData
 from ..replay import Command, state_hash
-from .arena import Arena, load_arena
+from .arena import Arena, TowerPlacement, load_arena
 from .constants import TickClock
 from .elixir import BattleTimeline, ElixirBar, build_timeline
 from .entity import Entity, EntityKind, EntityState, Team, reset_entity_ids
@@ -538,6 +538,7 @@ class Battle:
             y,
             anywhere=card.can_deploy_on_enemy_side,
             on_water=card.can_place_on_water,
+            fallen_enemy_towers=self.fallen_enemy_towers(team),
         ):
             return False
 
@@ -2335,6 +2336,28 @@ class Battle:
             if "King" in getattr(entity.spec, "name", ""):
                 return entity
         return None
+
+    def fallen_enemy_towers(self, team: Team) -> frozenset[TowerPlacement]:
+        """``team``'s opponent's destroyed Princess Towers.
+
+        This is what ``Arena.can_deploy`` needs to know its deploy zone has
+        expanded -- see that method's docstring for the rule. Public (unlike
+        ``_king``) because both ``play_card`` and the RL action-mask builder
+        in :mod:`cr_sim.api.encoding` need the same answer, and it must agree
+        between them or an agent could be trained against legality the human
+        path does not actually honour.
+
+        Only Princess Towers matter: a destroyed King Tower ends the match in
+        ``_phase_check_victory`` before an expanded zone would ever be used.
+        Read from ``self._towers`` rather than the live entity list for the
+        same reason ``_king`` is -- a destroyed tower is retired to the
+        graveyard, not left in place with zero hitpoints.
+        """
+        return frozenset(
+            TowerPlacement(t.spec.name, t.team, t.x, t.y)
+            for t in self._towers[team.opponent]
+            if t.dead and "King" not in getattr(t.spec, "name", "")
+        )
 
     def _decide(self, reason: str) -> BattleResult:
         blue = self.players[Team.BLUE].crowns

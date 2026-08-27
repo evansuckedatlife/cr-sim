@@ -387,6 +387,13 @@ function selectedCard() {
 
 // Mirrors the server's rules closely enough to colour the marker. The server
 // still decides on release; this only avoids promising a tile it will refuse.
+//
+// The human side is always Team.BLUE (see SessionConfig.human_team), so
+// "past the river" always means "into STATE.them's territory". Destroying
+// one of their Princess Towers pushes that line forward, in that tower's
+// lane only, up to the row it stood on -- see Arena.can_deploy, which is the
+// rule this mirrors. STATE.them.towers already carries hp/x/y for exactly
+// this reason.
 function placementLegal(tx, ty) {
   const card = selectedCard();
   if (!card || !SETUP) return false;
@@ -394,8 +401,16 @@ function placementLegal(tx, ty) {
   const cell = (SETUP.terrain[Math.floor(ty * 2)] || [])[Math.floor(tx * 2)];
   if (cell === undefined || cell === 1) return false;
   if (cell === 2 && !card.water) return false;
-  if (!card.anywhere && ty > SETUP.riverBand[0]) return false;
-  return true;
+  if (card.anywhere) return true;
+  let limit = SETUP.riverBand[0];
+  if (STATE) {
+    for (const t of STATE.them.towers) {
+      if (t.hp > 0 || (t.n || '').indexOf('King') >= 0) continue;
+      const sameLane = (tx < SETUP.widthTiles / 2) === (t.x < SETUP.widthTiles / 2);
+      if (sameLane) limit = Math.max(limit, t.y);
+    }
+  }
+  return ty <= limit;
 }
 
 function snapped() {

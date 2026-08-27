@@ -66,7 +66,7 @@ from typing import Sequence
 import numpy as np
 
 from ..data.cards import CardRegistry
-from ..engine.arena import Arena
+from ..engine.arena import Arena, TowerPlacement
 from ..engine.battle import Battle
 from ..engine.constants import MAX_ELIXIR
 from ..engine.entity import Entity, EntityKind, Team
@@ -335,7 +335,13 @@ def decode_action(
 
 @lru_cache(maxsize=4096)
 def _can_deploy_cached(
-    arena: Arena, team: Team, x: int, y: int, anywhere: bool, on_water: bool
+    arena: Arena,
+    team: Team,
+    x: int,
+    y: int,
+    anywhere: bool,
+    on_water: bool,
+    fallen_enemy_towers: frozenset[TowerPlacement] = frozenset(),
 ) -> bool:
     """Memoised ``Arena.can_deploy``, for callers outside the mask builder.
 
@@ -351,8 +357,18 @@ def _can_deploy_cached(
     card pool, so the whole result space is small and unchanging within an
     episode -- caching it here, without touching ``Arena`` itself, turns a
     per-mask O(board area) rescan into a one-time cost.
+
+    ``fallen_enemy_towers`` is part of the cache key on purpose: unlike
+    everything else this function is keyed on, it *does* change mid-episode
+    -- a Princess Tower kill expands the deploy zone -- and a cache that did
+    not account for that would keep answering with the pre-kill zone for the
+    rest of the match.
     """
-    return arena.can_deploy(team, x, y, anywhere=anywhere, on_water=on_water)
+    return arena.can_deploy(
+        team, x, y,
+        anywhere=anywhere, on_water=on_water,
+        fallen_enemy_towers=fallen_enemy_towers,
+    )
 
 
 def legal_action_mask(
@@ -371,14 +387,18 @@ def legal_action_mask(
     An action is legal exactly when three things all hold: the slot holds a
     real card, the player can afford it, and ``Arena.can_deploy`` accepts the
     cell's centre point for that card's own placement rules (enemy-side and
-    water flags included). The no-op slot is unconditionally legal -- it is
-    always a valid choice to spend nothing this decision.
+    water flags included, and any Princess Towers already destroyed -- see
+    ``Battle.fallen_enemy_towers``). The no-op slot is unconditionally legal
+    -- it is always a valid choice to spend nothing this decision.
 
     This mask is the reason an RL agent trained against this environment does
     not waste most of its samples: without it, the overwhelming majority of a
     5 x 9 x 16 action space is either unaffordable or off the legal half of
     the board, and a policy has to learn that by trial and error before it can
-    learn anything about which of the *legal* actions is good.
+    learn anything about which of the *legal* actions is good. The same logic
+    cuts the other way for the expanded zone past a fallen tower: an agent
+    that never sees those cells marked legal here will never sample them,
+    however good the resulting push would be.
     """
     width, height = config.action_width, config.action_height
     mask = np.zeros((NUM_CARD_SLOTS, width, height), dtype=bool)
@@ -394,6 +414,7 @@ def legal_action_mask(
     player = battle.players[team]
     hand = player.hand
     arena = battle.arena
+    fallen = battle.fallen_enemy_towers(team)
     for slot, card_name in enumerate(hand):
         card = registry.get(card_name)
         if card is None or not player.elixir.can_afford(card.mana_cost):
@@ -402,11 +423,12 @@ def legal_action_mask(
             arena, team,
             card.can_deploy_on_enemy_side, card.can_place_on_water,
             width, height,
+            fallen,
         )
     return mask
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=128)
 def _placement_grid(
     arena: Arena,
     team: Team,
@@ -414,17 +436,27 @@ def _placement_grid(
     on_water: bool,
     width: int,
     height: int,
+    fallen_enemy_towers: frozenset[TowerPlacement] = frozenset(),
 ) -> np.ndarray:
     """Which cells a card with these placement flags may be put on.
 
-    Where a card *may* go depends only on the terrain and on the card's own two
-    flags -- never on elixir, the hand, or anything that changes during a
-    match. So it is computed once per combination and looked up thereafter, and
-    there are only eight combinations: two flags, two teams.
+    Where a card *may* go depends only on the terrain, the card's own two
+    flags, and which of the opponent's Princess Towers are already down --
+    never on elixir, the hand, or anything else that changes during a match.
+    So it is computed once per combination and looked up thereafter. That used
+    to be only eight combinations (two flags, two teams) before
+    ``fallen_enemy_towers`` joined the key; now it is that times the number of
+    distinct fallen-tower sets actually seen, which is at most four per team
+    (each of the opponent's two Princess Towers, up or down) -- still small,
+    hence the larger but still bounded ``maxsize``.
 
     Building it per mask instead meant 576 ``can_deploy`` calls every time the
     mask was asked for, which profiling put at a third of a training step. The
-    grid it produced was identical every time.
+    grid it produced was identical every time *for a fixed set of standing
+    towers* -- leaving ``fallen_enemy_towers`` out of the key entirely was the
+    bug: the first grid built each episode, from before any tower died, would
+    keep being handed out unchanged for the rest of the match, and the mask
+    would never show the expanded zone even after a tower actually fell.
 
     Returned read-only, because a cached array handed out by reference is one
     careless ``mask[slot] |= ...`` away from corrupting every future lookup.
@@ -433,7 +465,11 @@ def _placement_grid(
     for gy in range(height):
         for gx in range(width):
             x, y = cell_to_world(gx, gy, team, arena, span=PLACEMENT_TILE_SPAN)
-            if arena.can_deploy(team, x, y, anywhere=anywhere, on_water=on_water):
+            if arena.can_deploy(
+                team, x, y,
+                anywhere=anywhere, on_water=on_water,
+                fallen_enemy_towers=fallen_enemy_towers,
+            ):
                 grid[gx, gy] = True
     grid.flags.writeable = False
     return grid

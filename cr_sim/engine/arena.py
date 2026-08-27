@@ -282,12 +282,27 @@ class Arena:
         *,
         anywhere: bool = False,
         on_water: bool = False,
+        fallen_enemy_towers: frozenset[TowerPlacement] = frozenset(),
     ) -> bool:
         """Whether ``team`` may place a card at this point.
 
         ``anywhere`` covers the cards flagged ``CanDeployOnEnemySide`` -- every
         spell, plus Miner and Goblin Drill. ``on_water`` covers spells, which
         may be cast over the river where troops may not stand.
+
+        ``fallen_enemy_towers`` is the one piece of battle state this
+        otherwise-static check needs: destroying a Princess Tower **expands
+        the deploy zone** into that lane of the enemy's half, up to (not
+        including) the row the destroyed tower stood on -- it does not open
+        the whole half, and it does not reach all the way to the King Tower.
+        (This boundary is community-documented behaviour, not something the
+        shipped data states outright; see ``cr_sim/engine/arena.py``'s
+        history / the bug report this implements for the reasoning.)
+
+        ``Arena`` is frozen and shared across battles, so it has no way to
+        track which towers are still standing itself -- ``Battle`` reads that
+        off its own tower index (``Battle.fallen_enemy_towers``) and passes
+        the casualties in on every call instead.
         """
         if not self.in_bounds(x, y):
             return False
@@ -299,7 +314,36 @@ class Arena:
         if anywhere:
             return True
         low, high = self.own_half(team)
+        for tower in fallen_enemy_towers:
+            if "King" in tower.name or not self._same_lane(x, tower.x):
+                continue
+            if team is Team.BLUE:
+                # BLUE's enemy-ward bound is `high`, already exclusive (it is
+                # the river's near edge in the unexpanded case) -- the fallen
+                # tower's own row lines up with that same convention and
+                # comes out excluded for free.
+                high = max(high, tower.y)
+            else:
+                # RED's enemy-ward bound is `low`, which is *inclusive* in
+                # the unexpanded case (the river's far edge is real land, not
+                # water, so it is legal). Plugging the tower's row straight
+                # in would make that one row deployable while BLUE's mirror
+                # of the same rule excludes it -- the +1 keeps "short of the
+                # tower's row" meaning the same thing on both sides.
+                low = min(low, tower.y + 1)
         return low <= y < high
+
+    def _same_lane(self, x: int, other_x: int) -> bool:
+        """Whether two x-positions sit on the same side of the river's bridges.
+
+        Scopes an expanded deploy zone to the lane whose tower actually fell --
+        destroying the left Princess Tower must not open the right lane too.
+        Bridges sit in line with the Princess Towers (see the module
+        docstring), so "nearest bridge" is the same thing as "which lane".
+        """
+        if not self.bridges():
+            return True
+        return self.nearest_bridge(x)[2] == self.nearest_bridge(other_x)[2]
 
     # ---------------------------------------------------------------- towers
 
