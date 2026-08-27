@@ -28,11 +28,11 @@ from ..api.env import CRSimEnv
 from ..data.cards import build_card_registry
 from ..data.leveling import build_level_table
 from ..data.source import LogicData
-from .nets import ActorCritic, NetConfig
+from .nets import ActorCritic, NetConfig, net_config_for
 from .ppo import _unflatten_action
 from .run import DEFAULT_BUILD, DEFAULT_DECK
 
-__all__ = ["evaluate", "load_policy", "Result"]
+__all__ = ["evaluate", "load_policy", "check_observation", "Result"]
 
 
 class Result(dict):
@@ -47,6 +47,33 @@ class Result(dict):
         )
 
 
+def check_observation(payload: dict, env: CRSimEnv) -> None:
+    """Refuse a checkpoint trained on a different observation.
+
+    Changing the observation invalidates every checkpoint that predates the
+    change: the first convolution has one filter bank per input channel, so
+    nine channels of weights do not fit a thirteen-channel network. That
+    failure surfaces as a size-mismatch error on ``conv.0.weight``, which says
+    nothing about the actual cause -- and where the channel *count* happens to
+    match while the channels mean different things, it does not fail at all
+    and the policy simply plays badly.
+
+    Checkpoints written before the field existed carry no observation and are
+    assumed to be v1, which is what they are.
+    """
+    from ..api.encoding import parse_observation
+
+    recorded = parse_observation(str(payload.get("observation", "v1")))
+    current = env.encoding.features
+    if recorded != current:
+        raise ValueError(
+            f"this checkpoint was trained on observation {recorded} and the "
+            f"environment encodes {current}. They are different inputs; the "
+            "weights do not mean the same thing. Build the environment with "
+            "the matching observation, or retrain."
+        )
+
+
 def load_policy(checkpoint: Path, env: CRSimEnv) -> ActorCritic:
     """Rebuild the network from a checkpoint, using the env for its shapes.
 
@@ -55,17 +82,14 @@ def load_policy(checkpoint: Path, env: CRSimEnv) -> ActorCritic:
     makes a shape mismatch fail loudly here rather than silently score a policy
     against an observation it was never trained on.
     """
-    observation, _ = env.reset(seed=0)
-    net = ActorCritic(
-        NetConfig(
-            grid_channels=observation["grid"].shape[0],
-            grid_height=observation["grid"].shape[1],
-            grid_width=observation["grid"].shape[2],
-            vector_size=observation["vector"].shape[0],
-            num_actions=int(np.prod([int(v) for v in env.action_space.nvec])),
-        )
-    )
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    check_observation(payload, env)
+    # Which head the weights were trained with is a property of the
+    # checkpoint, not of the environment -- a factored head's parameters do
+    # not fit a flat one, and loading them into it fails with a shape error
+    # about a tensor nobody can place. Recorded when written; assumed flat
+    # only for checkpoints that predate the field.
+    net = ActorCritic(net_config_for(env, head=payload.get("head", "flat")))
     net.load_state_dict(payload["state_dict"])
     net.eval()
     return net
@@ -101,7 +125,8 @@ def evaluate(
                 choice = int(legal[rng.integers(len(legal))])
             else:
                 with torch.no_grad():
-                    logits, _ = net(
+                    # The actor only; an evaluation never reads the value.
+                    logits = net.policy_logits(
                         torch.from_numpy(observation["grid"]).unsqueeze(0),
                         torch.from_numpy(observation["vector"]).unsqueeze(0),
                         torch.from_numpy(flat).unsqueeze(0),
@@ -131,11 +156,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--match-seconds", type=int, default=120)
     parser.add_argument("--build", type=Path, default=DEFAULT_BUILD)
     parser.add_argument("--sample", action="store_true", help="sample instead of argmax")
+    parser.add_argument(
+        "--observation", default=None,
+        help="which observation to build the environment with. Defaults to "
+             "whatever the checkpoint says it was trained on, which is the "
+             "only choice that can be right.")
     args = parser.parse_args(argv)
 
     data = LogicData.load(args.build)
     levels = build_level_table(data)
     registry = build_card_registry(data)
+
+    from ..api.encoding import parse_observation
+
+    recorded = torch.load(args.checkpoint, map_location="cpu",
+                          weights_only=False).get("observation", "v1")
+    observation = parse_observation(args.observation or str(recorded))
 
     def make_env() -> CRSimEnv:
         return CRSimEnv(
@@ -143,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
             ticks_per_second=args.tps,
             frame_skip=args.frame_skip,
             max_ticks=args.tps * args.match_seconds,
+            observation=observation,
         )
 
     seeds = [int(s) for s in np.random.default_rng(12345).integers(0, 2**31 - 1, args.episodes)]

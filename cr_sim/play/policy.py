@@ -79,10 +79,22 @@ class PolicyOpponent:
             return
         blue = battle.players[Team.BLUE].deck
         red = battle.players[Team.RED].deck
-        self._config = build_encoding_config(battle.arena, blue, red)
+        # Which observation the weights were trained on belongs to the
+        # checkpoint. Building a v1 encoding for a v2 policy is a shape error
+        # at best and, where the channel counts happen to agree, a policy
+        # reading channels that mean something else.
+        from ..api.encoding import parse_observation
+
+        features = parse_observation(
+            str(self._payload.get("observation", "v1"))
+            if isinstance(self._payload, dict) else "v1")
+        self._config = build_encoding_config(battle.arena, blue, red, features)
 
         observation = encode_observation(battle, team, self.server.registry, self._config)
         nvec = (5, self._config.action_width, self._config.action_height)
+        from ..api.encoding import NUM_CARD_SLOTS, hand_onehot_layout
+
+        offset, stride, _count, width = hand_onehot_layout(self._config)
         net = self._net_cls(
             self._net_config_cls(
                 grid_channels=observation["grid"].shape[0],
@@ -90,6 +102,16 @@ class PolicyOpponent:
                 grid_width=observation["grid"].shape[2],
                 vector_size=observation["vector"].shape[0],
                 num_actions=int(np.prod(nvec)),
+                num_slots=NUM_CARD_SLOTS,
+                vocab_size=width,
+                hand_offset=offset,
+                hand_stride=stride,
+                # Which head the weights were trained with belongs to the
+                # checkpoint; a factored head's parameters do not fit a flat
+                # one and load_state_dict would fail on a tensor name the
+                # player has no way to interpret.
+                head=self._payload.get("head", "flat")
+                if isinstance(self._payload, dict) else "flat",
             )
         )
         state = self._payload.get("state_dict", self._payload)
@@ -115,7 +137,7 @@ class PolicyOpponent:
 
         torch = self.torch
         with torch.no_grad():
-            logits, _ = self._net(
+            logits = self._net.policy_logits(
                 torch.from_numpy(observation["grid"]).unsqueeze(0),
                 torch.from_numpy(observation["vector"]).unsqueeze(0),
                 torch.from_numpy(flat).unsqueeze(0),

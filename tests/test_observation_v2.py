@@ -317,3 +317,56 @@ def test_enemy_elixir_is_reconstructible_from_public_information(world):
         assert shadow.units == battle.players[Team.RED].elixir.units, (
             f"the reconstruction diverged at tick {battle.tick}")
     assert played, "no card was ever played, so nothing was reconstructed"
+
+
+# -------------------------------------------------- checkpoints and versions
+
+
+def test_a_checkpoint_from_another_observation_is_refused(world, tmp_path):
+    """The failure this replaces is a size mismatch on ``conv.0.weight``,
+    which says nothing about the cause -- and where two encodings happen to
+    have the same channel count it does not fail at all, it just plays badly.
+    """
+    import torch
+
+    from cr_sim.api.env import CRSimEnv
+    from cr_sim.train.evaluate import check_observation, load_policy
+    from cr_sim.train.nets import ActorCritic, net_config_for
+
+    data, levels, registry = world
+    v1_env = CRSimEnv(data, levels, registry, DECK, DECK,
+                      ticks_per_second=20, frame_skip=20, max_ticks=20 * 40)
+    v1_env.reset(seed=0)
+    v2_env = CRSimEnv(data, levels, registry, DECK, DECK,
+                      ticks_per_second=20, frame_skip=20, max_ticks=20 * 40,
+                      observation=OBSERVATION_V2)
+    v2_env.reset(seed=0)
+
+    net = ActorCritic(net_config_for(v1_env))
+    path = tmp_path / "v1.pt"
+    torch.save({"state_dict": net.state_dict(), "observation": "v1"}, path)
+
+    # Loading it back into the environment it was trained on works.
+    assert load_policy(path, v1_env) is not None
+    with pytest.raises(ValueError, match="different inputs"):
+        check_observation({"observation": "v1"}, v2_env)
+    # A checkpoint from before the field existed is v1, which is what it is.
+    check_observation({}, v1_env)
+
+
+def test_the_two_encodings_do_not_produce_the_same_network(world):
+    """Otherwise nothing above would matter."""
+    from cr_sim.api.env import CRSimEnv
+    from cr_sim.train.nets import net_config_for
+
+    data, levels, registry = world
+
+    def channels(features):
+        env = CRSimEnv(data, levels, registry, DECK, DECK,
+                       ticks_per_second=20, frame_skip=20, max_ticks=20 * 40,
+                       observation=features)
+        env.reset(seed=0)
+        return net_config_for(env).grid_channels
+
+    assert channels(OBSERVATION_V1) == 9
+    assert channels(OBSERVATION_V2) == 13
