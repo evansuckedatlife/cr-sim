@@ -463,11 +463,13 @@ def _spell_payload(data: LogicData, scale, level: int, card: Card, summary: dict
         seen.add(spawn)
         current, label = _resolve_opt(data, "PROJECTILE", spawn), f"spawn_projectile:{spawn}"
 
+    damage_source_obj: Mapping[str, Any] = {}
     for source, source_label in [*chain, (area, "area_effect"), (area_projectile, "area_projectile")]:
         damage = source.get("Damage")
         if isinstance(damage, int):
             summary["damage"] = scale.scale(damage, level)
             summary["damage_source"] = source_label
+            damage_source_obj = source
             break
 
     # A spell projectile can also carry troops (Goblin Barrel, Royal Delivery).
@@ -503,11 +505,22 @@ def _spell_payload(data: LogicData, scale, level: int, card: Card, summary: dict
         ("duration", "LifeDuration"),
         ("hit_frequency", "HitSpeed"),
         ("buff_time", "BuffTime"),
-        ("crown_tower_damage_percent", "CrownTowerDamagePercent"),
     ):
         value = area.get(field_name, projectile.get(field_name))
         if value is not None:
             summary[key] = value
+
+    # Crown-tower reduction is a property of whichever object actually deals
+    # the damage, which for a chained projectile is not always the top-level
+    # one: the Log's thrown copy carries no reduction, the rolling copy it
+    # spawns (and that supplies "damage" above) carries -87. Falling back to
+    # the top-level projectile/area keeps every other spell's answer
+    # unchanged, since there ``damage_source_obj`` already *is* that object.
+    crown_pct = damage_source_obj.get("CrownTowerDamagePercent")
+    if crown_pct is None:
+        crown_pct = area.get("CrownTowerDamagePercent", projectile.get("CrownTowerDamagePercent"))
+    if crown_pct is not None:
+        summary["crown_tower_damage_percent"] = crown_pct
 
     # Graveyard, Vines and Clone define what they do entirely in the ACTION
     # graph rather than in stat fields.  Record which action drives them so the

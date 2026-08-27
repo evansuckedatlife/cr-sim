@@ -4,6 +4,7 @@
     python -m cr_sim.cli cards [--kind troop] list the playable card pool
     python -m cr_sim.cli card Knight          full resolved stats for one card
     python -m cr_sim.cli validate             run the stat gate
+    python -m cr_sim.cli interactions         the interaction-matrix gate (verification gate #2)
     python -m cr_sim.cli freeze               re-freeze the regression baseline
 """
 
@@ -19,6 +20,19 @@ from .data.cards import (
     CardKind,
     build_card_registry,
     card_stat_summary,
+)
+from .data.interactions import (
+    DEFAULT_SHEET,
+    KNOWN_UNMAPPED,
+    NAME_MAP,
+    SIM_CARDS,
+    build_profiles,
+    categorise_sheet_comparison,
+    compute_matrix,
+    load_sheet,
+    predicted_winner,
+    simulate_matrix,
+    write_generated_csv,
 )
 from .data.leveling import build_level_table
 from .data.source import LogicData, UnknownEntity
@@ -129,6 +143,98 @@ def cmd_validate(args) -> int:
             print(f"  [{item['id']}] {item['question']}")
             print(f"      resolve: {item['how_to_resolve']}")
     return 0 if ok else 1
+
+
+DEFAULT_GENERATED_MATRIX = ROOT / "reference" / "interactions_generated.csv"
+
+
+def cmd_interactions(args) -> int:
+    import datetime
+
+    data, levels, registry = _load(args.build)
+    defenses, attacks, labels = build_profiles(data, levels, registry)
+    computed = compute_matrix(defenses, attacks)
+    print(
+        f"computed matrix: {len(defenses)} defenders x {len(attacks)} attackers "
+        f"-> {len(computed)} applicable pair(s), from the whole standard pool + towers"
+    )
+
+    simulated = {}
+    if args.simulate:
+        sim_cards = tuple(c.strip() for c in args.sim_cards.split(",")) if args.sim_cards else SIM_CARDS
+        print(f"simulating {len(sim_cards)} card(s) pairwise ({len(sim_cards) * (len(sim_cards) - 1)} duels)...")
+        simulated = simulate_matrix(data, levels, registry, sim_cards)
+        # The signal worth reporting is not raw agreement -- arithmetic and a
+        # real duel should usually agree on the stronger card -- but the
+        # pairs where they *don't*: those name a mechanic (deploy time,
+        # closing distance, retargeting, splash) that only the simulation
+        # can see.
+        comparable = 0
+        agree = 0
+        surprises = []
+        for (d, a), sim in simulated.items():
+            if sim.winner not in ("attacker", "defender"):
+                continue  # a draw or a timeout has no clean predicted counterpart
+            guess = predicted_winner(computed, d, a)
+            if guess is None or guess == "draw":
+                continue
+            comparable += 1
+            if guess == sim.winner:
+                agree += 1
+            else:
+                surprises.append((d, a, guess, sim))
+        print(f"  {len(simulated)} duel(s) run; {comparable} have a clean arithmetic prediction to compare")
+        if comparable:
+            print(f"  arithmetic and simulation agree on the winner in {agree}/{comparable} ({100 * agree / comparable:.1f}%)")
+        if surprises:
+            print(f"  {len(surprises)} mechanic-driven surprise(s) -- arithmetic predicted one winner, the duel gave the other:")
+            for d, a, guess, sim in surprises[:15]:
+                print(f"    {a:16} vs {d:16} arithmetic picks {guess:9} sim says {sim.winner:9} in {sim.ticks}t, {sim.hits_landed} hit(s) landed")
+
+    if args.write:
+        provenance = args.build / "_PROVENANCE.txt"
+        build_id = provenance.read_text(encoding="utf-8").splitlines()[0] if provenance.exists() else "unknown"
+        write_generated_csv(
+            args.out, defenses, attacks, computed, simulated=simulated,
+            build=build_id, generated_at=datetime.date.today().isoformat(),
+        )
+        print(f"wrote {args.out}")
+
+    if args.sheet.exists():
+        sheet = load_sheet(args.sheet)
+        comparisons, unmapped, not_applicable = categorise_sheet_comparison(sheet, defenses, attacks)
+        agree = sum(1 for c in comparisons if c.category == "agree")
+        explained = sum(1 for c in comparisons if c.category == "explained")
+        defect = sum(1 for c in comparisons if c.category == "defect")
+        total = len(comparisons)
+        print(f"\n== cross-check against the (stale, ~1yr old) community sheet {args.sheet} ==")
+        print(f"sheet cells: {len(sheet)}; mapped names: {len(NAME_MAP)}; unmapped names: {len(KNOWN_UNMAPPED)}")
+        print(f"comparable pairs: {total}  (unmapped: {len(unmapped)}, not applicable: {len(not_applicable)})")
+        if total:
+            print(
+                f"  agree:            {agree:5} ({100 * agree / total:5.1f}%)  -- engine reproduces the sheet's number"
+            )
+            print(
+                f"  explained:        {explained:5} ({100 * explained / total:5.1f}%)  -- bare hp/damage don't match the "
+                f"sheet either; a stat moved since it was written"
+            )
+            print(
+                f"  defect:           {defect:5} ({100 * defect / total:5.1f}%)  -- bare hp/damage DO match the sheet; "
+                f"only the engine's shield/tower/ramp adjustment disagrees"
+            )
+        if defect:
+            print(f"\n== all {defect} 'defect' pair(s), worst first ==")
+            defects = sorted((c for c in comparisons if c.category == "defect"), key=lambda c: -c.delta)
+            for c in defects[:60]:
+                print(
+                    f"  {c.attacker_csv:18} kills {c.defender_csv:18} sheet={c.sheet_hits:>3} engine={c.engine_hits:>3} "
+                    f"naive={c.naive_hits!s:>3}  hp={c.hitpoints} shield={c.shield_hitpoints} dmg={c.damage}"
+                )
+            if len(defects) > 60:
+                print(f"  ... and {len(defects) - 60} more")
+    else:
+        print(f"\nno sheet at {args.sheet}; skipping the cross-check")
+    return 0
 
 
 #: A couple of recognisable decks so `battle` works with no arguments.
@@ -359,6 +465,14 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("validate", help="run the stat gate")
     p.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE)
     p.set_defaults(func=cmd_validate)
+
+    p = sub.add_parser("interactions", help="the interaction-matrix gate: compute, simulate, cross-check")
+    p.add_argument("--sheet", type=Path, default=DEFAULT_SHEET, help="community hits-to-kill CSV to cross-check")
+    p.add_argument("--write", action="store_true", help="write the computed matrix to --out")
+    p.add_argument("--out", type=Path, default=DEFAULT_GENERATED_MATRIX)
+    p.add_argument("--simulate", action="store_true", help="also run real duels for a curated card subset")
+    p.add_argument("--sim-cards", help="comma-separated card names, overriding the default subset")
+    p.set_defaults(func=cmd_interactions)
 
     p = sub.add_parser("battle", help="run a battle and optionally write an HTML replay")
     p.add_argument("--blue", default="hog_cycle", help="deck name or comma-separated cards")
