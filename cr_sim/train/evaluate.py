@@ -101,7 +101,7 @@ def evaluate(
                 choice = int(legal[rng.integers(len(legal))])
             else:
                 with torch.no_grad():
-                    logits, _ = net(
+                    logits = net.policy_logits(
                         torch.from_numpy(observation["grid"]).unsqueeze(0),
                         torch.from_numpy(observation["vector"]).unsqueeze(0),
                         torch.from_numpy(flat).unsqueeze(0),

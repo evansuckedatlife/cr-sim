@@ -115,7 +115,7 @@ class PolicyOpponent:
 
         torch = self.torch
         with torch.no_grad():
-            logits, _ = self._net(
+            logits = self._net.policy_logits(
                 torch.from_numpy(observation["grid"]).unsqueeze(0),
                 torch.from_numpy(observation["vector"]).unsqueeze(0),
                 torch.from_numpy(flat).unsqueeze(0),

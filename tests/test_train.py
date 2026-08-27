@@ -410,3 +410,77 @@ def test_a_run_stops_when_the_gradients_go_non_finite(world, monkeypatch):
             PPOConfig(total_steps=256, horizon=16, num_envs=2, epochs=1,
                       minibatches=1, seed=0),
         )
+
+
+def test_policy_only_inference_matches_the_full_forward(world):
+    """The cheap inference path must be the same answer, not a similar one.
+
+    ``policy_logits`` exists so that a caller with no use for the value does
+    not pay for the critic encoder. That is only safe if it computes a strict
+    subset of the same graph, so the two are compared element for element
+    rather than approximately.
+    """
+    env = _env(world)
+    obs, _ = env.reset(seed=1)
+    nvec = [int(v) for v in env.action_space.nvec]
+    net = ActorCritic(
+        NetConfig(
+            grid_channels=obs["grid"].shape[0],
+            grid_height=obs["grid"].shape[1],
+            grid_width=obs["grid"].shape[2],
+            vector_size=obs["vector"].shape[0],
+            num_actions=int(np.prod(nvec)),
+            channels=8,
+            hidden=16,
+        )
+    ).eval()
+    grid = torch.from_numpy(obs["grid"]).unsqueeze(0)
+    vector = torch.from_numpy(obs["vector"]).unsqueeze(0)
+    mask = torch.from_numpy(env.legal_action_mask().reshape(1, -1))
+
+    with torch.no_grad():
+        full, _value = net(grid, vector, mask)
+        cheap = net.policy_logits(grid, vector, mask)
+    assert torch.equal(full, cheap)
+
+
+def test_policy_only_inference_does_not_run_the_critic(world):
+    """The saving is the point, so guard it rather than trusting the code.
+
+    Without this, someone could implement ``policy_logits`` as ``forward()[0]``
+    and every other test would still pass while the rollout workers went back
+    to computing a value nobody reads -- 44% of every batch-of-one inference,
+    measured, which is most of why self-play ran at 34 decisions/s against 46
+    for everything else.
+    """
+    env = _env(world)
+    obs, _ = env.reset(seed=1)
+    nvec = [int(v) for v in env.action_space.nvec]
+    config = NetConfig(
+        grid_channels=obs["grid"].shape[0],
+        grid_height=obs["grid"].shape[1],
+        grid_width=obs["grid"].shape[2],
+        vector_size=obs["vector"].shape[0],
+        num_actions=int(np.prod(nvec)),
+        channels=8,
+        hidden=16,
+    )
+    assert config.separate_critic, "the saving only exists with a separate critic"
+    net = ActorCritic(config).eval()
+    grid = torch.from_numpy(obs["grid"]).unsqueeze(0)
+    vector = torch.from_numpy(obs["vector"]).unsqueeze(0)
+    mask = torch.from_numpy(env.legal_action_mask().reshape(1, -1))
+
+    calls: list[str] = []
+    for name in ("critic_conv", "critic_vector", "critic_trunk", "value_head"):
+        getattr(net, name).register_forward_hook(
+            lambda _m, _i, _o, name=name: calls.append(name)
+        )
+
+    with torch.no_grad():
+        net.policy_logits(grid, vector, mask)
+    assert calls == [], f"policy_logits ran the critic: {calls}"
+
+    with torch.no_grad():
+        net(grid, vector, mask)
+    assert calls, "forward should still produce a value"
