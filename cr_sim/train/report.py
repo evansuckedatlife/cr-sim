@@ -110,17 +110,28 @@ def _verdict_of(record: dict[str, Any]) -> tuple[str, str, str]:
     verdict = record["verdict"]
     if verdict is not None:
         lo, hi = verdict["ci_low"], verdict["ci_high"]
+        # Named, never assumed. These chips used to read "beats random"
+        # whatever the verdict was measured against, and a run evaluated
+        # against the search expert would have published on this page under
+        # that label, beside genuine random-opponent lifts. The same policy
+        # scores wildly differently against an idle, a random and a searching
+        # opponent -- 92% of idle matches go to the control and 26% of random
+        # ones -- and that confusion has already cost this project two rounds
+        # of invalid comparisons. write_verdict refuses to record a lift
+        # without eval_opponent; this is the reading half of that guard.
+        foe = verdict.get("eval_opponent") or "an unnamed opponent"
+        where = f"{verdict['episodes']} paired battles against {foe}"
         if lo > 0:
-            return ("good", "beats random",
-                    f"{verdict['episodes']} paired battles put the lift at "
+            return ("good", f"beats {foe}",
+                    f"{where} put the lift at "
                     f"{verdict['lift']:+.3f} sd, and the whole 95% interval "
                     f"[{lo:+.3f}, {hi:+.3f}] sits above zero.")
         if hi < 0:
-            return ("crit", "worse than random",
-                    f"{verdict['episodes']} paired battles put the lift at "
+            return ("crit", f"worse than {foe}",
+                    f"{where} put the lift at "
                     f"{verdict['lift']:+.3f} sd, entirely below zero.")
         return ("warn", "not distinguishable",
-                f"{verdict['episodes']} paired battles put the lift at "
+                f"{where} put the lift at "
                 f"{verdict['lift']:+.3f} sd, but the 95% interval "
                 f"[{lo:+.3f}, {hi:+.3f}] contains zero.")
     mean = record["mean_lift"]

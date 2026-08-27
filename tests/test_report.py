@@ -71,11 +71,33 @@ def test_a_larger_evaluation_replaces_the_inline_readings(tmp_path):
     """
     _run(tmp_path, "settled",
          [_row(i, i * 1000, eval_lift_sd=0.1) for i in range(1, 6)],
-         verdict={"episodes": 300, "lift": 0.42, "ci_low": 0.18, "ci_high": 0.66})
+         verdict={"episodes": 300, "lift": 0.42, "ci_low": 0.18, "ci_high": 0.66,
+                  "eval_opponent": "random"})
     page = render_index(collect(tmp_path))
     assert "beats random" in page
-    assert "300 paired battles" in page
+    assert "300 paired battles against random" in page
     assert "+0.420" in page
+
+
+def test_a_verdict_is_labelled_with_the_opponent_it_was_measured_against(tmp_path):
+    """The chip said "beats random" whatever the verdict actually faced.
+
+    A run evaluated against the search expert would have published on this
+    page under that label, beside genuine random-opponent lifts -- the same
+    confusion that already cost two rounds of invalid comparisons, since the
+    control wins 92% of idle matches and 26% of random ones. The number is
+    only meaningful with the opponent attached.
+    """
+    _run(tmp_path, "vs-search",
+         [_row(1, 1000, eval_lift_sd=0.1)],
+         verdict={"episodes": 60, "lift": 0.30, "ci_low": 0.10, "ci_high": 0.50,
+                  "eval_opponent": "search"})
+    page = render_index(collect(tmp_path))
+    assert "beats search" in page
+    assert "60 paired battles against search" in page
+    assert "beats random" not in page, (
+        "a verdict measured against the search expert was labelled as though "
+        "it had beaten the random control")
 
 
 def test_an_interval_containing_zero_is_not_called_a_win(tmp_path):

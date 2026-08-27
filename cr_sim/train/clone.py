@@ -192,7 +192,8 @@ def collect(
         observation, _ = env.reset(seed=episode)
         expert = make_expert(env)
         rewards: list[float] = []
-        start = len(actions)
+        # The env step each kept decision was made at; see the returns below.
+        decisions: list[int] = []
 
         while True:
             mask = env.legal_action_mask()
@@ -208,6 +209,10 @@ def collect(
                 vectors.append(observation["vector"])
                 masks.append(flat.copy())
                 actions.append(index)
+                # rewards holds one entry per step already taken, so the next
+                # one appended -- the reward for leaving this state -- is at
+                # this index, and so is this state's own return.
+                decisions.append(len(rewards))
                 total += 1
                 played += int(choice[0] != slots - 1)
 
@@ -231,18 +236,22 @@ def collect(
             if terminated or truncated:
                 break
 
-        # Discounted return to the end of the episode, walked backwards. Only
-        # the states that were kept get one, so the two arrays stay aligned.
+        # Discounted return to the end of the episode, walked backwards.
         running = 0.0
         tail: list[float] = []
         for reward in reversed(rewards):
             running = reward + gamma * running
             tail.append(running)
         tail.reverse()
-        kept = len(actions) - start
-        step = max(1, len(tail) // max(1, kept))
-        values.extend(tail[i * step] if i * step < len(tail) else 0.0
-                      for i in range(kept))
+        # Each kept state takes the return from its own step. Kept decisions
+        # are sparse and unevenly spaced -- only states with more than one
+        # legal action are recorded, and how long a player stays broke varies
+        # -- so walking them at an even stride, which is what this did, hands
+        # the value head the return of a nearby but different position.
+        #
+        # Every recorded decision is followed by exactly one env.step, so the
+        # index is always inside tail.
+        values.extend(tail[t] for t in decisions)
         if on_episode is not None:
             on_episode(episode + 1, len(actions))
 
@@ -289,7 +298,8 @@ def _collect_variants(make_env, make_expert, episodes, gamma, on_episode,
             for name, features in variants.items()
         }
         rewards: list[float] = []
-        start = len(actions)
+        # The env step each kept decision was made at; see the returns below.
+        decisions: list[int] = []
 
         while True:
             mask = env.legal_action_mask()
@@ -308,6 +318,10 @@ def _collect_variants(make_env, make_expert, episodes, gamma, on_episode,
                     out[name]["vector"].append(encoded["vector"])
                 masks.append(flat.copy())
                 actions.append(index)
+                # rewards holds one entry per step already taken, so the next
+                # one appended -- the reward for leaving this state -- is at
+                # this index, and so is this state's own return.
+                decisions.append(len(rewards))
                 total += 1
                 played += int(choice[0] != slots - 1)
                 scores = list(getattr(expert, "last_scores", None)
@@ -328,10 +342,8 @@ def _collect_variants(make_env, make_expert, episodes, gamma, on_episode,
             running = reward + gamma * running
             tail.append(running)
         tail.reverse()
-        kept = len(actions) - start
-        step = max(1, len(tail) // max(1, kept))
-        values.extend(tail[i * step] if i * step < len(tail) else 0.0
-                      for i in range(kept))
+        # By each decision's own step, not an even stride; see collect.
+        values.extend(tail[t] for t in decisions)
         if on_episode is not None:
             on_episode(episode + 1, len(actions))
 

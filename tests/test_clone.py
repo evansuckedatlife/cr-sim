@@ -87,6 +87,53 @@ def _net():
 # ------------------------------------------------------------------ collecting
 
 
+class _UnevenEnv:
+    """Choices arriving at irregular intervals, which is how a match delivers them.
+
+    ``choices`` lists the env steps where more than one action is legal --
+    everywhere else the only move is to pass. Real play looks like this: how
+    long a player stays broke depends on what was just spent, so the decisions
+    worth recording are sparse and the gaps between them are not equal.
+    """
+
+    def __init__(self, choices=(0, 1, 5, 7), rewards=(1., 2., 3., 4., 5., 6., 7., 8.)):
+        self.action_space = _Space(NVEC)
+        self.choices = set(choices)
+        self.rewards = tuple(rewards)
+        self.battle = None
+        self._step = 0
+
+    def _obs(self):
+        return {"grid": np.full((2, 4, 3), self._step, dtype=np.float32),
+                "vector": np.full(6, self._step, dtype=np.float32)}
+
+    def reset(self, seed=None):
+        self._step = 0
+        return self._obs(), {}
+
+    def legal_action_mask(self):
+        mask = np.zeros(NVEC, dtype=bool)
+        mask[4, 0, 0] = True
+        if self._step in self.choices:
+            mask[0, 1, 2] = True
+        return mask
+
+    def step(self, action):
+        reward = self.rewards[self._step]
+        self._step += 1
+        return self._obs(), reward, self._step >= len(self.rewards), False, {}
+
+
+def _returns(rewards, gamma):
+    running = 0.0
+    tail = []
+    for reward in reversed(rewards):
+        running = reward + gamma * running
+        tail.append(running)
+    tail.reverse()
+    return tail
+
+
 def test_only_states_with_a_real_choice_are_recorded():
     """A state with one legal action teaches nothing.
 
@@ -132,6 +179,74 @@ def test_values_are_discounted_returns_and_align_with_the_states():
     # Every reward is 1.0, so returns are positive and fall toward the end.
     assert (data.value > 0).all()
     assert data.value[0] > data.value[-1]
+
+
+def test_each_value_is_the_return_at_the_step_it_was_recorded_at():
+    """The value target belongs to the state it is stored beside.
+
+    Kept decisions are sparse and unevenly spaced -- only states with more
+    than one legal action are recorded -- so the i-th kept state is not the
+    i-th step of the episode. Handing it the return of an evenly strided step
+    instead, which is what this did, gives the value head a target from a
+    nearby but different position, and a critic fitted to a smeared target is
+    the one thing the clone exists to avoid producing.
+    """
+    rewards = (1., 2., 3., 4., 5., 6., 7., 8.)
+    choices = (0, 1, 5, 7)
+    data = collect(lambda i: _UnevenEnv(choices, rewards), _expert,
+                   episodes=1, gamma=0.5)
+
+    # gamma and the rewards are chosen so every return is exact in binary.
+    tail = _returns(rewards, 0.5)
+    assert tail == [3.921875, 5.84375, 7.6875, 9.375, 10.75, 11.5, 11.0, 8.0]
+
+    assert len(data) == len(choices)
+    assert data.value.tolist() == [3.921875, 5.84375, 11.5, 8.0]
+
+    # What the even stride produced instead: eight steps over four kept
+    # decisions strided by two, so three of the four targets came from a step
+    # the expert was never asked about.
+    strided = [tail[i * (len(rewards) // len(choices))] for i in range(len(choices))]
+    assert strided == [3.921875, 7.6875, 10.75, 11.0]
+    assert sum(a != b for a, b in zip(strided, data.value.tolist())) == 3
+
+
+def test_the_decision_index_restarts_with_each_episode():
+    """It is a position within an episode, not within the dataset -- and the
+    returns it indexes are rebuilt per episode."""
+    rewards = (1., 2., 3., 4., 5., 6., 7., 8.)
+    choices = (0, 1, 5, 7)
+    data = collect(lambda i: _UnevenEnv(choices, rewards), _expert,
+                   episodes=3, gamma=0.5)
+    assert data.value.tolist() == [3.921875, 5.84375, 11.5, 8.0] * 3
+
+
+def test_variant_collection_indexes_the_returns_the_same_way(monkeypatch):
+    """The second copy of the same loop. ``collect`` re-encodes one
+    playthrough per observation variant rather than replaying it, and that
+    copy carried the same striding -- so an encoding ablation would have
+    compared two networks fitted to the same misplaced targets."""
+    from cr_sim.api import encoding
+
+    monkeypatch.setattr(encoding, "build_encoding_config",
+                        lambda *args, **kwargs: None, raising=False)
+    monkeypatch.setattr(
+        encoding, "encode_observation",
+        lambda battle, team, registry, config: battle._obs(), raising=False)
+
+    def make_env(index):
+        env = _UnevenEnv((0, 1, 5, 7))
+        # The variant path encodes off the battle, not the observation.
+        env.battle = env
+        env.arena = env.team = env.registry = None
+        env.blue_deck = env.red_deck = None
+        return env
+
+    out = collect(make_env, _expert, episodes=1, gamma=0.5,
+                  variants={"a": None, "b": None})
+    assert set(out) == {"a", "b"}
+    for demos in out.values():
+        assert demos.value.tolist() == [3.921875, 5.84375, 11.5, 8.0]
 
 
 def test_several_episodes_accumulate():
