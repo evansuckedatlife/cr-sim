@@ -667,6 +667,24 @@ class Battle:
         stash = {name: getattr(self, name) for name in self._HISTORIES}
         for name in stash:
             setattr(self, name, [])
+        # The corpses go in the memo as themselves, so the branch's id map
+        # points at the same objects its graveyard list already does.
+        #
+        # Setting `graveyard` aside is not enough on its own: `_by_id_map`
+        # keeps every entity ever registered reachable by id, dead included
+        # (that is what makes a stale target reference resolve to a corpse
+        # rather than to nothing), so deepcopy was reaching the whole
+        # graveyard through the map and rebuilding every one of them. By the
+        # end of a match that is a couple of hundred entities copied per
+        # clone, none of which any phase ever touches -- and it left the
+        # branch with two different objects for one dead unit, the shared one
+        # in `graveyard` and a private one in the map. Sharing rests on
+        # exactly the invariant the histories already rest on: nothing rereads
+        # or mutates what is already in them. Dead entities are not in
+        # `entities`, so no phase iterates them, and every path that resolves
+        # one by id tests `.dead` before doing anything with it.
+        for corpse in stash["graveyard"]:
+            memo[id(corpse)] = corpse
         try:
             clone = _deepcopy(self, memo)
         finally:
