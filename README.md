@@ -282,6 +282,30 @@ Each of these looked healthy and had passing tests.
   never fired. Lowering tower level halves the draw rate for free; lengthening
   matches buys a fifth as much for twice the compute.
 
+### Sampled and greedy are two different policies
+
+Reported separately from here on, because they were confused for each other and
+the confusion produced a phantom. A run's `noop_fraction` is the *sampled* pass
+rate during rollouts; a clone's `play_rate` is the *argmax* play rate on
+held-out states. On 1,094 held-out demonstration states, against a search
+expert that passes on 44.2% of them:
+
+| policy | pass, greedy | pass, sampled | entropy |
+|---|---|---|---|
+| `runs/cloned` | 48.9% | 11.4% | 3.795 |
+| `runs/ppo-from-clone` | 63.6% | 36.4% | 2.453 |
+
+Fine-tuning looked like it was walking a competent policy back toward playing
+nothing. Most of that was the sampled distribution concentrating onto an argmax
+that already passed half the time. Some of it was real: the greedy rate moved
+fifteen points and ended past the expert's.
+
+Which opponent a number was measured against is now recorded on every metrics
+row, and a lift without one is refused. The in-run probe used to face an
+opponent that never plays a card while every large verdict faced a random one;
+the control wins 92% of the first and 26% of the second, so the two were never
+comparable.
+
 ### Open
 
 The current hypothesis is that a self-play opponent *sampling* from an
@@ -289,6 +313,10 @@ early, high-entropy policy is still nearly random, which would leave the critic
 exactly as stuck as before. `--opponent-temperature` exists to test that. If
 explained variance stays at zero with a sharp opponent, the problem is not the
 opponent.
+
+`docs/training.md` is the full record: what `pass_weight` actually does, the two
+faults in the demonstrations' soft targets, why the projected reward pays for
+waiting, and what to do next.
 
 ### A note on the GPU
 
