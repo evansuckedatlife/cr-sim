@@ -23,6 +23,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from cr_sim.api.encoding import parse_observation
 from cr_sim.api.env import CRSimEnv
 from cr_sim.data.cards import build_card_registry
 from cr_sim.data.leveling import build_level_table
@@ -39,6 +40,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--out", type=Path, default=Path("data_cache/demos"))
     parser.add_argument("--tower-level", type=int, default=5)
+    parser.add_argument(
+        "--observations", default="v1",
+        help="comma-separated observation variants to record, each written to "
+             "its own subdirectory of --out. One playthrough produces all of "
+             "them: the expert reads the battle rather than the observation, "
+             "so every variant sees the same trajectory and the same "
+             "decisions, which is what makes an encoding ablation a paired "
+             "comparison instead of two experiments. Names are those "
+             "cr_sim.api.encoding.parse_observation accepts, plus a bare "
+             "flag name for a single-change variant.",
+    )
     parser.add_argument("--match-seconds", type=int, default=120)
     parser.add_argument("--frame-skip", type=int, default=30)
     parser.add_argument("--horizon-seconds", type=float, default=15.0)
@@ -96,19 +108,25 @@ def main(argv: list[str] | None = None) -> int:
               f"{samples} decisions, {rate:.0f}s/episode, "
               f"{(args.episodes - done) * rate / 60:.0f} min left", flush=True)
 
-    demos = collect(make_env, make_expert, episodes=args.episodes,
-                    on_episode=progress)
+    names = [n.strip() for n in args.observations.split(",") if n.strip()]
+    if names == ["v1"]:
+        demos = collect(make_env, make_expert, episodes=args.episodes,
+                        on_episode=progress)
+        results = {"": demos}
+    else:
+        results = collect(
+            make_env, make_expert, episodes=args.episodes, on_episode=progress,
+            variants={name: parse_observation(name) for name in names})
 
-    # Only worth keeping if the expert actually won them. A bot having a bad
-    # run teaches a policy to have a bad run, and cloning cannot tell the
-    # difference.
-    args.out.mkdir(parents=True, exist_ok=True)
-    path = args.out / f"shard-{args.shard:02d}.npz"
-    demos.save(path)
-    print(f"shard {args.shard}: wrote {len(demos)} decisions from "
-          f"{demos.episodes} episodes to {path} "
-          f"(play rate {demos.play_rate:.0%}, "
-          f"{(time.perf_counter() - started) / 60:.0f} min)", flush=True)
+    for name, demos in results.items():
+        directory = args.out / name if name else args.out
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"shard-{args.shard:02d}.npz"
+        demos.save(path)
+        print(f"shard {args.shard}: wrote {len(demos)} decisions from "
+              f"{demos.episodes} episodes to {path} "
+              f"(play rate {demos.play_rate:.0%}, "
+              f"{(time.perf_counter() - started) / 60:.0f} min)", flush=True)
     return 0
 
 

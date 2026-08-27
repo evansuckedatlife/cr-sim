@@ -188,3 +188,176 @@ def test_agreement_is_measured_on_states_that_were_held_back():
           on_epoch=seen.append)
     assert 0.0 <= seen[-1]["agreement"] <= 1.0
     assert seen[-1]["epoch"] == 2
+
+
+# ------------------------------------------------- what the target says
+
+
+class _ScoringExpert:
+    """An expert that publishes candidate values the way the search bot does."""
+
+    def __init__(self, scores, choice, patience=0.01):
+        self.last_scores = scores
+        self._choice = choice
+
+        class _Config:
+            pass
+
+        self.config = _Config()
+        self.config.patience = patience
+
+    def __call__(self, observation, mask, battle=None):
+        return self._choice
+
+
+def _row(scores, choice, **kwargs):
+    from cr_sim.train.clone import _expert_patience, _target_row
+
+    expert = _ScoringExpert(scores, choice, kwargs.pop("patience", 0.01))
+    slots, width, height = NVEC
+    index = (choice[0] * width * height + choice[1] * height + choice[2])
+    return _target_row(scores, index, width, height, slots,
+                       _expert_patience(expert),
+                       kwargs.pop("temperature", 0.35),
+                       kwargs.pop("min_spread", 1e-3), NUM_ACTIONS)
+
+
+def test_a_target_the_search_could_not_separate_falls_back_to_what_it_did():
+    """The bug this replaces, in one case.
+
+    The softmax is scaled by the candidates' own spread, so it is scale-free:
+    values equal to four decimal places produce a *confident* preference for
+    whichever one rounded highest, and exactly equal values produce a uniform
+    distribution over about fifteen candidates of which fourteen are
+    placements. Measured on the recorded demonstrations, 86% of the states
+    where the expert waited carried an exactly uniform target and the pass
+    action was the argmax in none of 10,940 rows -- so a policy trained on
+    them played a card at every decision, against the expert's 56%.
+    """
+    pass_index = (NVEC[0] - 1) * NVEC[1] * NVEC[2]
+    flat = [(pass_index, 0.5), (7, 0.5), (19, 0.5), (23, 0.5)]
+
+    # With no margin at all the values are exactly equal, there is nothing to
+    # prefer, and the only signal left is the action the expert took.
+    row = _row(flat, (4, 0, 0), patience=0.0)
+    assert row[pass_index] == 1.0
+    row = _row(flat, (0, 1, 2), patience=0.0)
+    assert row[0 * NVEC[1] * NVEC[2] + 1 * NVEC[2] + 2] == 1.0
+
+    # With the expert's real margin, waiting is genuinely ahead and the
+    # distribution says so rather than spreading itself over the placements.
+    row = _row(flat, (4, 0, 0))
+    assert row.argmax() == pass_index
+    assert row[pass_index] > 0.9
+
+
+def test_waiting_is_scored_with_the_margin_the_expert_required():
+    """A play is only taken if it beats waiting by ``patience``. If the
+    recorded scores leave that margin out, a state where waiting won produces
+    a target whose largest entry is the placement that lost."""
+    pass_index = (NVEC[0] - 1) * NVEC[1] * NVEC[2]
+    # A placement beats waiting by 0.005, which is inside the 0.01 margin, so
+    # the expert waited. The target has to agree with it.
+    scores = [(pass_index, 1.000), (7, 1.005), (19, 0.900), (23, 0.700)]
+    row = _row(scores, (4, 0, 0))
+    assert row.argmax() == pass_index, (
+        "the target prefers a placement the expert declined")
+
+    # Outside the margin, the placement wins and the target should say so.
+    scores = [(pass_index, 1.000), (7, 1.200), (19, 0.900), (23, 0.700)]
+    row = _row(scores, (0, 0, 7))
+    assert row.argmax() == 7
+
+
+def test_a_real_spread_still_produces_a_distribution_not_a_label():
+    """The soft target's whole point: several placements were nearly as good,
+    which a one-hot cannot say."""
+    pass_index = (NVEC[0] - 1) * NVEC[1] * NVEC[2]
+    scores = [(pass_index, 0.0), (7, 1.0), (19, 0.95), (23, 0.1)]
+    row = _row(scores, (0, 0, 7))
+    assert row.argmax() == 7
+    assert 0.0 < row[19] < row[7], "the near-equivalent placement carries no mass"
+    assert int((row > 0).sum()) == 4
+
+
+def test_the_expert_clears_its_scores_when_it_declines_to_search():
+    """``last_scores`` used to keep the previous decision's numbers through
+    the early returns, so a reader would be handed the search's beliefs about
+    a board that no longer exists."""
+    from cr_sim.engine.entity import Team
+    from cr_sim.train.scripted import SearchBot, SearchBotConfig
+
+    bot = SearchBot(Team.BLUE, SearchBotConfig())
+    bot.last_scores = [(1, 2.0)]
+    assert bot(None, np.zeros(NVEC, dtype=bool), None) == (4, 0, 0)
+    assert bot.last_scores == []
+
+
+# ------------------------------------------ what the cloner is fitting
+
+
+def test_merging_shards_keeps_the_search_s_own_beliefs(tmp_path):
+    """The cloner branches on ``target``, the search's value distribution over
+    every placement it evaluated, and falls back to the single move played
+    when it is absent. ``merge`` used to drop it by omitting one keyword, so
+    every clone this project ever ran took the fallback -- while the loader,
+    the saver and the collector all handled it correctly and every test passed.
+    """
+    import sys
+
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+    from scripts.clone_policy import merge
+
+    def shard(index: int) -> Demonstrations:
+        rows = 4
+        target = np.zeros((rows, NUM_ACTIONS), dtype=np.float32)
+        target[:, index] = 1.0
+        return Demonstrations(
+            grid=np.zeros((rows, 2, 4, 3), dtype=np.float32),
+            vector=np.zeros((rows, 6), dtype=np.float32),
+            mask=np.ones((rows, NUM_ACTIONS), dtype=bool),
+            action=np.zeros(rows, dtype=np.int64),
+            value=np.zeros(rows, dtype=np.float32),
+            target=target, episodes=1, play_rate=0.5)
+
+    paths = []
+    for index in (3, 7):
+        path = tmp_path / f"shard-{index:02d}.npz"
+        shard(index).save(path)
+        paths.append(path)
+
+    merged = merge(paths)
+    assert merged.target is not None, "the search's beliefs were dropped"
+    assert merged.target.shape == (8, NUM_ACTIONS)
+    assert merged.target[0].argmax() == 3
+    assert merged.target[-1].argmax() == 7
+
+
+def test_the_soft_target_is_what_the_cloner_actually_fits():
+    """Not the recorded action. The two disagree here on purpose: if the
+    target were being ignored the policy would learn the action instead, and
+    nothing else would look different.
+    """
+    from cr_sim.train.clone import CloneConfig, clone
+
+    rows = 64
+    wanted = 5
+    recorded = 9
+    target = np.zeros((rows, NUM_ACTIONS), dtype=np.float32)
+    target[:, wanted] = 1.0
+    data = Demonstrations(
+        grid=np.zeros((rows, 2, 4, 3), dtype=np.float32),
+        vector=np.zeros((rows, 6), dtype=np.float32),
+        mask=np.ones((rows, NUM_ACTIONS), dtype=bool),
+        action=np.full(rows, recorded, dtype=np.int64),
+        value=np.zeros(rows, dtype=np.float32),
+        target=target, episodes=1, play_rate=1.0)
+
+    net = _net()
+    clone(net, data, CloneConfig(epochs=15, batch_size=32, learning_rate=5e-3,
+                                holdout=0.25, seed=0))
+    with torch.no_grad():
+        logits, _ = net(torch.zeros(1, 2, 4, 3), torch.zeros(1, 6),
+                        torch.ones(1, NUM_ACTIONS, dtype=torch.bool))
+    assert int(logits.argmax()) == wanted, (
+        "the cloner fitted the recorded action, not the search's distribution")
