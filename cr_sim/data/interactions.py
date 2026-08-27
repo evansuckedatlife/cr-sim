@@ -352,6 +352,10 @@ class DefenseProfile:
     flying: bool
     is_tower: bool = False
     is_building: bool = False
+    #: Hitbox radius. Ranges are measured surface-to-surface, so turning a
+    #: reach advantage into a distance one unit must walk needs both bodies'
+    #: radii as well as the range difference.
+    collision_radius: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,9 +369,25 @@ class AttackProfile:
     attacks_air: bool
     hit_speed_ticks: int = 0
     load_time_ticks: int = 0
+    #: Hitbox-to-hitbox reach in subtiles, and how fast this unit closes a
+    #: gap (zero for a building, which never closes one). Neither changes a
+    #: hit count, which is why the matrix above ignores them -- but together
+    #: they decide whether the fight that hit count describes happens on even
+    #: terms or not at all. See :mod:`cr_sim.data.engagement`.
+    attack_range: int = 0
+    speed_per_tick: int = 0
+    #: How far this unit can *acquire* a target. Only two units in the build
+    #: have a sight range shorter than their reach and neither attacks, so
+    #: this never shortens a real attacker -- but it is what decides whether a
+    #: unit being shot from outside its sight ever reacts at all.
+    sight_range: int = 0
     variable_damage: tuple[int, ...] = ()
     variable_damage_ticks: tuple[int, ...] = ()
     is_spell: bool = False
+    #: Dies on its own first hit -- Ice Spirit, Balloon's death bomb, the
+    #: Skeleton Barrel. Treating one as a repeating attacker is how a model
+    #: concludes an Ice Spirit grinds down a Giant.
+    kamikaze: bool = False
     #: Giant, Golem, Hog Rider, Royal Giant, Balloon and their kin cannot
     #: target a troop at all -- not "deals reduced damage to one", genuinely
     #: cannot select one as a target. A pure hp/damage division does not know
@@ -384,6 +404,7 @@ def _spec_profiles(spec: UnitSpec, key: str) -> tuple[DefenseProfile, AttackProf
         flying=spec.flying,
         is_tower=spec.kind.name == "TOWER",
         is_building=spec.kind.name in ("BUILDING", "TOWER"),
+        collision_radius=spec.collision_radius,
     )
     attack = None
     if spec.damage > 0:
@@ -395,9 +416,13 @@ def _spec_profiles(spec: UnitSpec, key: str) -> tuple[DefenseProfile, AttackProf
             attacks_air=spec.attacks_air,
             hit_speed_ticks=spec.hit_speed_ticks,
             load_time_ticks=spec.load_time_ticks,
+            attack_range=spec.attack_range,
+            speed_per_tick=spec.speed_per_tick,
+            sight_range=spec.sight_range,
             variable_damage=spec.variable_damage,
             variable_damage_ticks=spec.variable_damage_ticks,
             target_only_buildings=spec.target_only_buildings,
+            kamikaze=spec.kamikaze,
         )
     return defense, attack
 

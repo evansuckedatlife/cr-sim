@@ -5,6 +5,7 @@
     python -m cr_sim.cli card Knight          full resolved stats for one card
     python -m cr_sim.cli validate             run the stat gate
     python -m cr_sim.cli interactions         the interaction-matrix gate (verification gate #2)
+    python -m cr_sim.cli engagement          reach + Princess Tower support
     python -m cr_sim.cli freeze               re-freeze the regression baseline
 """
 
@@ -20,6 +21,12 @@ from .data.cards import (
     CardKind,
     build_card_registry,
     card_stat_summary,
+)
+from .data.engagement import (
+    duel_matrix,
+    tower_matrix,
+    write_duel_csv,
+    write_tower_csv,
 )
 from .data.interactions import (
     DEFAULT_SHEET,
@@ -146,6 +153,56 @@ def cmd_validate(args) -> int:
 
 
 DEFAULT_GENERATED_MATRIX = ROOT / "reference" / "interactions_generated.csv"
+DEFAULT_DUELS = ROOT / "reference" / "duels_generated.csv"
+DEFAULT_TOWER_ASSIST = ROOT / "reference" / "tower_assist_generated.csv"
+
+
+def cmd_engagement(args) -> int:
+    """Who wins once reach and the Princess Tower are accounted for.
+
+    The hit-count matrix next door answers "how many hits"; this answers
+    "and does that win the fight", which is what a hit count is read for.
+    """
+    data, levels, registry = _load(args.build)
+    defenses, attacks, _labels = build_profiles(data, levels, registry)
+
+    duels = duel_matrix(defenses, attacks)
+    decided = [d for d in duels.values() if d.winner in ("a", "b")]
+    clean = [d for d in decided if d.clean]
+    print(f"{len(duels)} fightable pair(s): {len(decided)} decided, "
+          f"{len(clean)} ({len(clean) / max(1, len(decided)):.1%}) won without "
+          f"the winner being hit once")
+
+    print(f"\nlargest head starts -- hits landed before the other side could answer:")
+    for (a, b), fight in sorted(duels.items(), key=lambda kv: -kv[1].head_start)[:args.top]:
+        if fight.winner not in ("a", "b"):
+            continue
+        won = a if fight.winner == "a" else b
+        print(f"  {won:<18} +{fight.head_start:>3} free hits vs "
+              f"{b if fight.winner == 'a' else a}")
+
+    assists = tower_matrix(defenses, attacks)
+    changed = [v for v in assists.values() if v.saved]
+    free = [v for v in assists.values() if v.with_tower == 0]
+    saved = [v.saved for v in changed]
+    print(f"\n{len(assists)} (defender, attacker) pair(s) with a Princess Tower firing:")
+    print(f"  changes the hit count on {len(changed)} "
+          f"({len(changed) / max(1, len(assists)):.1%}), mean {sum(saved) / max(1, len(saved)):.1f} "
+          f"hits saved, max {max(saved) if saved else 0}")
+    print(f"  finishes the job before the troop lands a hit on {len(free)} pair(s)")
+
+    biggest = sorted(((k, v) for k, v in assists.items() if v.saved),
+                     key=lambda kv: -kv[1].saved)[:args.top]
+    print(f"\nwhere the tower does the most work:")
+    for (defender, attacker), v in biggest:
+        print(f"  {attacker:<18} vs {defender:<16} {v.alone:>3} hits alone -> "
+              f"{v.with_tower:<3} with tower")
+
+    if args.write:
+        write_duel_csv(duels, args.duels_out)
+        write_tower_csv(assists, args.tower_out)
+        print(f"\nwrote {args.duels_out}\n      {args.tower_out}")
+    return 0
 
 
 def cmd_interactions(args) -> int:
@@ -473,6 +530,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--simulate", action="store_true", help="also run real duels for a curated card subset")
     p.add_argument("--sim-cards", help="comma-separated card names, overriding the default subset")
     p.set_defaults(func=cmd_interactions)
+
+    p = sub.add_parser("engagement", help="who wins once reach and tower support are counted")
+    p.add_argument("--write", action="store_true", help="write both CSVs")
+    p.add_argument("--duels-out", type=Path, default=DEFAULT_DUELS)
+    p.add_argument("--tower-out", type=Path, default=DEFAULT_TOWER_ASSIST)
+    p.add_argument("--top", type=int, default=12, help="how many examples to print")
+    p.set_defaults(func=cmd_engagement)
 
     p = sub.add_parser("battle", help="run a battle and optionally write an HTML replay")
     p.add_argument("--blue", default="hog_cycle", help="deck name or comma-separated cards")
