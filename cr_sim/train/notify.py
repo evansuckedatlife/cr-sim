@@ -61,6 +61,7 @@ def use_utf8_console() -> None:
             # buffer) is already producing correct text; nothing to fix.
             pass
 
+
 #: Under this, a lift reading is inside the control's own noise and means
 #: nothing. Six evaluations on this project averaged +0.04 while individual
 #: ones reached +0.23, so a message announcing one would be announcing noise.

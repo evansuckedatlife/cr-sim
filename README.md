@@ -361,6 +361,26 @@ deliberate split: **`anchors.json` is external truth and is never generated**
 baseline whose only job is to make a new APK's balance changes visible instead
 of silent.
 
+### Watching from Discord
+
+Start with the webhook: no bot to create, nothing to keep logged in, and it
+can only post -- right for "tell me when something happens".
+
+```bash
+export CR_SIM_DISCORD_WEBHOOK="..."   # Discord: Server Settings > Integrations > Webhooks > New Webhook > Copy Webhook URL
+python -m cr_sim.train.notify --every 60        # new evaluations, finished runs, runs gone quiet
+python -m cr_sim.train.notify --once --dry-run  # check the wording without a webhook at all
+```
+
+A bot token additionally answers questions (`/status`, `/run <name>`,
+`/compare <a> <b>`, `/expert`), at the cost of creating and inviting a bot:
+
+```bash
+export CR_SIM_DISCORD_TOKEN="..."          # Discord Developer Portal > Applications > Bot
+export CR_SIM_DISCORD_CHANNEL="123456789"  # the channel ID to post and answer in
+python -m cr_sim.train.bot
+```
+
 ## Layout
 
 ```
