@@ -38,6 +38,11 @@ from .selfplay import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+
+#: Evaluations averaged before a checkpoint may be promoted. Three at the
+#: default cadence is 120 battles, which is still not enough to conclude with
+#: but is enough that one lucky draw cannot carry it.
+_BEST_WINDOW = 3
 DEFAULT_BUILD = ROOT / "data_cache" / "csv_logic"
 
 #: A recognisable, cheap deck. Cycle rather than beatdown on purpose: more
@@ -85,6 +90,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tps", type=int, default=20, help="engine tick rate")
     parser.add_argument("--frame-skip", type=int, default=10, help="ticks per decision")
     parser.add_argument("--match-seconds", type=int, default=120)
+    parser.add_argument(
+        "--tower-level", type=int, default=11,
+        help="Crown Tower level. At 11 a 120-second match ends with 92%% of "
+             "tower health untouched and 92%% of matches drawn, so crowns -- "
+             "the only real objective -- almost never fire and the agent "
+             "learns from shaping alone. Level 5 halves the draw rate at no "
+             "extra compute. A training-environment choice, not a change to "
+             "the simulator: evaluate at 11 to see what transfers.",
+    )
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--entropy", type=float, default=0.02)
     parser.add_argument(
@@ -181,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
             ticks_per_second=args.tps,
             frame_skip=args.frame_skip,
             max_ticks=args.tps * args.match_seconds,
+            tower_level=args.tower_level,
             reward_shaping_weight=args.shaping,
             reward_weights=_reward_weights(args),
             opponent_policy=opponent,
@@ -212,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps({**asdict(config), "deck": list(DEFAULT_DECK), "tps": args.tps,
                     "frame_skip": args.frame_skip, "match_seconds": args.match_seconds,
                     "shaping": args.shaping, "reward": args.reward,
+                    "tower_level": args.tower_level,
                     "horizon_seconds": args.horizon_seconds,
                     "opponent": args.opponent}, indent=2),
         encoding="utf-8",
@@ -232,6 +248,8 @@ def main(argv: list[str] | None = None) -> int:
     net_holder: dict[str, torch.nn.Module] = {}
     probe_holder: dict[str, Any] = {}
     best = {"lift": float("-inf")}
+    #: Recent lift readings, for promoting on their mean.
+    recent: list[float] = []
 
     probe_env = _env(None)
     probe_env.reset(seed=0)
@@ -271,13 +289,35 @@ def main(argv: list[str] | None = None) -> int:
                     f"{stats['control_win']:.0%}  lift {stats['eval_lift_sd']:+.2f} sd",
                     flush=True,
                 )
-                # Kept on measured improvement, not on a schedule. Saving every
-                # N updates leaves whatever the policy happened to be at the
-                # end rather than the best thing seen.
-                if stats["eval_lift_sd"] > best["lift"]:
-                    best["lift"] = stats["eval_lift_sd"]
-                    torch.save({"state_dict": net.state_dict(), "stats": stats},
-                               out / "best.pt")
+                # Promoted on a rolling mean, never on a single reading.
+                #
+                # This used to keep whichever checkpoint scored the highest
+                # lift, which sounds like keeping the best and is really
+                # keeping the luckiest: each reading is 40 battles, and the
+                # maximum of nineteen noisy readings is selected for its
+                # noise. Measured -- the checkpoint chosen that way scored
+                # +0.375 on its 40 battles and -0.033 on 300, while the final
+                # weights, chosen by nothing at all, scored +0.141.
+                #
+                # A mean over several consecutive evaluations cannot be
+                # carried by one lucky draw, and the window is what makes the
+                # comparison worth anything.
+                recent.append(stats["eval_lift_sd"])
+                del recent[:-_BEST_WINDOW]
+                if len(recent) >= _BEST_WINDOW:
+                    rolling = sum(recent) / len(recent)
+                    stats["rolling_lift"] = rolling
+                    if rolling > best["lift"]:
+                        best["lift"] = rolling
+                        torch.save(
+                            {
+                                "state_dict": net.state_dict(),
+                                "stats": stats,
+                                "rolling_lift": rolling,
+                                "window": _BEST_WINDOW,
+                            },
+                            out / "best.pt",
+                        )
             if stats["updates"] % args.save_every == 0:
                 # Optimiser state included deliberately. Adam's moment
                 # estimates are most of what a long run has learned about its
