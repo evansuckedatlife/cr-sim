@@ -96,6 +96,125 @@ def summarise(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
 
 
 
+
+#: How a command line is reported on the page. Ordered, first match wins.
+_JOB_KINDS = (
+    ("train.run", "training"),
+    ("make_demos", "recording demonstrations"),
+    ("clone_policy", "cloning a policy"),
+    ("measure_expert", "measuring the expert"),
+    ("play.server", "play server"),
+    ("train.watch", "this page"),
+    ("soak", "soak test"),
+)
+
+
+def running_jobs() -> list[dict[str, Any]]:
+    """Every cr-sim process alive right now, with what it is doing.
+
+    Read from the operating system rather than from a registry of jobs that
+    announced themselves. A registry only ever knows about the well-behaved
+    ones, and the case worth catching is the opposite: three copies of the
+    same script running at once because an interrupted command had already
+    started before it was interrupted.
+
+    Best-effort. If psutil is missing or the platform will not say, this
+    returns nothing and the page simply does not show the strip -- an
+    approximate listing is worth having, and a missing one must not take the
+    rest of the page down with it.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return _jobs_via_shell()
+
+    found: list[dict[str, Any]] = []
+    for process in psutil.process_iter(["pid", "name", "cmdline", "cpu_percent",
+                                        "memory_info", "create_time"]):
+        try:
+            info = process.info
+            if not info.get("name", "").lower().startswith("python"):
+                continue
+            line = " ".join(info.get("cmdline") or ())
+            if "cr_sim" not in line and "scripts" not in line:
+                continue
+            kind = next((label for needle, label in _JOB_KINDS if needle in line), None)
+            if kind is None:
+                continue
+            name = None
+            if "--name" in line:
+                parts = line.split("--name", 1)[1].split()
+                name = parts[0] if parts else None
+            elif "--shard" in line:
+                parts = line.split("--shard", 1)[1].split()
+                name = f"shard {parts[0]}" if parts else None
+            found.append({
+                "pid": info["pid"],
+                "kind": kind,
+                "name": name,
+                "memory_mb": round((info.get("memory_info").rss if info.get("memory_info") else 0) / 1e6),
+                "age_seconds": max(0.0, time.time() - (info.get("create_time") or time.time())),
+            })
+        except Exception:  # pragma: no cover - processes vanish mid-iteration
+            continue
+    return _group(found)
+
+
+def _group(found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per job, not one per process.
+
+    Launching a module spawns a shell that then spawns the worker, so every
+    job appears twice -- and a self-play run appears four times once its
+    environment workers are counted. Listing all of them buries the thing this
+    strip exists to show, which is a job running more than once by mistake.
+    """
+    groups: dict[tuple, dict[str, Any]] = {}
+    for job in found:
+        key = (job["kind"], job["name"])
+        entry = groups.setdefault(key, {
+            "kind": job["kind"], "name": job["name"], "pid": job["pid"],
+            "memory_mb": 0, "age_seconds": job["age_seconds"], "processes": 0,
+        })
+        entry["processes"] += 1
+        entry["memory_mb"] += job["memory_mb"]
+        # The oldest process is the one that was actually launched; its
+        # children are younger, and the launcher's age is the job's age.
+        if job["age_seconds"] > entry["age_seconds"]:
+            entry["age_seconds"] = job["age_seconds"]
+            entry["pid"] = job["pid"]
+    for entry in groups.values():
+        # Launching a module costs two processes: a shell and the worker it
+        # spawns. More than that means either genuine parallelism -- a
+        # training run's environment workers -- or the same job started
+        # several times over, which is what three simultaneous clones of one
+        # script looked like when nothing on the page could show it.
+        entry["suspicious"] = (
+            entry["processes"] > 2 and entry["kind"] != "training")
+    return sorted(groups.values(), key=lambda j: (j["kind"], str(j["name"])))
+
+
+def _jobs_via_shell() -> list[dict[str, Any]]:
+    """Fallback for a machine without psutil."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["wmic", "process", "where", "name like '%python%'",
+             "get", "ProcessId,CommandLine", "/format:csv"],
+            capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return []
+    found: list[dict[str, Any]] = []
+    for row in out.splitlines():
+        kind = next((label for needle, label in _JOB_KINDS if needle in row), None)
+        if kind is None:
+            continue
+        digits = [p for p in row.strip().split(",") if p.strip().isdigit()]
+        found.append({"pid": int(digits[-1]) if digits else 0, "kind": kind,
+                      "name": None, "memory_mb": 0, "age_seconds": 0.0})
+    return sorted(found, key=lambda j: (j["kind"], j["pid"]))
+
+
 def _started_at(run: Path) -> float:
     """When a run began, as a timestamp.
 
@@ -144,6 +263,7 @@ def _series_of(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
 def render_multi(
     runs: "Sequence[tuple[str, Sequence[dict[str, Any]], bool]]",
     back: str | None = None,
+    jobs: "Sequence[dict[str, Any]] | None" = None,
 ) -> str:
     """One page holding several runs, as ``(name, rows, live)`` triples.
 
@@ -167,6 +287,7 @@ def render_multi(
         },
         "order": [name for name, _, _ in runs],
         "back": back,
+        "jobs": jobs or [],
     })
     return _PAGE.replace("__DATA__", payload)
 
@@ -291,6 +412,16 @@ dl.gloss dt{font-family:Archivo,sans-serif;font-weight:700;margin-top:20px;font-
 dl.gloss dd{margin:5px 0 0;color:var(--soft);font-size:14.5px;max-width:80ch}
 dl.gloss dd.read{margin-top:7px;font-size:13.5px;color:var(--muted);padding-left:13px;border-left:2px solid var(--hair)}
 code{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.87em;background:var(--accentw);color:var(--accent);padding:1px 5px;border-radius:2px}
+.jobs{margin-top:24px;background:var(--panel);border:1px solid var(--rule);
+  border-left:3px solid var(--good);border-radius:3px;padding:14px 18px;box-shadow:var(--shadow)}
+.jobs.idle{border-left-color:var(--muted)}
+.jobs-head{display:flex;align-items:center;gap:9px;margin-bottom:9px}
+.jobs-list{display:flex;flex-wrap:wrap;gap:7px}
+.job{display:inline-flex;align-items:center;gap:7px;background:var(--panel2);
+  border:1px solid var(--hair);border-radius:3px;padding:5px 10px;font-size:13px}
+.job b{font-weight:600}
+.job .meta{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:11.5px;color:var(--muted)}
+.job.warn{border-color:var(--warn);background:var(--warnw)}
 .tabbar{display:flex;align-items:flex-end;gap:12px;margin-top:30px;
   border-bottom:1px solid var(--rule);flex-wrap:wrap}
 .tabs{display:flex;gap:2px;flex-wrap:wrap;flex:1}
@@ -332,6 +463,8 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--rule);font-si
     <span id="stamp"></span>
   </div>
 </header>
+
+<div id="jobs"></div>
 
 <div class="tabbar">
   <div class="tabs" id="tabs" role="tablist"></div>
@@ -602,6 +735,58 @@ function fillPane(pane, name){
     + '</div>';
 }
 
+function ago(seconds){
+  if (seconds < 90) return Math.round(seconds)+'s';
+  if (seconds < 5400) return Math.round(seconds/60)+'m';
+  return (seconds/3600).toFixed(1)+'h';
+}
+
+function renderJobs(jobs){
+  var el = document.getElementById('jobs');
+  if (!jobs.length) {
+    el.innerHTML = '<div class="jobs idle"><div class="jobs-head">'
+      + '<span class="lbl">running now</span></div>'
+      + '<div style="color:var(--muted);font-size:14px">Nothing running.</div></div>';
+    return;
+  }
+  // Two copies of the same kind of job is nearly always a mistake: an
+  // interrupted command had already started before it was interrupted, and
+  // three clones of one script once shared this machine holding 1.3GB each
+  // with nothing on this page to say so.
+  // Two ways the same job runs twice, and both have to be caught: as two
+  // entries when the runs are named differently, and as one entry holding too
+  // many processes when they are not named at all -- which is what three
+  // simultaneous clones of one script actually looked like.
+  var counts = {};
+  jobs.forEach(function(j){ counts[j.kind] = (counts[j.kind] || 0) + 1; });
+  var chips = jobs.map(function(j){
+    var duplicated = j.suspicious || (counts[j.kind] > 1 && j.kind !== 'training');
+    return '<span class="job'+(duplicated ? ' warn' : '')+'">'
+      + '<b>'+j.kind+'</b>'
+      + (j.name ? '<span>'+j.name+'</span>' : '')
+      + '<span class="meta">pid '+j.pid
+      + (j.processes > 1 ? ' &middot; '+j.processes+' proc' : '')
+      + (j.memory_mb ? ' &middot; '+j.memory_mb+'MB' : '')
+      + (j.age_seconds ? ' &middot; '+ago(j.age_seconds) : '')
+      + '</span></span>';
+  }).join('');
+  var duplicates = Object.keys(counts).filter(function(k){
+    return counts[k] > 1 && k !== 'training'; });
+  jobs.forEach(function(j){
+    if (j.suspicious && duplicates.indexOf(j.kind) < 0) duplicates.push(j.kind);
+  });
+  var note = duplicates.length
+    ? '<div style="margin-top:9px;font-size:13px;color:var(--warn)">'
+      + duplicates.length + ' job kind' + (duplicates.length > 1 ? 's are' : ' is')
+      + ' running more than once (' + duplicates.join(', ')
+      + '). That is usually an interrupted command that had already started.</div>'
+    : '';
+  el.innerHTML = '<div class="jobs"><div class="jobs-head">'
+    + '<span class="dot"></span><span class="lbl" style="color:var(--ink)">running now &mdash; '
+    + jobs.length + ' process' + (jobs.length > 1 ? 'es' : '') + '</span></div>'
+    + '<div class="jobs-list">' + chips + '</div>' + note + '</div>';
+}
+
 function remember(key, value){ try{ localStorage.setItem(key, value); }catch(e){} }
 function recall(key, fallback){
   try{ var v = localStorage.getItem(key); return v === null ? fallback : v; }catch(e){ return fallback; }
@@ -610,6 +795,7 @@ function recall(key, fallback){
 (function start(){
   var order = DATA.order, panesEl = document.getElementById('panes');
   document.getElementById('stamp').textContent='updated '+new Date().toLocaleTimeString();
+  renderJobs(DATA.jobs || []);
   if (DATA.back) {
     var b=document.getElementById('back');
     b.href=DATA.back; b.style.display='inline';
@@ -761,7 +947,8 @@ def main(argv: list[str] | None = None) -> int:
             collected.append((run.name, rows, live))
         if not collected:
             return 0
-        out.write_text(render_multi(collected), encoding="utf-8")
+        out.write_text(render_multi(collected, jobs=running_jobs()),
+                       encoding="utf-8")
         return sum(len(rows) for _, rows, _ in collected)
 
     count = once()

@@ -389,3 +389,99 @@ def test_a_run_without_a_ladder_says_so_rather_than_showing_zero():
         .split("const DATA = ", 1)[1].split(";\n", 1)[0])
     assert payload["runs"]["plain"]["summary"]["ancestor_win"] is None
     assert payload["runs"]["plain"]["series"]["ancestor_win"] == []
+
+
+# ------------------------------------------------------------- what is running
+
+
+def test_the_page_lists_the_jobs_it_was_given():
+    """Three copies of one script once ran at the same time, each holding
+    1.3GB and most of a core, and nothing on this page said so -- it only knew
+    about runs that write metrics, and a script that has not finished writes
+    nothing. Task Manager was the only way to find out."""
+    from cr_sim.train.watch import render_multi
+
+    page = render_multi(
+        [("a", [_row(1, 1000)], True)],
+        jobs=[{"kind": "training", "name": "a", "pid": 42,
+               "memory_mb": 900, "age_seconds": 600, "processes": 3}])
+    payload = json.loads(page.split("const DATA = ", 1)[1].split(";\n", 1)[0])
+    assert payload["jobs"][0]["kind"] == "training"
+    assert payload["jobs"][0]["pid"] == 42
+
+
+def test_no_jobs_is_a_state_the_page_can_render():
+    from cr_sim.train.watch import render_multi
+
+    payload = json.loads(
+        render_multi([("a", [_row(1, 1000)], True)])
+        .split("const DATA = ", 1)[1].split(";\n", 1)[0])
+    assert payload["jobs"] == []
+
+
+def test_processes_of_one_job_are_grouped():
+    """Launching a module spawns a shell that spawns the worker, so every job
+    appears at least twice. Listing all of them buries the case this exists to
+    surface: one job running more than once by mistake."""
+    from cr_sim.train.watch import _group
+
+    grouped = _group([
+        {"kind": "training", "name": "run-a", "pid": 1, "memory_mb": 20,
+         "age_seconds": 900.0},
+        {"kind": "training", "name": "run-a", "pid": 2, "memory_mb": 1000,
+         "age_seconds": 890.0},
+        {"kind": "cloning a policy", "name": None, "pid": 3, "memory_mb": 1200,
+         "age_seconds": 60.0},
+    ])
+    assert len(grouped) == 2
+    training = next(g for g in grouped if g["kind"] == "training")
+    assert training["processes"] == 2
+    assert training["memory_mb"] == 1020
+    # The oldest process is the one that was launched; its children are newer.
+    assert training["pid"] == 1
+
+
+def test_one_job_started_three_times_is_flagged():
+    """The case that actually happened, and that grouping nearly hid.
+
+    Three copies of one script ran at once with no --name to tell them apart,
+    so they collapse into a single entry. What gives them away is the process
+    count: launching a module costs a shell and a worker, so more than two
+    means the job was started more than once.
+    """
+    from cr_sim.train.watch import _group
+
+    grouped = _group([
+        {"kind": "cloning a policy", "name": None, "pid": pid,
+         "memory_mb": 1200, "age_seconds": 60.0}
+        for pid in range(1, 7)
+    ])
+    assert len(grouped) == 1
+    assert grouped[0]["processes"] == 6
+    assert grouped[0]["suspicious"], "three simultaneous clones went unflagged"
+
+
+def test_a_training_run_with_worker_processes_is_not_flagged():
+    """Environment workers are the point of --workers, not a mistake."""
+    from cr_sim.train.watch import _group
+
+    grouped = _group([
+        {"kind": "training", "name": "run-a", "pid": pid, "memory_mb": 400,
+         "age_seconds": 900.0}
+        for pid in range(1, 8)
+    ])
+    assert grouped[0]["processes"] == 7
+    assert not grouped[0]["suspicious"]
+
+
+def test_a_single_job_is_not_flagged():
+    from cr_sim.train.watch import _group
+
+    grouped = _group([
+        {"kind": "measuring the expert", "name": None, "pid": 1,
+         "memory_mb": 20, "age_seconds": 30.0},
+        {"kind": "measuring the expert", "name": None, "pid": 2,
+         "memory_mb": 400, "age_seconds": 28.0},
+    ])
+    assert grouped[0]["processes"] == 2
+    assert not grouped[0]["suspicious"]
