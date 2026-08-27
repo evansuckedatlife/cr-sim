@@ -27,3 +27,6 @@ play.err
 poc.out
 poc.err
 progress.html
+report/
+replay.html
+out.html

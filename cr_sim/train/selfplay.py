@@ -48,15 +48,25 @@ class FrozenOpponent:
     mid-rollout.
     """
 
-    __slots__ = ("_net", "_nvec", "_torch", "_rng", "refreshes")
+    __slots__ = ("_net", "_nvec", "_torch", "_rng", "refreshes", "temperature")
 
-    def __init__(self, net: ActorCritic, nvec: Sequence[int], seed: int = 0) -> None:
+    def __init__(self, net: ActorCritic, nvec: Sequence[int], seed: int = 0,
+                 temperature: float = 1.0) -> None:
         import torch
 
         self._torch = torch
         self._nvec = [int(v) for v in nvec]
         self._rng = np.random.default_rng(seed)
         self.refreshes = 0
+        #: How sharply the opponent plays its own policy. 1.0 samples from it
+        #: as-is, which sounds neutral and is not: an early policy has an
+        #: entropy near the uniform maximum, so an opponent sampling from it
+        #: is *still nearly random*. That leaves the match outcome as
+        #: unpredictable as it was against a random agent, the critic with
+        #: nothing it can fit, and the advantages as noise -- which is the
+        #: thing self-play was supposed to fix. Below 1.0 sharpens toward the
+        #: policy's own preferences and makes the environment learnable.
+        self.temperature = max(1e-3, float(temperature))
         self._net = self._snapshot(net)
 
     def _snapshot(self, net: ActorCritic) -> ActorCritic:
@@ -88,11 +98,13 @@ class FrozenOpponent:
                 torch.from_numpy(observation["vector"]).unsqueeze(0),
                 torch.from_numpy(flat).unsqueeze(0),
             )
-            # Sampled, not greedy. A greedy opponent plays one fixed line and
-            # the policy learns to beat that line rather than the game -- and
-            # a near-uniform policy's argmax is an arbitrary fixed placement,
-            # which is worse than random to practise against.
-            index = int(torch.distributions.Categorical(logits=logits).sample())
+            # Sampled rather than greedy, but at a temperature. Greedy plays
+            # one fixed line, and early on that line is an arbitrary
+            # placement; sampling at 1.0 leaves an opponent barely different
+            # from random. A temperature below one keeps the opponent varied
+            # while making it predictable enough to learn against.
+            index = int(torch.distributions.Categorical(
+                logits=logits / self.temperature).sample())
         slots, width, height = self._nvec
         slot, remainder = divmod(index, width * height)
         gx, gy = divmod(remainder, height)
@@ -170,8 +182,9 @@ class PooledOpponent(FrozenOpponent):
 
     __slots__ = ("_pool",)
 
-    def __init__(self, pool: OpponentPool, net: ActorCritic, nvec, seed: int = 0) -> None:
-        super().__init__(net, nvec, seed=seed)
+    def __init__(self, pool: OpponentPool, net: ActorCritic, nvec, seed: int = 0,
+                 temperature: float = 1.0) -> None:
+        super().__init__(net, nvec, seed=seed, temperature=temperature)
         self._pool = pool
 
     def refresh(self, net: ActorCritic) -> None:

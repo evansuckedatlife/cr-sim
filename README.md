@@ -6,24 +6,23 @@ shop, no monetization. It exists to be a training environment for a machine
 learning agent, so the requirements are: **correct, deterministic, and fast
 enough to train against.**
 
-Full plan: `../.claude/plans/i-want-to-build-purrfect-kernighan.md`.
-
 ## Status
 
-**255 tests.** Battles run end to end: units deploy, route, fight, die, towers
-fall, and matches resolve on crowns, sudden death or a tiebreaker.
+**622 tests.** Battles run end to end: units deploy, route, fight, die, towers
+fall, and matches resolve on crowns, sudden death or a tiebreaker. A PPO agent
+trains against the engine, and a browser page lets you play it yourself.
 
 | Milestone | State | What landed |
 |-----------|-------|-------------|
 | **M0 — data pipeline** | ✅ | APK decoder, csv_logic + TOML ingestion, `EXT` inheritance and merge operators, level scaling, 122-card registry, stat gate. Every playable card resolves. |
 | **M1 — deterministic core** | ✅ | Integer subtile geometry, PCG32 RNG, entities, elixir from the real timeline, arena from the shipped tilemap, bridge routing, an explicitly ordered tick loop (17 named phases), state hashing. |
 | **M2 — combat** | ✅ | Targeting (sight, filters, sticky targets), attack cycle (load/hit-speed, simultaneous resolution), damage, Crown Towers with their own scaling, King activation with its 3300ms delay, kamikaze units, swarm spread, and projectiles that actually fly. |
-| **M3 — collision & pathing** | 🟡 | Circle collision, mass-weighted pushback, immovable tanks, derived swarm packing, and a spatial index. Weighted-grid pathfinding (the `PATHFINDING_*` costs) is still waypoint-only. |
+| **M3 — collision & pathing** | ✅ | Circle collision, mass-weighted pushback, immovable tanks, derived swarm packing, and a spatial index. Weighted-grid pathfinding over the `PATHFINDING_*` costs. `building-collision-shape` is settled: buildings collide as circles, and the King Tower's 3x3 square is baked into the tilemap rather than derived from a radius. |
 | **M4 — match rules** | ✅ | Elixir, deck cycle, deploy legality, crowns, king-destruction, regulation end, overtime sudden death, and a percentage-based tiebreaker. |
 | **M5 — spells & buffs** | ✅ | Spells cast where the enemy is, area effects tick, buffs slow/freeze/rage/stun, damage- and heal-over-time, Arrows' waves, Tornado's pull, invisibility, damage reduction, and the Log rolling down its lane. |
 | **M6 — the full roster** | 🟡 | Death spawns and death blasts, bombs as fused entities, spawners, charge, the Inferno ramp, earned and reflected buffs, and an **ACTION interpreter** covering every node type the 122 playable cards reach bar ten one-off classes. |
 | **M7 — champions & evolutions** | ⬜ | Abilities, Evolutions, Mirror/Clone/Graveyard |
-| **M8 — ML interface** | 🟡 | Gymnasium-style env, spatial+vector observation, masked 720-action space, self-play, multiprocess vec env, and a PPO trainer. Not yet trained to anything. |
+| **M8 — ML interface** | 🟡 | Gymnasium-style env, spatial+vector observation, masked 720-action space, self-play against a pool of past selves, multiprocess vec env, PPO trainer, a live progress page and a browser game. **No trained policy yet beats a random agent** — see *Training* below, which is the honest account. |
 | **M9 — vectorized port** | ⬜ | Optional; scalar core as the correctness oracle |
 
 ### Known gaps, stated plainly
@@ -94,7 +93,7 @@ been closed with evidence; five remain:
 |---|---|---|
 | `pekka-damage` | ✅ resolved | 842, not the 510 public sources list — settled by the one-shot breakpoint against a 721 hitpoint Musketeer |
 | `tower-hp-scaling` | ✅ resolved | Towers use their own progression, not the card ladder; 39% error avoided |
-| `building-collision-shape` | open, **high** | Blocks M3. The King Tower's footprint is a 3×3 square but the only per-entity extent in the data is a scalar `CollisionRadius` |
+| `building-collision-shape` | ✅ resolved | Circles, with the King Tower the one exception and its square baked into the tilemap. A point 2.05 tiles from its centre is `BLOCKED` despite a 1.4-tile `CollisionRadius`, which no circle can produce; scanning around every Princess Tower finds no baked cells at all |
 | `arrows-effective-damage` | ✅ resolved | Per wave. 3 waves x 122 = 366, which is exactly what clears Minions, Goblins and Princess |
 | `bridge-width` | open, low | This build says 2 tiles everywhere; public sources say 3 for some arenas |
 | `tornado-attract-unit` | ✅ resolved | `AttractPercentage` is a flat rate in tiles/minute, not a percentage of the pulled unit's speed — 360 drags a unit across the tornado's own radius in 917ms against its 1050ms life |
@@ -228,6 +227,78 @@ grid *lines* (King Tower `x=18` → tile 9.0, dead centre), while tilemap cells
 are *spans*. Reading the tower's x as a cell index puts it at 9.25 and slightly
 off-centre forever.
 
+## Training
+
+This is where the project currently is, and the short version is that **nothing
+has learned to play yet.** The engine is in good shape; the agent is not. What
+follows is the record rather than a pitch, because the failed attempts are the
+useful part.
+
+### What has been established
+
+**The machinery works.** A bandit with one paying action out of ~200 legal goes
+from chance to a perfect 1.000 hit rate with entropy collapsing to zero. PPO,
+the action masking, the flat-categorical decode and the update rule are all
+correct — which was worth proving directly, because four training runs looked
+exactly like a broken optimiser.
+
+**The critic is the bottleneck.** *Explained variance* — how much of the match
+outcome the value function can predict — has sat at ~0.00 across every run, two
+rewards, a shared and a separate critic encoder, and a 3x critic learning rate.
+PPO's advantage is `return - value`, so at zero it is noise, and the policy gets
+pushed in near-random directions however long it trains.
+
+**Against a predictable opponent the same critic reaches 0.647.** An idle
+opponent makes the outcome a function of the board; a random one makes it a
+function of coin flips nothing can observe. That is the whole difference.
+
+**No trained checkpoint has beaten an untrained one.** Over 300 paired battles:
+a random control, two freshly initialised networks, and two trained checkpoints
+all land within noise of each other. Every encouraging lift number this project
+produced was measuring a randomly-initialised network's placement prior.
+
+### Things that were quietly wrong, and how they were found
+
+Each of these looked healthy and had passing tests.
+
+- **`push_away` was a no-op.** It called `point_along(travelled=span+amount,
+  segment_length=span)`, which returns the endpoint whenever
+  `travelled >= segment_length` — always true for a positive push. Every
+  knockback in the game returned the unit to where it already stood, and
+  `test_death_pushback_shoves_survivors_clear` passed the whole time on
+  retargeting movement.
+- **Projectiles never applied the buff they carry.** `target_buff` was parsed
+  and read nowhere, so Ice Spirits dealt damage and never froze — one of the
+  eight cards the agent trains on, inert in every step taken until then.
+- **The deploy zone never expanded.** Destroying a Princess Tower is supposed to
+  open that lane, and a cache keyed on nothing that changes meant *no battle in
+  the process* ever saw it.
+- **Checkpoint selection was picking noise.** Keeping the highest of nineteen
+  40-battle readings selects the luckiest, not the best: that checkpoint scored
+  +0.375 on its own 40 battles and -0.033 on 300. Promotion now needs a rolling
+  mean.
+- **92% of matches were draws.** At tower level 11 a two-minute match ends with
+  92% of tower health untouched, so crowns — the only real objective — almost
+  never fired. Lowering tower level halves the draw rate for free; lengthening
+  matches buys a fifth as much for twice the compute.
+
+### Open
+
+The current hypothesis is that a self-play opponent *sampling* from an
+early, high-entropy policy is still nearly random, which would leave the critic
+exactly as stuck as before. `--opponent-temperature` exists to test that. If
+explained variance stays at zero with a sharp opponent, the problem is not the
+opponent.
+
+### A note on the GPU
+
+`--device xpu` is wired and the kernels are real — a gradient step is 6.6x
+faster on an Intel Arc 130V than on eight CPU threads. It is nonetheless
+unusable: the rollout's several hundred small forward passes, each with a
+blocking host readback, exhaust the Level Zero driver's handles before the first
+optimiser step. Training runs on CPU.
+
+
 ## Data provenance
 
 Extracted from a real APK, not a public dump:
@@ -251,18 +322,40 @@ python scripts/extract_apk.py "<dir containing the APK splits>"
 
 ## Use
 
+### The simulator
+
 ```bash
 python -m cr_sim.cli ingest              # what got loaded
 python -m cr_sim.cli cards               # the 122-card playable pool
-python -m cr_sim.cli cards --kind spell --level 14
 python -m cr_sim.cli card Knight         # full resolved stats for one card
 python -m cr_sim.cli validate            # the stat gate + open questions
 python -m cr_sim.cli arena --map         # terrain, towers, deploy zones
 python -m cr_sim.cli battle --html r.html   # run a match, write a replay
-python -m pytest                         # 255 tests
+python -m pytest                         # 622 tests
 ```
 
-`freeze` re-cuts the regression baseline (`reference/card_stats.json`). Note the
+### Training
+
+```bash
+# a run. --workers spreads the battles over processes, which is most of the
+# throughput; --tower-level 5 is what makes matches actually resolve.
+python -m cr_sim.train.run --steps 1000000 --envs 6 --workers 6 \
+    --tower-level 5 --reward projected --opponent self --name my-run
+
+python -m cr_sim.train.watch --every 20  # live page, all runs, tabs + split view
+python -m cr_sim.train.report            # one page per run plus a comparison
+python -m cr_sim.play.server --policy runs/my-run/best.pt --tower-level 5
+```
+
+Rewards: `simple` (crowns plus tower health), `five-term` (hand-weighted tower
+damage, elixir trade, counterpush, kites) and `projected`, which plays the
+position forward with neither side playing another card and pays the change in
+that outcome. The engine is deterministic, so that projection is exact rather
+than estimated, and counterpush potential falls out of it instead of needing a
+coefficient. On a fair comparison the three are within noise of each other.
+
+A run survives a crash: checkpoints carry the optimiser state and step count,
+and `--resume` continues from them. `freeze` re-cuts the regression baseline (`reference/card_stats.json`). Note the
 deliberate split: **`anchors.json` is external truth and is never generated**
 (that would make the gate circular), while `card_stats.json` is a generated
 baseline whose only job is to make a new APK's balance changes visible instead
@@ -272,15 +365,16 @@ of silent.
 
 ```
 cr_sim/
-  data/
-    decode.py      Supercell LZMA/LZHAM/plaintext decoder
-    csv_loader.py  csv_logic dialect: header row, type row, continuation-row arrays
-    source.py      CSV+TOML merge, EXT Base-chain inheritance, globals
-    leveling.py    the power ladder and rarity offsets
-    cards.py       card registry (card != character) and stat summaries
-    validate.py    the stat gate
-  cli.py
+  data/       Supercell decoder, csv_logic dialect, EXT inheritance, level scaling
+  engine/     the simulator: arena, entities, targeting, combat, spells, buffs,
+              the ACTION interpreter, the 17-phase tick loop, and lookahead.py,
+              which branches a battle to ask what the board is already worth
+  api/        Gymnasium-style env, observation/action encoding, rewards,
+              multiprocess vec env
+  train/      PPO, self-play opponent pool, evaluation probes, the live
+              progress page and the multi-run report
+  play/       browser game against a trained checkpoint
 scripts/extract_apk.py
 reference/  anchors.json (external truth) + card_stats.json (generated baseline)
-tests/
+tests/      622 of them
 ```
