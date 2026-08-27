@@ -82,8 +82,15 @@ def distance(ax: int, ay: int, bx: int, by: int) -> int:
 
     ``math.isqrt`` is exact integer square root -- no float involved, so this is
     reproducible everywhere.
+
+    The squaring is written out rather than delegated to
+    :func:`distance_squared`: this is called tens of thousands of times a
+    match, and at that count a Python-level call costs as much as the
+    arithmetic inside it.
     """
-    return math.isqrt(distance_squared(ax, ay, bx, by))
+    dx = ax - bx
+    dy = ay - by
+    return math.isqrt(dx * dx + dy * dy)
 
 
 def within_range(ax: int, ay: int, bx: int, by: int, reach: int) -> bool:
