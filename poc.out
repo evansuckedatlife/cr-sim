@@ -1,0 +1,217 @@
+update    1  steps      1536      46/s  return  +0.0376  win   9%  entropy  4.401  pass   1%  loss -0.0442/0.0762
+update    2  steps      3072      40/s  return  +0.0441  win   8%  entropy  4.379  pass   2%  loss -0.0226/0.0298
+update    3  steps      4608      40/s  return  +0.0558  win   8%  entropy  4.336  pass   2%  loss -0.0362/0.0350
+update    4  steps      6144      40/s  return  +0.0111  win   6%  entropy  4.301  pass   1%  loss -0.0358/0.0274
+update    5  steps      7680      40/s  return  -0.0264  win   4%  entropy  4.309  pass   2%  loss -0.0244/0.0419
+update    6  steps      9216      41/s  return  -0.0372  win   4%  entropy  4.292  pass   2%  loss -0.0291/0.0609
+update    7  steps     10752      41/s  return  -0.0644  win   2%  entropy  4.218  pass   2%  loss -0.0342/0.0140
+update    8  steps     12288      42/s  return  -0.0253  win   3%  entropy  4.263  pass   2%  loss -0.0335/0.0317
+update    9  steps     13824      42/s  return  -0.0167  win   2%  entropy  4.246  pass   3%  loss -0.0314/0.0315
+update   10  steps     15360      43/s  return  +0.0038  win   4%  entropy  4.188  pass   3%  loss -0.0310/0.0707
+          eval: return +0.4854 vs control +0.3740  win 40% vs 30%  lift +0.17 sd
+update   11  steps     16896      39/s  return  -0.0073  win   4%  entropy  4.208  pass   4%  loss -0.0296/0.0216
+update   12  steps     18432      40/s  return  -0.0175  win   4%  entropy  4.254  pass   3%  loss -0.0300/0.0363
+update   13  steps     19968      41/s  return  -0.0282  win   4%  entropy  4.176  pass   3%  loss -0.0325/0.0441
+update   14  steps     21504      41/s  return  +0.0027  win   4%  entropy  4.199  pass   3%  loss -0.0257/0.0411
+update   15  steps     23040      41/s  return  +0.0225  win   5%  entropy  4.178  pass   3%  loss -0.0344/0.0304
+update   16  steps     24576      41/s  return  +0.0280  win   5%  entropy  4.162  pass   3%  loss -0.0240/0.0328
+update   17  steps     26112      41/s  return  +0.0024  win   4%  entropy  4.140  pass   3%  loss -0.0333/0.0101
+update   18  steps     27648      41/s  return  -0.0132  win   2%  entropy  4.116  pass   3%  loss -0.0256/0.0394
+update   19  steps     29184      42/s  return  +0.0086  win   3%  entropy  4.067  pass   3%  loss -0.0228/0.0183
+update   20  steps     30720      42/s  return  +0.0058  win   4%  entropy  4.092  pass   2%  loss -0.0215/0.0449
+          eval: return +0.4874 vs control +0.3740  win 38% vs 30%  lift +0.17 sd
+update   21  steps     32256      40/s  return  +0.0147  win   5%  entropy  4.053  pass   1%  loss -0.0287/0.0476
+update   22  steps     33792      40/s  return  +0.0003  win   4%  entropy  4.104  pass   1%  loss -0.0322/0.0394
+update   23  steps     35328      40/s  return  +0.0157  win   6%  entropy  4.068  pass   0%  loss -0.0307/0.0561
+update   24  steps     36864      40/s  return  +0.0042  win   6%  entropy  4.017  pass   1%  loss -0.0299/0.0664
+update   25  steps     38400      41/s  return  -0.0074  win   6%  entropy  4.003  pass   1%  loss -0.0272/0.0545
+update   26  steps     39936      41/s  return  +0.0002  win   5%  entropy  3.995  pass   1%  loss -0.0293/0.0279
+update   27  steps     41472      40/s  return  +0.0219  win   6%  entropy  3.985  pass   1%  loss -0.0270/0.0575
+update   28  steps     43008      40/s  return  +0.0533  win   6%  entropy  4.021  pass   0%  loss -0.0342/0.0190
+update   29  steps     44544      41/s  return  +0.0111  win   4%  entropy  4.050  pass   0%  loss -0.0226/0.0440
+update   30  steps     46080      41/s  return  -0.0144  win   5%  entropy  4.080  pass   1%  loss -0.0292/0.0503
+          eval: return +0.4176 vs control +0.3740  win 35% vs 30%  lift +0.07 sd
+update   31  steps     47616      40/s  return  -0.0558  win   4%  entropy  4.060  pass   1%  loss -0.0213/0.0600
+update   32  steps     49152      40/s  return  -0.0554  win   4%  entropy  4.084  pass   1%  loss -0.0267/0.0394
+update   33  steps     50688      39/s  return  -0.0124  win   5%  entropy  4.038  pass   1%  loss -0.0322/0.0490
+update   34  steps     52224      39/s  return  +0.0041  win   4%  entropy  4.047  pass   1%  loss -0.0267/0.0251
+update   35  steps     53760      40/s  return  +0.0244  win   5%  entropy  4.007  pass   1%  loss -0.0278/0.0538
+update   36  steps     55296      40/s  return  +0.0161  win   5%  entropy  4.024  pass   1%  loss -0.0205/0.0419
+update   37  steps     56832      40/s  return  +0.0293  win   5%  entropy  3.934  pass   2%  loss -0.0336/0.0239
+update   38  steps     58368      40/s  return  +0.0496  win   4%  entropy  3.890  pass   1%  loss -0.0268/0.0235
+update   39  steps     59904      40/s  return  +0.0293  win   4%  entropy  3.922  pass   1%  loss -0.0308/0.0268
+update   40  steps     61440      40/s  return  +0.0167  win   3%  entropy  3.872  pass   1%  loss -0.0285/0.0287
+          eval: return +0.3699 vs control +0.3740  win 32% vs 30%  lift -0.01 sd
+update   41  steps     62976      39/s  return  +0.0411  win   6%  entropy  3.913  pass   1%  loss -0.0375/0.0418
+update   42  steps     64512      39/s  return  +0.0274  win   5%  entropy  3.889  pass   1%  loss -0.0376/0.0292
+update   43  steps     66048      39/s  return  +0.0459  win   6%  entropy  3.913  pass   1%  loss -0.0234/0.0244
+update   44  steps     67584      39/s  return  +0.0126  win   4%  entropy  3.944  pass   1%  loss -0.0357/0.0665
+update   45  steps     69120      39/s  return  -0.0074  win   4%  entropy  3.927  pass   1%  loss -0.0252/0.0384
+update   46  steps     70656      39/s  return  -0.0182  win   4%  entropy  3.901  pass   0%  loss -0.0401/0.0316
+update   47  steps     72192      39/s  return  -0.0130  win   4%  entropy  3.851  pass   1%  loss -0.0289/0.0295
+update   48  steps     73728      39/s  return  +0.0217  win   4%  entropy  3.871  pass   1%  loss -0.0096/0.0292
+update   49  steps     75264      39/s  return  -0.0033  win   4%  entropy  3.909  pass   1%  loss -0.0242/0.0418
+update   50  steps     76800      39/s  return  +0.0054  win   4%  entropy  3.831  pass   1%  loss -0.0291/0.0570
+          eval: return +0.3627 vs control +0.3740  win 25% vs 30%  lift -0.02 sd
+update   51  steps     78336      39/s  return  +0.0011  win   4%  entropy  3.946  pass   1%  loss -0.0185/0.0166
+update   52  steps     79872      39/s  return  +0.0194  win   4%  entropy  4.005  pass   1%  loss -0.0266/0.0161
+update   53  steps     81408      39/s  return  +0.0040  win   2%  entropy  3.991  pass   1%  loss -0.0325/0.0591
+update   54  steps     82944      39/s  return  +0.0368  win   5%  entropy  4.003  pass   1%  loss -0.0359/0.0526
+update   55  steps     84480      39/s  return  -0.0009  win   5%  entropy  4.026  pass   0%  loss -0.0332/0.0524
+update   56  steps     86016      39/s  return  +0.0090  win   6%  entropy  4.005  pass   1%  loss -0.0383/0.0477
+update   57  steps     87552      39/s  return  +0.0103  win   6%  entropy  4.008  pass   0%  loss -0.0325/0.0392
+update   58  steps     89088      39/s  return  +0.0145  win   4%  entropy  4.073  pass   0%  loss -0.0324/0.0264
+update   59  steps     90624      39/s  return  +0.0120  win   5%  entropy  4.029  pass   1%  loss -0.0333/0.0686
+update   60  steps     92160      40/s  return  -0.0023  win   4%  entropy  4.078  pass   1%  loss -0.0217/0.0158
+          eval: return +0.4373 vs control +0.3740  win 35% vs 30%  lift +0.10 sd
+update   61  steps     93696      39/s  return  -0.0110  win   4%  entropy  4.087  pass   1%  loss -0.0213/0.0436
+update   62  steps     95232      39/s  return  -0.0063  win   4%  entropy  4.086  pass   1%  loss -0.0235/0.0099
+update   63  steps     96768      39/s  return  -0.0043  win   3%  entropy  4.042  pass   1%  loss -0.0182/0.0244
+update   64  steps     98304      39/s  return  +0.0050  win   3%  entropy  4.008  pass   1%  loss -0.0346/0.0108
+update   65  steps     99840      40/s  return  +0.0046  win   4%  entropy  4.065  pass   1%  loss -0.0277/0.0326
+update   66  steps    101376      40/s  return  -0.0324  win   2%  entropy  4.138  pass   1%  loss -0.0293/0.0287
+update   67  steps    102912      40/s  return  -0.0317  win   2%  entropy  4.062  pass   1%  loss -0.0288/0.0315
+update   68  steps    104448      40/s  return  -0.0314  win   3%  entropy  4.063  pass   1%  loss -0.0266/0.0265
+update   69  steps    105984      40/s  return  -0.0094  win   3%  entropy  4.064  pass   1%  loss -0.0261/0.0175
+update   70  steps    107520      40/s  return  +0.0187  win   4%  entropy  4.129  pass   1%  loss -0.0208/0.0216
+          eval: return +0.3593 vs control +0.3740  win 32% vs 30%  lift -0.02 sd
+update   71  steps    109056      40/s  return  +0.0217  win   4%  entropy  4.050  pass   1%  loss -0.0383/0.0459
+update   72  steps    110592      40/s  return  -0.0253  win   4%  entropy  4.073  pass   1%  loss -0.0253/0.0504
+update   73  steps    112128      40/s  return  -0.0367  win   3%  entropy  4.047  pass   2%  loss -0.0208/0.0278
+update   74  steps    113664      40/s  return  -0.0226  win   4%  entropy  3.964  pass   1%  loss -0.0262/0.0629
+update   75  steps    115200      40/s  return  +0.0406  win   6%  entropy  3.998  pass   2%  loss -0.0246/0.0384
+update   76  steps    116736      40/s  return  +0.0282  win   6%  entropy  3.918  pass   2%  loss -0.0292/0.0502
+update   77  steps    118272      40/s  return  +0.0250  win   6%  entropy  3.956  pass   1%  loss -0.0224/0.0657
+update   78  steps    119808      40/s  return  -0.0075  win   5%  entropy  3.989  pass   2%  loss -0.0312/0.0497
+update   79  steps    121344      40/s  return  -0.0016  win   6%  entropy  3.877  pass   2%  loss -0.0335/0.0560
+update   80  steps    122880      40/s  return  -0.0176  win   4%  entropy  3.999  pass   3%  loss -0.0323/0.0384
+          eval: return +0.4262 vs control +0.3740  win 35% vs 30%  lift +0.08 sd
+update   81  steps    124416      40/s  return  +0.0104  win   4%  entropy  4.017  pass   4%  loss -0.0304/0.0168
+update   82  steps    125952      40/s  return  -0.0034  win   3%  entropy  4.031  pass   5%  loss -0.0295/0.0220
+update   83  steps    127488      40/s  return  +0.0230  win   4%  entropy  4.029  pass   5%  loss -0.0309/0.0467
+update   84  steps    129024      40/s  return  +0.0459  win   6%  entropy  4.020  pass   5%  loss -0.0228/0.0257
+update   85  steps    130560      40/s  return  +0.0325  win   6%  entropy  4.035  pass   4%  loss -0.0303/0.0877
+update   86  steps    132096      41/s  return  +0.0296  win   8%  entropy  3.988  pass   3%  loss -0.0382/0.0841
+update   87  steps    133632      41/s  return  +0.0025  win   6%  entropy  4.009  pass   3%  loss -0.0282/0.0302
+update   88  steps    135168      41/s  return  -0.0323  win   4%  entropy  3.970  pass   4%  loss -0.0302/0.0412
+update   89  steps    136704      41/s  return  +0.0180  win   6%  entropy  3.979  pass   5%  loss -0.0377/0.0566
+update   90  steps    138240      41/s  return  +0.0003  win   4%  entropy  4.045  pass   3%  loss -0.0217/0.0217
+          eval: return +0.6061 vs control +0.3740  win 45% vs 30%  lift +0.35 sd
+update   91  steps    139776      41/s  return  -0.0048  win   5%  entropy  4.032  pass   4%  loss -0.0360/0.0416
+update   92  steps    141312      41/s  return  +0.0517  win   6%  entropy  4.027  pass   4%  loss -0.0336/0.0356
+update   93  steps    142848      41/s  return  +0.0139  win   5%  entropy  4.002  pass   4%  loss -0.0318/0.0499
+update   94  steps    144384      41/s  return  +0.0447  win   5%  entropy  4.104  pass   5%  loss -0.0117/0.0211
+update   95  steps    145920      41/s  return  -0.0009  win   4%  entropy  4.113  pass   5%  loss -0.0279/0.0276
+update   96  steps    147456      41/s  return  -0.0303  win   3%  entropy  4.075  pass   5%  loss -0.0242/0.0330
+update   97  steps    148992      41/s  return  -0.0086  win   4%  entropy  4.121  pass   4%  loss -0.0274/0.0725
+update   98  steps    150528      41/s  return  -0.0117  win   5%  entropy  4.074  pass   4%  loss -0.0265/0.0380
+update   99  steps    152064      41/s  return  -0.0140  win   4%  entropy  4.100  pass   4%  loss -0.0243/0.0195
+update  100  steps    153600      41/s  return  -0.0336  win   3%  entropy  4.073  pass   3%  loss -0.0254/0.0376
+          eval: return +0.4745 vs control +0.3740  win 40% vs 30%  lift +0.15 sd
+update  101  steps    155136      41/s  return  -0.0555  win   2%  entropy  4.075  pass   4%  loss -0.0254/0.0247
+update  102  steps    156672      41/s  return  -0.0485  win   2%  entropy  4.099  pass   3%  loss -0.0236/0.0378
+update  103  steps    158208      41/s  return  -0.0393  win   2%  entropy  4.151  pass   3%  loss -0.0255/0.0530
+update  104  steps    159744      41/s  return  -0.0400  win   3%  entropy  4.082  pass   3%  loss -0.0242/0.0366
+update  105  steps    161280      41/s  return  -0.0305  win   4%  entropy  4.190  pass   2%  loss -0.0240/0.0472
+update  106  steps    162816      41/s  return  -0.0311  win   4%  entropy  4.191  pass   3%  loss -0.0268/0.0333
+update  107  steps    164352      41/s  return  +0.0072  win   4%  entropy  4.231  pass   3%  loss -0.0116/0.0540
+update  108  steps    165888      41/s  return  +0.0099  win   5%  entropy  4.242  pass   3%  loss -0.0252/0.0339
+update  109  steps    167424      41/s  return  -0.0030  win   6%  entropy  4.169  pass   4%  loss -0.0281/0.0297
+update  110  steps    168960      41/s  return  -0.0205  win   4%  entropy  4.262  pass   5%  loss -0.0199/0.0271
+          eval: return +0.6227 vs control +0.3740  win 48% vs 30%  lift +0.38 sd
+update  111  steps    170496      41/s  return  -0.0127  win   4%  entropy  4.203  pass   3%  loss -0.0216/0.0305
+update  112  steps    172032      41/s  return  -0.0192  win   2%  entropy  4.161  pass   4%  loss -0.0187/0.0206
+update  113  steps    173568      41/s  return  -0.0180  win   2%  entropy  4.153  pass   4%  loss -0.0318/0.0544
+update  114  steps    175104      41/s  return  +0.0025  win   4%  entropy  4.136  pass   5%  loss -0.0227/0.0410
+update  115  steps    176640      41/s  return  -0.0036  win   4%  entropy  4.068  pass   4%  loss -0.0303/0.0438
+update  116  steps    178176      41/s  return  +0.0058  win   4%  entropy  4.108  pass   5%  loss -0.0382/0.0331
+update  117  steps    179712      41/s  return  -0.0384  win   3%  entropy  4.128  pass   4%  loss -0.0337/0.0378
+update  118  steps    181248      41/s  return  -0.0391  win   3%  entropy  4.049  pass   3%  loss -0.0260/0.0274
+update  119  steps    182784      41/s  return  -0.0276  win   4%  entropy  4.076  pass   4%  loss -0.0358/0.0433
+update  120  steps    184320      41/s  return  -0.0127  win   6%  entropy  4.081  pass   4%  loss -0.0298/0.0467
+          eval: return +0.5469 vs control +0.3740  win 45% vs 30%  lift +0.26 sd
+update  121  steps    185856      41/s  return  +0.0255  win   6%  entropy  4.070  pass   3%  loss -0.0280/0.0320
+update  122  steps    187392      41/s  return  +0.0052  win   4%  entropy  4.067  pass   3%  loss -0.0238/0.0149
+update  123  steps    188928      41/s  return  +0.0266  win   5%  entropy  4.082  pass   3%  loss -0.0302/0.0482
+update  124  steps    190464      41/s  return  +0.0129  win   5%  entropy  4.115  pass   3%  loss -0.0328/0.0537
+update  125  steps    192000      41/s  return  +0.0051  win   5%  entropy  4.046  pass   2%  loss -0.0348/0.0647
+update  126  steps    193536      41/s  return  +0.0316  win   7%  entropy  4.102  pass   2%  loss -0.0269/0.0768
+update  127  steps    195072      41/s  return  +0.0085  win   6%  entropy  4.092  pass   2%  loss -0.0274/0.0509
+update  128  steps    196608      41/s  return  +0.0205  win   6%  entropy  4.055  pass   3%  loss -0.0208/0.0237
+update  129  steps    198144      41/s  return  +0.0102  win   4%  entropy  4.131  pass   3%  loss -0.0334/0.0336
+update  130  steps    199680      42/s  return  +0.0084  win   4%  entropy  4.229  pass   2%  loss -0.0283/0.0335
+          eval: return +0.3861 vs control +0.3740  win 25% vs 30%  lift +0.02 sd
+update  131  steps    201216      41/s  return  -0.0082  win   4%  entropy  4.174  pass   2%  loss -0.0297/0.0360
+update  132  steps    202752      41/s  return  -0.0283  win   3%  entropy  4.234  pass   2%  loss -0.0265/0.0160
+update  133  steps    204288      41/s  return  -0.0409  win   2%  entropy  4.248  pass   2%  loss -0.0201/0.0383
+update  134  steps    205824      41/s  return  -0.0334  win   3%  entropy  4.204  pass   3%  loss -0.0154/0.0467
+update  135  steps    207360      41/s  return  -0.0314  win   3%  entropy  4.228  pass   2%  loss -0.0227/0.0274
+update  136  steps    208896      41/s  return  -0.0453  win   2%  entropy  4.199  pass   3%  loss -0.0234/0.0310
+update  137  steps    210432      42/s  return  -0.0124  win   2%  entropy  4.191  pass   4%  loss -0.0187/0.0243
+update  138  steps    211968      42/s  return  -0.0541  win   2%  entropy  4.150  pass   4%  loss -0.0247/0.0416
+update  139  steps    213504      42/s  return  -0.0780  win   2%  entropy  4.139  pass   4%  loss -0.0334/0.0732
+update  140  steps    215040      42/s  return  -0.0525  win   3%  entropy  4.164  pass   3%  loss -0.0208/0.0460
+          eval: return +0.4310 vs control +0.3740  win 35% vs 30%  lift +0.09 sd
+update  141  steps    216576      41/s  return  -0.0330  win   3%  entropy  4.244  pass   3%  loss -0.0301/0.0481
+update  142  steps    218112      41/s  return  +0.0162  win   5%  entropy  4.207  pass   3%  loss -0.0240/0.0488
+update  143  steps    219648      41/s  return  +0.0108  win   6%  entropy  4.197  pass   3%  loss -0.0219/0.0410
+update  144  steps    221184      41/s  return  -0.0295  win   5%  entropy  4.198  pass   3%  loss -0.0205/0.0720
+update  145  steps    222720      41/s  return  -0.0748  win   3%  entropy  4.215  pass   2%  loss -0.0321/0.0343
+update  146  steps    224256      42/s  return  -0.0672  win   2%  entropy  4.197  pass   3%  loss -0.0287/0.0298
+update  147  steps    225792      42/s  return  -0.0329  win   2%  entropy  4.197  pass   3%  loss -0.0247/0.0227
+update  148  steps    227328      42/s  return  +0.0227  win   4%  entropy  4.213  pass   2%  loss -0.0369/0.0425
+update  149  steps    228864      42/s  return  +0.0444  win   4%  entropy  4.199  pass   3%  loss -0.0304/0.0331
+update  150  steps    230400      42/s  return  +0.0601  win   6%  entropy  4.195  pass   2%  loss -0.0237/0.0503
+          eval: return +0.4743 vs control +0.3740  win 38% vs 30%  lift +0.15 sd
+update  151  steps    231936      41/s  return  +0.0552  win   6%  entropy  4.170  pass   3%  loss -0.0377/0.0571
+update  152  steps    233472      42/s  return  +0.0356  win   6%  entropy  4.156  pass   4%  loss -0.0265/0.0585
+update  153  steps    235008      42/s  return  +0.0055  win   4%  entropy  4.166  pass   2%  loss -0.0269/0.0188
+update  154  steps    236544      42/s  return  -0.0217  win   2%  entropy  4.158  pass   3%  loss -0.0295/0.0120
+update  155  steps    238080      42/s  return  -0.0149  win   3%  entropy  4.201  pass   2%  loss -0.0240/0.0437
+update  156  steps    239616      42/s  return  +0.0004  win   4%  entropy  4.113  pass   3%  loss -0.0285/0.0893
+update  157  steps    241152      42/s  return  -0.0060  win   6%  entropy  4.159  pass   3%  loss -0.0218/0.0434
+update  158  steps    242688      42/s  return  +0.0177  win   6%  entropy  4.203  pass   2%  loss -0.0302/0.0235
+update  159  steps    244224      42/s  return  +0.0223  win   6%  entropy  4.179  pass   2%  loss -0.0269/0.0519
+update  160  steps    245760      42/s  return  +0.0434  win   6%  entropy  4.150  pass   2%  loss -0.0312/0.0469
+          eval: return +0.3201 vs control +0.3740  win 28% vs 30%  lift -0.08 sd
+update  161  steps    247296      42/s  return  +0.0098  win   4%  entropy  4.200  pass   1%  loss -0.0199/0.0177
+update  162  steps    248832      42/s  return  +0.0212  win   5%  entropy  4.188  pass   2%  loss -0.0252/0.0309
+update  163  steps    250368      42/s  return  +0.0209  win   3%  entropy  4.161  pass   2%  loss -0.0198/0.0185
+update  164  steps    251904      42/s  return  +0.0357  win   4%  entropy  4.152  pass   3%  loss -0.0280/0.0367
+update  165  steps    253440      42/s  return  +0.0306  win   4%  entropy  4.153  pass   2%  loss -0.0194/0.0103
+update  166  steps    254976      42/s  return  -0.0119  win   3%  entropy  4.085  pass   3%  loss -0.0219/0.0527
+update  167  steps    256512      42/s  return  -0.0120  win   2%  entropy  4.024  pass   3%  loss -0.0194/0.0412
+update  168  steps    258048      42/s  return  -0.0006  win   4%  entropy  4.124  pass   2%  loss -0.0276/0.0261
+update  169  steps    259584      42/s  return  -0.0169  win   3%  entropy  4.109  pass   3%  loss -0.0225/0.0414
+update  170  steps    261120      42/s  return  -0.0305  win   4%  entropy  4.195  pass   3%  loss -0.0282/0.0489
+          eval: return +0.3816 vs control +0.3740  win 25% vs 30%  lift +0.01 sd
+update  171  steps    262656      42/s  return  -0.0155  win   4%  entropy  4.133  pass   3%  loss -0.0280/0.0421
+update  172  steps    264192      42/s  return  -0.0070  win   5%  entropy  4.118  pass   3%  loss -0.0291/0.0432
+update  173  steps    265728      42/s  return  +0.0277  win   6%  entropy  4.039  pass   4%  loss -0.0338/0.0378
+update  174  steps    267264      42/s  return  +0.0076  win   6%  entropy  4.075  pass   5%  loss -0.0255/0.0320
+update  175  steps    268800      42/s  return  -0.0007  win   4%  entropy  4.057  pass   3%  loss -0.0357/0.0348
+update  176  steps    270336      42/s  return  +0.0227  win   4%  entropy  4.077  pass   3%  loss -0.0365/0.0455
+update  177  steps    271872      42/s  return  +0.0317  win   4%  entropy  4.162  pass   2%  loss -0.0362/0.0225
+update  178  steps    273408      42/s  return  +0.0526  win   6%  entropy  4.055  pass   2%  loss -0.0302/0.0406
+update  179  steps    274944      42/s  return  +0.0695  win   6%  entropy  4.087  pass   3%  loss -0.0299/0.0370
+update  180  steps    276480      42/s  return  +0.0604  win   7%  entropy  4.091  pass   2%  loss -0.0277/0.0506
+          eval: return +0.4684 vs control +0.3740  win 38% vs 30%  lift +0.14 sd
+update  181  steps    278016      42/s  return  +0.0491  win   6%  entropy  4.055  pass   2%  loss -0.0316/0.0148
+update  182  steps    279552      42/s  return  +0.0199  win   6%  entropy  4.055  pass   2%  loss -0.0398/0.0649
+update  183  steps    281088      42/s  return  +0.0328  win   6%  entropy  4.086  pass   2%  loss -0.0364/0.0334
+update  184  steps    282624      42/s  return  +0.0128  win   4%  entropy  4.033  pass   2%  loss -0.0246/0.0212
+update  185  steps    284160      42/s  return  +0.0526  win   6%  entropy  4.067  pass   2%  loss -0.0384/0.0373
+update  186  steps    285696      42/s  return  +0.0378  win   6%  entropy  4.091  pass   2%  loss -0.0335/0.0476
+update  187  steps    287232      42/s  return  +0.0226  win   6%  entropy  4.112  pass   1%  loss -0.0262/0.0468
+update  188  steps    288768      42/s  return  -0.0081  win   6%  entropy  4.133  pass   1%  loss -0.0315/0.0387
+update  189  steps    290304      42/s  return  -0.0194  win   5%  entropy  4.073  pass   2%  loss -0.0328/0.0542
+update  190  steps    291840      42/s  return  -0.0374  win   5%  entropy  4.104  pass   2%  loss -0.0324/0.0636
+          eval: return +0.5191 vs control +0.3740  win 35% vs 30%  lift +0.22 sd
+update  191  steps    293376      42/s  return  -0.0209  win   4%  entropy  4.146  pass   1%  loss -0.0283/0.0326
+update  192  steps    294912      42/s  return  -0.0215  win   4%  entropy  4.128  pass   2%  loss -0.0267/0.0345
+update  193  steps    296448      42/s  return  +0.0095  win   3%  entropy  4.098  pass   1%  loss -0.0351/0.0288
+update  194  steps    297984      42/s  return  -0.0074  win   4%  entropy  4.081  pass   1%  loss -0.0341/0.0608
+update  195  steps    299520      42/s  return  -0.0008  win   4%  entropy  4.038  pass   2%  loss -0.0341/0.0536
+update  196  steps    301056      42/s  return  +0.0009  win   6%  entropy  4.071  pass   3%  loss -0.0229/0.0301
+
+done in 119.2 min -> C:\Users\evanP\cr-sim\runs\poc-vs-random
