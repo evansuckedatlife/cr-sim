@@ -92,5 +92,10 @@ for path in args.checkpoints:
                      "eval_opponent": opponent_name(env)})
 
 if args.out:
-    Path(args.out).write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    # After the battles, not before. Losing a twenty-minute evaluation to a
+    # missing directory is exactly how the anchor number for this project went
+    # unrecorded once already.
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(rows, indent=2), encoding="utf-8")
 print(f"{(time.perf_counter() - started) / 60:.1f} min")
