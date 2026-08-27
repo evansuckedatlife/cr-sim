@@ -154,6 +154,24 @@ def _started_at(run: Path) -> float:
     return 0.0
 
 
+def _note_of(run: Path) -> str:
+    """One line of prose from config.json saying what this entry is.
+
+    ``config.json`` has always been written and never read except for its
+    timestamp. Everything that is not a training run -- the search expert, a
+    cloned policy, a benchmark, a head-to-head between checkpoints -- looks
+    on the index like a run that produced two flat points, and what it
+    actually measured lived only in whatever conversation produced it.
+    """
+    path = run / "config.json"
+    if not path.is_file():
+        return ""
+    try:
+        return str(json.loads(path.read_text(encoding="utf-8")).get("note", ""))
+    except (json.JSONDecodeError, OSError):
+        return ""
+
+
 def _series_of(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     def pair(key):
         return [(r.get("steps", 0), r[key]) for r in rows if key in r]
@@ -183,6 +201,7 @@ def _series_of(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
 def render_multi(
     runs: "Sequence[tuple[str, Sequence[dict[str, Any]], bool]]",
     back: str | None = None,
+    notes: "dict[str, str] | None" = None,
 ) -> "tuple[str, dict[str, Any]]":
     """One page holding several runs, as ``(name, rows, live)`` triples.
 
@@ -201,6 +220,11 @@ def render_multi(
                 "series": _series_of(rows),
                 "summary": summarise(rows),
                 "live": bool(live),
+                # What this entry *is*. A training run is legible from its
+                # curves; a benchmark, a head-to-head or a piece of work an
+                # agent is doing is not, and an index entry whose meaning
+                # lives only in a chat log is an index entry nobody can read.
+                "note": (notes or {}).get(name, ""),
             }
             for name, rows, live in runs
         },
@@ -317,6 +341,8 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .panes.split{grid-template-columns:1fr 1fr}
 @media (max-width:900px){.panes.split{grid-template-columns:1fr}}
 .pane{min-width:0}
+.note{font-size:13.5px;line-height:1.5;color:var(--muted);margin:0 0 12px;padding:10px 12px;
+  border-left:2px solid var(--line);background:rgba(255,255,255,.02);border-radius:0 6px 6px 0;white-space:pre-wrap}
 .pane-head{display:flex;align-items:center;gap:9px;margin-bottom:10px}
 .pane-head select{font-family:Archivo,sans-serif;font-size:13px;font-weight:600;color:var(--ink);
   background:var(--panel);border:1px solid var(--rule);border-radius:3px;padding:5px 8px}
@@ -558,6 +584,7 @@ function cell(v,k,sm){return '<div class="cell"><span class="kpi-n">'+v+(sm?' <s
 function paneMarkup(id){
   return '<div class="pane" data-pane="'+id+'">'
     +'<div class="pane-head"><span class="lbl">showing</span><select data-role="pick"></select></div>'
+    +'<div data-role="note" class="note"></div>'
     +'<div class="readout"><div class="bar"><i data-role="bar" style="width:0%"></i></div>'
     +'<div class="readout-grid" data-role="general"></div></div>'
     +'<div data-role="hero"></div><div class="tiles" data-role="tiles"></div>'
@@ -568,6 +595,8 @@ function paneMarkup(id){
 function fillPane(pane,name,slot){
   var run=DATA.runs[name]; if(!run) return;
   var S=run.series,s=run.summary,q=function(r){return pane.querySelector('[data-role="'+r+'"]');};
+  var noteEl=q('note');
+  if(noteEl){noteEl.innerHTML=run.note?esc(run.note):'';noteEl.style.display=run.note?'block':'none';}
   var done=s.total_steps?Math.min(1,(s.steps||0)/s.total_steps):0;
   q('bar').style.width=(done*100).toFixed(1)+'%';
   var remain=(s.total_steps&&s.steps_per_second)?(s.total_steps-s.steps)/s.steps_per_second:null;
@@ -902,6 +931,7 @@ def main(argv: list[str] | None = None) -> int:
     def once() -> int:
         now = time.time()
         collected = []
+        notes: dict[str, str] = {}
         for run in discover():
             metrics = run / "metrics.jsonl"
             rows = read_metrics(metrics)
@@ -914,9 +944,12 @@ def main(argv: list[str] | None = None) -> int:
             rows = [by_update[k] for k in sorted(by_update)]
             live = metrics.is_file() and (now - metrics.stat().st_mtime) < _LIVE_SECONDS
             collected.append((run.name, rows, live))
+            note = _note_of(run)
+            if note:
+                notes[run.name] = note
         if not collected:
             return 0
-        html, body = render_multi(collected)
+        html, body = render_multi(collected, notes=notes)
         out.write_text(html, encoding="utf-8")
         # Beside the page, because a served copy polls this rather than
         # reloading itself. Written second so a reader never sees data newer

@@ -684,3 +684,69 @@ def test_the_generation_time_does_not_change_the_fingerprint():
     _, later = render_multi([("a", [_row(1, 1000, eval_lift_sd=0.2)], True)])
     assert first["generated_at"] != later["generated_at"]
     assert first["version"] == later["version"]
+
+
+def test_a_note_reaches_the_page_and_changes_the_fingerprint():
+    """An entry has to be able to say what it is.
+
+    The index carries benchmarks, head-to-head comparisons and long-running
+    jobs beside the training runs, and those are not legible from their
+    curves the way a training run is. Without this, what a number meant lived
+    only in whatever conversation produced it.
+    """
+    rows = [_row(1, 1000, eval_lift_sd=0.2)]
+    _, plain = render_multi([("a", rows, True)])
+    page, noted = render_multi([("a", rows, True)],
+                               notes={"a": "measured against a random opponent"})
+    assert plain["runs"]["a"]["note"] == ""
+    assert noted["runs"]["a"]["note"] == "measured against a random opponent"
+    assert "measured against a random opponent" in page
+    # A note is data like any other: changing it must invalidate the cached
+    # page, or a reader keeps the old explanation next to the new numbers.
+    assert plain["version"] != noted["version"]
+    assert 'data-role="note"' in page, "nowhere on the page to put it"
+
+
+def test_a_note_is_read_from_the_run_directory(tmp_path):
+    """config.json has always been written and only ever read for its
+    timestamp. The note lives there because that is the file a run already
+    writes before its first update."""
+    from cr_sim.train.watch import _note_of
+
+    run = tmp_path / "someJob"
+    run.mkdir()
+    assert _note_of(run) == "", "a run without a config should not raise"
+
+    (run / "config.json").write_text(json.dumps({"note": "what this is"}),
+                                     encoding="utf-8")
+    assert _note_of(run) == "what this is"
+
+    (run / "config.json").write_text("{not json", encoding="utf-8")
+    assert _note_of(run) == "", "a corrupt config must not take the page down"
+
+
+def test_registering_a_job_makes_an_entry_the_watcher_can_read(tmp_path):
+    """A job with nothing measured yet still has to appear.
+
+    The watcher skips a directory whose metrics file is empty, and an entry
+    that shows up only once it has an answer is exactly the entry you needed
+    while waiting for one -- which is how three copies of the same script once
+    ran unnoticed.
+    """
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).resolve().parents[1] / "scripts"))
+    from register_job import register
+    from cr_sim.train.watch import _note_of, read_metrics
+
+    out = register("waiting", note="not finished yet", runs_dir=tmp_path,
+                   status="running")
+    assert read_metrics(out / "metrics.jsonl"), "no row means no entry"
+    assert _note_of(out) == "[running] not finished yet"
+
+    out = register("measured", note="done", rows=[{"eval_lift_sd": 1.5}],
+                   runs_dir=tmp_path)
+    rows = read_metrics(out / "metrics.jsonl")
+    assert rows[0]["updates"] == 1, "unnumbered rows must still plot in order"
+    assert summarise(rows)["latest_lift"] == 1.5
