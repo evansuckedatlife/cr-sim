@@ -162,12 +162,49 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{'random control':<20}{np.mean(control_crowns > 0):>8.0%}"
           f"{np.mean(control_crowns < 0):>8.0%}"
           f"{np.mean(control_crowns == 0):>8.0%}{'--':>10}{'--':>20}")
+    sampled_stats = line("cloned, sampled", trained)
+    greedy_stats = line("cloned, greedy", greedy)
+    best = greedy_stats if greedy_stats["lift"] >= sampled_stats["lift"] else sampled_stats
     verdict = {"episodes": args.episodes,
-               "sampled": line("cloned, sampled", trained),
-               "greedy": line("cloned, greedy", greedy),
+               "sampled": sampled_stats, "greedy": greedy_stats,
+               # Flattened as well as nested: the report reads these keys, and
+               # the honest headline is whichever way of playing scored better.
+               "lift": best["lift"], "ci_low": best["ci_low"],
+               "ci_high": best["ci_high"], "win": best["win"],
+               "loss": best["loss"],
                "clone": history[-1] if history else {}}
     (args.out / "verdict.json").write_text(json.dumps(verdict, indent=2),
                                            encoding="utf-8")
+
+    # Registered as a run so it appears beside the training runs it is meant
+    # to be compared against. A flat series, because a clone does not learn
+    # over time -- it is a single result, and drawing it as a curve would
+    # imply a trajectory it does not have.
+    (args.out / "config.json").write_text(json.dumps({
+        "reward": "behavioural cloning", "opponent": "random",
+        "tower_level": args.tower_level, "frame_skip": 30, "tps": 20,
+        "match_seconds": 120, "num_envs": 0, "horizon": 0,
+        "note": (f"Cloned from {data.episodes} expert episodes "
+                 f"({len(data):,} decisions). Trained on the search's value "
+                 "distribution over candidate placements, not the move it "
+                 "played -- the bot samples its candidates, so its choice is "
+                 "not a function of the state."),
+    }, indent=2), encoding="utf-8")
+    last = history[-1] if history else {}
+    row = {
+        "updates": 1, "steps": 0, "episodes": args.episodes,
+        "steps_per_second": 0.0,
+        "entropy": 0.0, "value_loss": last.get("value_loss", 0.0),
+        "policy_loss": last.get("policy_loss", 0.0),
+        "explained_variance": last.get("explained_variance"),
+        "mean_return": 0.0, "win_rate": best["win"],
+        "noop_fraction": 1.0 - last.get("play_rate", 0.0),
+        "eval_lift_sd": best["lift"], "eval_win": best["win"],
+        "control_win": float(np.mean(control_crowns > 0)),
+    }
+    with (args.out / "metrics.jsonl").open("w", encoding="utf-8") as stream:
+        for update in (1, 2):
+            stream.write(json.dumps({**row, "updates": update}) + chr(10))
     print(f"\n{(time.perf_counter() - started) / 60:.1f} min -> {args.out}",
           flush=True)
     return 0

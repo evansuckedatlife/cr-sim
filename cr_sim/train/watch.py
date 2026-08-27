@@ -56,6 +56,42 @@ def read_metrics(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+
+def _next_evaluation(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """How long until this run evaluates again.
+
+    Both numbers are inferred from the run's own history rather than read
+    from its config, so this works for a run whose config was lost and for
+    one whose cadence was changed by a resume.
+
+    The cadence comes from the spacing of past evaluations; the pace from how
+    long recent updates actually took, which is what a countdown should
+    follow rather than an average over a run that has changed speed.
+    """
+    updates = [r["updates"] for r in rows if "eval_lift_sd" in r]
+    if len(updates) < 2 or len(rows) < 2:
+        return {"eval_every": None, "next_eval_seconds": None}
+    gaps = [b - a for a, b in zip(updates, updates[1:]) if b > a]
+    if not gaps:
+        return {"eval_every": None, "next_eval_seconds": None}
+    cadence = min(gaps)
+
+    # Paced on the recent stretch. A run that was throttled partway through
+    # would otherwise be timed by an average it no longer runs at.
+    window = rows[-min(len(rows), 12):]
+    span = (window[-1].get("elapsed_seconds"), window[0].get("elapsed_seconds"))
+    if None in span or window[-1]["updates"] <= window[0]["updates"]:
+        return {"eval_every": cadence, "next_eval_seconds": None}
+    per_update = (span[0] - span[1]) / (window[-1]["updates"] - window[0]["updates"])
+    if per_update <= 0:
+        return {"eval_every": cadence, "next_eval_seconds": None}
+
+    done = rows[-1]["updates"]
+    remaining = cadence - (done - updates[-1]) % cadence
+    return {"eval_every": cadence,
+            "next_eval_seconds": max(0.0, remaining * per_update)}
+
+
 def summarise(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """The handful of facts worth putting at the top of the page."""
     if not rows:
@@ -77,6 +113,7 @@ def summarise(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "best_at_steps": best.get("steps") if best else None,
         "total_steps": last.get("total_steps"),
         "elapsed_seconds": last.get("elapsed_seconds"),
+        **_next_evaluation(rows),
         "ancestor_win": (
             [r["ancestor_win"] for r in rows if "ancestor_win" in r] or [None]
         )[-1],
@@ -177,8 +214,12 @@ def render_multi(
     # actually moved. Reloading on a timer throws away scroll position, an
     # open glossary and any chart mid-scrub, several times an hour, to redraw
     # numbers that had not changed.
+    # When this was built, so a countdown keeps ticking between polls rather
+    # than freezing at whatever it said when the page last loaded.
+    body["generated_at"] = time.time()
     body["version"] = hashlib.sha1(
-        json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()[:16]
+        json.dumps({k: v for k, v in body.items() if k != "generated_at"},
+                   sort_keys=True, default=str).encode()).hexdigest()[:16]
     return _PAGE.replace("__DATA__", json.dumps(body)), body
 
 
@@ -384,6 +425,22 @@ function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp
 function last(p){return (p&&p.length)?p[p.length-1][1]:null;}
 function commas(n){return Number(n||0).toLocaleString();}
 function dur(s){if(!s&&s!==0)return '--';var h=Math.floor(s/3600),m=Math.round((s%3600)/60);return h?(h+'h '+m+'m'):(m+'m');}
+/* Counts the "next eval" cells down once a second. Separate from rendering
+   because the page deliberately re-renders only when the data changes, and a
+   countdown that moves only then is wrong for the twenty minutes in between. */
+function tickCountdowns(){
+  var now=Date.now()/1000;
+  Array.prototype.forEach.call(document.querySelectorAll('[data-role="next"]'),function(el){
+    var at=parseFloat(el.dataset.at||'');
+    if(!at||el.dataset.live!=='1'){el.textContent='--';return;}
+    var left=at-now;
+    if(left<=0){el.textContent='due';el.className='good';return;}
+    el.className='';
+    var m=Math.floor(left/60),sec=Math.floor(left%60);
+    el.textContent=m>=60?((m/60).toFixed(1)+'h'):(m+'m '+(sec<10?'0':'')+sec+'s');
+  });
+}
+
 function remember(k,v){try{localStorage.setItem(k,v);}catch(e){}}
 function recall(k,f){try{var v=localStorage.getItem(k);return v===null?f:v;}catch(e){return f;}}
 
@@ -520,8 +577,19 @@ function fillPane(pane,name,slot){
     cell(commas(s.episodes),'matches'),
     cell(dur(s.elapsed_seconds),'elapsed'),
     cell(remain===null?'--':dur(remain),'left'),
-    cell(commas(s.evaluations),'evals')
+    cell(commas(s.evaluations),'evals'),
+    cell('<span data-role="next">--</span>','next eval')
   ].join('');
+  // Kept as a number the tick loop counts down, rather than re-rendered:
+  // the page only re-renders when the data changes, which is every twenty
+  // updates, and a countdown that only moves then is a clock that is wrong
+  // for twenty minutes at a time.
+  var nextEl=q('next');
+  if(nextEl){
+    nextEl.dataset.at=(s.next_eval_seconds===null||s.next_eval_seconds===undefined)
+      ? '' : String((DATA.generated_at||0)+s.next_eval_seconds);
+    nextEl.dataset.live=run.live?'1':'0';
+  }
 
   var lift=s.latest_lift,r=verdictFor(lift);
   q('hero').innerHTML='<div class="hero '+r[0]+'"><div class="lbl">lift vs control</div>'
@@ -683,6 +751,8 @@ function poll(){
 
   DATA.order.forEach(function(n){seenEvals[n]=DATA.runs[n].summary.evaluations||0;});
   draw();
+  tickCountdowns();
+  setInterval(tickCountdowns,1000);
   if(location.protocol==='http:'||location.protocol==='https:') setTimeout(poll,15000);
 })();
 </script>

@@ -624,3 +624,63 @@ realTimer(function(){
     assert out["afterSame"]["stampText"], "the timestamp should still refresh on an unchanged poll"
     assert out["appliedAfterDifferent"] == {"version": "different"}, \
         "a changed version must be applied"
+
+
+# --------------------------------------------------------- time to next eval
+
+
+def test_the_evaluation_cadence_is_inferred_from_the_run_itself():
+    """Read from history rather than from config, so it still works for a run
+    whose config was lost and for one whose cadence a resume changed."""
+    rows = [_row(i, i * 100, elapsed_seconds=i * 30.0) for i in range(1, 25)]
+    for i in (5, 10, 15, 20):
+        rows[i - 1]["eval_lift_sd"] = 0.3
+    summary = summarise(rows)
+    assert summary["eval_every"] == 5
+
+
+def test_the_countdown_uses_the_recent_pace_not_the_whole_run():
+    """A run throttled partway through would otherwise be timed by an average
+    it no longer runs at. This one halves its speed at the midpoint, and the
+    estimate has to follow the slow half."""
+    rows = []
+    elapsed = 0.0
+    for i in range(1, 25):
+        elapsed += 10.0 if i <= 12 else 60.0
+        rows.append(_row(i, i * 100, elapsed_seconds=elapsed))
+    for i in (5, 10, 15, 20):
+        rows[i - 1]["eval_lift_sd"] = 0.3
+    seconds = summarise(rows)["next_eval_seconds"]
+    # Next evaluation is at update 25, one update away, at the slow pace.
+    assert 40 < seconds < 80, f"estimated {seconds:.0f}s, not the slow pace"
+
+
+def test_a_run_with_too_little_history_admits_it():
+    """One evaluation cannot imply a cadence, and guessing produces a
+    confident countdown to a time that means nothing."""
+    summary = summarise([_row(1, 100, eval_lift_sd=0.2, elapsed_seconds=10.0)])
+    assert summary["eval_every"] is None
+    assert summary["next_eval_seconds"] is None
+
+
+def test_the_countdown_ticks_between_polls():
+    """The page re-renders only when the data changes -- every twenty updates.
+    A countdown that moved only then would be wrong for the twenty minutes in
+    between, which is exactly the interval it exists to cover."""
+    page = render([_row(1, 1000)], "run")
+    assert "tickCountdowns" in page
+    assert "setInterval(tickCountdowns,1000)" in page
+    assert "generated_at" in page, "no wall-clock anchor to count down from"
+
+
+def test_the_generation_time_does_not_change_the_fingerprint():
+    """Otherwise every poll looks like new data and the page re-renders
+    constantly, which is the behaviour polling replaced."""
+    from cr_sim.train.watch import render_multi
+    import time as _time
+
+    _, first = render_multi([("a", [_row(1, 1000, eval_lift_sd=0.2)], True)])
+    _time.sleep(0.01)
+    _, later = render_multi([("a", [_row(1, 1000, eval_lift_sd=0.2)], True)])
+    assert first["generated_at"] != later["generated_at"]
+    assert first["version"] == later["version"]
