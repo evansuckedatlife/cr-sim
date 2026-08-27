@@ -33,3 +33,6 @@ out.html
 *.out
 *.err
 *.log
+demo-*.out
+demo-*.err
+data_cache/demos/

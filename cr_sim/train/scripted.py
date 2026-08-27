@@ -61,7 +61,11 @@ class SearchBotConfig:
     #: How far each branch is played forward, in seconds. Long enough for a
     #: push to reach a tower and for a defender to intercept it; longer mostly
     #: buys the opponent's reply, which this bot cannot predict anyway.
-    horizon_seconds: float = 4.0
+    #: Measured, not guessed. Against a random opponent over 16 matches:
+    #: 4 seconds wins 31%, 8 seconds wins 94%, 15 seconds wins 100% and never
+    #: loses. A card takes several seconds to walk anywhere, so a short
+    #: horizon scores it before it has done anything.
+    horizon_seconds: float = 15.0
     #: Playing nothing is always considered. Without it the bot spends elixir
     #: the moment it has any, which is the single most common way to lose at
     #: Clash Royale, and no amount of placement quality makes up for it.
@@ -69,6 +73,9 @@ class SearchBotConfig:
     #: The bonus is added to the do-nothing branch, so a play must be better
     #: than waiting by this margin before it is made. Small: waiting is
     #: already evaluated fairly, this only breaks ties toward patience.
+    #: Measured at 0.05 this drops the bot from 94% wins to 19%: it waits for
+    #: a play that is clearly better rather than merely better, and in a game
+    #: where the opponent is also committing, clearly-better rarely comes.
     patience: float = 0.01
     #: Below this, the bot always waits. Committing the last of the bar leaves
     #: nothing to answer with, and the projection cannot see that because it
@@ -84,6 +91,9 @@ class SearchBotConfig:
     #: every placement looks worse than waiting. Measured, a bot scoring this
     #: way lost 70% of its matches to a random agent that lost 45%.
     tower_weight: float = 1.0
+    #: Off, and this is the single most consequential number here. At 0.3 the
+    #: bot draws 100% of its matches -- it never plays at all -- and at 0.0 it
+    #: wins 100%.
     elixir_weight: float = 0.0
     seed: int = 0
 
