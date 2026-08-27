@@ -59,7 +59,7 @@ permanent zero the network has to learn to ignore.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Sequence
 
@@ -131,6 +131,23 @@ N_GRID_CHANNELS = len(GRID_CHANNELS)
 #: normalisation; terrain is already scaled at the point it is written.
 _HP_CHANNEL_COUNT = N_GRID_CHANNELS - 1
 
+#: ``(own?, kind, flying) -> channel index``, resolved from the names above
+#: once at import rather than by formatting a string and searching the tuple
+#: for it once per entity per observation. Derived from ``GRID_CHANNELS``, so
+#: reordering that list still reorders this correctly.
+_CHANNEL_FOR = {
+    (own, kind, flying): GRID_CHANNELS.index(f"{side}_{role}_hp")
+    for own, side in ((True, "own"), (False, "enemy"))
+    for kind, flying, role in (
+        (EntityKind.TROOP, False, "ground"),
+        (EntityKind.TROOP, True, "air"),
+        (EntityKind.BUILDING, False, "building"),
+        (EntityKind.BUILDING, True, "building"),
+        (EntityKind.TOWER, False, "tower"),
+        (EntityKind.TOWER, True, "tower"),
+    )
+}
+
 
 @dataclass(frozen=True, slots=True)
 class EncodingConfig:
@@ -151,6 +168,17 @@ class EncodingConfig:
     #: This episode's card vocabulary: the union of both decks, sorted for a
     #: stable index assignment independent of dict/set iteration order.
     vocab: tuple[str, ...]
+
+    #: ``card name -> its one-hot position``. Derived from ``vocab``, so it
+    #: carries no information of its own and is kept out of equality and
+    #: hashing; it exists because the encoder used to ask ``vocab.index(name)``
+    #: -- a linear scan -- ten times per observation.
+    _vocab_index: dict = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        self._vocab_index.update((name, i) for i, name in enumerate(self.vocab))
 
     @property
     def vocab_size(self) -> int:
@@ -234,21 +262,6 @@ def cell_to_world(grid_x: int, grid_y: int, team: Team, arena: Arena, *, span: i
     return x, y
 
 
-def _world_to_cell(
-    x: int, y: int, team: Team, arena: Arena, width: int, height: int, span: int
-) -> tuple[int, int] | None:
-    """Inverse of :func:`cell_to_world`: a world point -> its grid cell, or
-    ``None`` if it falls outside the grid this config declared."""
-    x_tiles = to_tiles(x)
-    y_tiles = to_tiles(y)
-    own_y_tiles = y_tiles if team is Team.BLUE else arena.height_tiles - y_tiles
-    gx = int(x_tiles // span)
-    gy = int(own_y_tiles // span)
-    if 0 <= gx < width and 0 <= gy < height:
-        return gx, gy
-    return None
-
-
 # --------------------------------------------------------------------- towers
 
 
@@ -267,10 +280,14 @@ def _team_towers(battle: Battle, team: Team) -> dict[str, Entity]:
     stable, arbitrary-but-consistent order that does not depend on spawn
     order or dict iteration.
     """
+    # Two loops rather than one over ``(*entities, *graveyard)``: that spread
+    # built a throwaway tuple of the whole match's dead every time it ran, and
+    # it runs twice per observation on a graveyard that grows all match.
     candidates = [
-        e
-        for e in (*battle.entities, *battle.graveyard)
-        if e.kind is EntityKind.TOWER and e.team is team
+        e for e in battle.entities if e.kind is EntityKind.TOWER and e.team is team
+    ]
+    candidates += [
+        e for e in battle.graveyard if e.kind is EntityKind.TOWER and e.team is team
     ]
     king = next((e for e in candidates if "King" in getattr(e.spec, "name", "")), None)
     princesses = sorted((e for e in candidates if e is not king), key=lambda e: e.x)
@@ -509,32 +526,48 @@ def _encode_grid(battle: Battle, team: Team, config: EncodingConfig) -> np.ndarr
     """
     width, height = config.grid_width, config.grid_height
     grid = np.zeros((N_GRID_CHANNELS, height, width), dtype=np.float32)
+    # Hitpoints are totalled per cell in Python and written to the array once,
+    # rather than a numpy scalar store per entity. A store through a
+    # three-index tuple is the most expensive thing numpy does at this size --
+    # a fixed cost per call that dwarfs the addition. The totals are exact
+    # either way: hitpoints are integers and a cell's sum stays far below the
+    # 2**24 where float32 stops representing integers exactly, so the array
+    # still sees exactly the number the old accumulation left in it, and the
+    # normalisation below is still done by numpy in float32.
+    totals: dict[int, int] = {}
+    plane = height * width
+    channel_for = _CHANNEL_FOR
+    arena = battle.arena
+    height_tiles = arena.height_tiles
+    blue = team is Team.BLUE
     for entity in battle.entities:
-        if entity.dead or entity.kind not in (
-            EntityKind.TROOP, EntityKind.BUILDING, EntityKind.TOWER
-        ):
+        if entity.dead:
             continue
-        cell = _world_to_cell(entity.x, entity.y, team, battle.arena, width, height, OBS_TILE_SPAN)
-        if cell is None:
+        channel = channel_for.get((entity.team is team, entity.kind, entity.flying))
+        if channel is None:
+            continue  # projectiles and area effects carry no board presence
+        # The inverse of :func:`cell_to_world`: a world point to the grid cell
+        # holding it, in the acting team's own perspective, with anything
+        # outside the declared grid dropped. Written out here rather than
+        # called, because it exists for this one loop and the call cost more
+        # than the arithmetic.
+        x_tiles = to_tiles(entity.x)
+        y_tiles = to_tiles(entity.y)
+        gx = int(x_tiles // OBS_TILE_SPAN)
+        gy = int(
+            (y_tiles if blue else height_tiles - y_tiles) // OBS_TILE_SPAN
+        )
+        if not (0 <= gx < width and 0 <= gy < height):
             continue
-        gx, gy = cell
-        side = "own" if entity.team is team else "enemy"
-        if entity.kind is EntityKind.TROOP:
-            role = "air" if entity.flying else "ground"
-        elif entity.kind is EntityKind.BUILDING:
-            role = "building"
-        else:
-            role = "tower"
-        channel = GRID_CHANNELS.index(f"{side}_{role}_hp")
-        grid[channel, gy, gx] += entity.hitpoints
+        index = channel * plane + gy * width + gx
+        totals[index] = totals.get(index, 0) + entity.hitpoints
+    if totals:
+        flat = grid.reshape(-1)
+        flat[list(totals)] = list(totals.values())
 
     grid[:_HP_CHANNEL_COUNT] = np.minimum(1.0, grid[:_HP_CHANNEL_COUNT] / HP_NORM)
     grid[_HP_CHANNEL_COUNT] = _terrain_channel(battle.arena, team, width, height)
     return grid
-
-
-def _scalar(value: float) -> np.ndarray:
-    return np.array([value], dtype=np.float32)
 
 
 def _card_features(card_name: str | None, registry: CardRegistry, config: EncodingConfig) -> np.ndarray:
@@ -544,43 +577,71 @@ def _card_features(card_name: str | None, registry: CardRegistry, config: Encodi
     zeros, which is a legitimate "nothing here" encoding rather than a value
     that collides with a real card.
     """
-    out = np.zeros(1 + config.vocab_size, dtype=np.float32)
-    if card_name is None:
-        return out
-    card = registry.get(card_name)
-    if card is not None:
-        out[0] = min(1.0, card.mana_cost / MAX_ELIXIR)
-    if card_name in config.vocab:
-        out[1 + config.vocab.index(card_name)] = 1.0
-    return out
+    values: list[float] = []
+    _append_card_features(values, card_name, registry, config)
+    return np.array(values, dtype=np.float32)
+
+
+def _append_card_features(
+    out: list[float],
+    card_name: str | None,
+    registry: CardRegistry,
+    config: EncodingConfig,
+) -> None:
+    """Write one hand slot's features onto the end of ``out``.
+
+    Appends onto the vector being built instead of returning an array of its
+    own. Ten of these were allocated per observation and immediately
+    concatenated away; the values are the same numbers either way, and the
+    float64-to-float32 rounding still happens exactly once, where the finished
+    list becomes an array.
+    """
+    cost = 0.0
+    if card_name is not None:
+        card = registry.get(card_name)
+        if card is not None:
+            cost = min(1.0, card.mana_cost / MAX_ELIXIR)
+    out.append(cost)
+    hot = config._vocab_index.get(card_name) if card_name is not None else None
+    for position in range(config.vocab_size):
+        out.append(1.0 if position == hot else 0.0)
 
 
 def _encode_vector(
     battle: Battle, team: Team, registry: CardRegistry, config: EncodingConfig
 ) -> np.ndarray:
+    """The flat feature half of an observation.
+
+    Built as one Python list and turned into an array once. The previous shape
+    of this -- a couple of dozen one- and seventeen-element arrays fed through
+    ``np.concatenate`` -- spent nearly all of its time on numpy's per-call
+    overhead rather than on the twenty-odd numbers involved. Every value is
+    computed by exactly the same expression as before and converted to float32
+    at exactly one point, so the array is identical.
+    """
     opponent = team.opponent
-    parts: list[np.ndarray] = [
-        _scalar(battle.players[team].elixir.units / MAX_ELIXIR),
-        _scalar(battle.players[opponent].elixir.units / MAX_ELIXIR),
+    values: list[float] = [
+        battle.players[team].elixir.units / MAX_ELIXIR,
+        battle.players[opponent].elixir.units / MAX_ELIXIR,
     ]
 
     for side in (team, opponent):
         player = battle.players[side]
         for card_name in player.hand:
-            parts.append(_card_features(card_name, registry, config))
-        parts.append(_card_features(player.next_card, registry, config))
+            _append_card_features(values, card_name, registry, config)
+        _append_card_features(values, player.next_card, registry, config)
 
     for side in (team, opponent):
         towers = _team_towers(battle, side)
         for key in ("king", "princess_low_x", "princess_high_x"):
-            parts.append(_scalar(_tower_frac(towers.get(key))))
+            values.append(_tower_frac(towers.get(key)))
 
-    parts.append(_scalar(min(1.0, battle.tick / max(1, battle.timeline.total_ticks))))
-    parts.append(_scalar(battle.players[team].crowns / 3.0))
-    parts.append(_scalar(battle.players[opponent].crowns / 3.0))
-    parts.append(_scalar(1.0 if battle.in_overtime else 0.0))
+    values.append(min(1.0, battle.tick / max(1, battle.timeline.total_ticks)))
+    values.append(battle.players[team].crowns / 3.0)
+    values.append(battle.players[opponent].crowns / 3.0)
+    values.append(1.0 if battle.in_overtime else 0.0)
 
-    return np.concatenate(parts).astype(np.float32)
+    return np.array(values, dtype=np.float32)
 
 
 def encode_observation(
