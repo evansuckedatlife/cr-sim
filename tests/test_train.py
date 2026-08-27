@@ -410,3 +410,35 @@ def test_a_run_stops_when_the_gradients_go_non_finite(world, monkeypatch):
             PPOConfig(total_steps=256, horizon=16, num_envs=2, epochs=1,
                       minibatches=1, seed=0),
         )
+
+
+# ------------------------------------------- naming the opponent a lift faced
+
+
+def test_the_in_run_evaluation_faces_a_random_opponent(tmp_path):
+    """The probe used to face an idle opponent -- one that never plays a card
+    -- while every large verdict on this project faced a random one. Both were
+    called "lift". This pins which one the run actually measures against, and
+    that the run records it.
+    """
+    from cr_sim.train.run import main
+
+    code = main([
+        "--steps", "64", "--horizon", "8", "--envs", "2",
+        "--match-seconds", "20", "--eval-every", "1", "--eval-episodes", "2",
+        "--device", "cpu", "--save-every", "1000", "--opponent", "idle",
+        "--out", str(tmp_path), "--name", "named",
+    ])
+    assert code == 0
+
+    config = json.loads((tmp_path / "named" / "config.json").read_text())
+    assert config["eval_opponent"] == "random"
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "named" / "metrics.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    lifts = [r for r in rows if "eval_lift_sd" in r]
+    assert lifts, "the run evaluated but recorded no lift"
+    assert all(r["eval_opponent"] == "random" for r in lifts)

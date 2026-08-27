@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
 
+from cr_sim.api.encoding import parse_observation
 from cr_sim.api.env import CRSimEnv
 from cr_sim.data.cards import build_card_registry
 from cr_sim.data.leveling import build_level_table
@@ -39,23 +40,61 @@ from cr_sim.data.source import LogicData
 from cr_sim.engine.entity import Team
 from cr_sim.train.clone import CloneConfig, Demonstrations, clone
 from cr_sim.train.evaluate import evaluate
-from cr_sim.train.nets import ActorCritic, NetConfig
+from cr_sim.train.nets import ActorCritic, net_config_for
 from cr_sim.train.run import DEFAULT_BUILD, DEFAULT_DECK, _random_opponent
+from cr_sim.train.selfplay import check_lift_is_named, opponent_name
 
 
 def merge(paths: list[Path]) -> Demonstrations:
+    """Concatenate shards into one training set.
+
+    ``target`` is carried through with everything else, and that is not
+    incidental. The shards on disk hold the search's own value distribution
+    over every placement it evaluated, which is what the cloner is written to
+    train against -- and this function used to drop it, silently, by omitting
+    one keyword. The loader read it, the saver wrote it, ``clone`` branched on
+    it, and every clone actually run fell down the ``target is None`` path and
+    fitted the single move the search happened to play. A feature that is
+    inert everywhere it is used still passes every test that only checks it
+    round-trips through a file.
+    """
     parts = [Demonstrations.load(p) for p in paths]
     if not parts:
         raise SystemExit("no shards found")
+    targets = [p.target for p in parts]
     return Demonstrations(
         grid=np.concatenate([p.grid for p in parts]),
         vector=np.concatenate([p.vector for p in parts]),
         mask=np.concatenate([p.mask for p in parts]),
         action=np.concatenate([p.action for p in parts]),
         value=np.concatenate([p.value for p in parts]),
+        # All or nothing: a half-filled target array would train some rows
+        # against the search's beliefs and the rest against zeros, which is a
+        # worse label than either.
+        target=(np.concatenate(targets)
+                if all(t is not None for t in targets) else None),
         episodes=sum(p.episodes for p in parts),
         play_rate=float(np.mean([p.play_rate for p in parts])),
     )
+
+
+
+def subset(data: Demonstrations, fraction: float, seed: int) -> Demonstrations:
+    """A random slice of the demonstrations, for a sample-efficiency curve.
+
+    Sampled over the whole set rather than truncated to the first N episodes:
+    the shards are ordered, so a prefix is a handful of battles seen in full
+    while a random draw is the same distribution of positions at a smaller
+    count -- which is what "learns more per example" has to be measured on.
+    """
+    keep = max(1, int(len(data) * max(0.0, min(1.0, fraction))))
+    order = np.random.default_rng(seed).permutation(len(data))[:keep]
+    order.sort()
+    return Demonstrations(
+        grid=data.grid[order], vector=data.vector[order], mask=data.mask[order],
+        action=data.action[order], value=data.value[order],
+        target=None if data.target is None else data.target[order],
+        episodes=data.episodes, play_rate=data.play_rate)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -73,13 +112,52 @@ def main(argv: list[str] | None = None) -> int:
              "seven hundred placements -- and greedy play then loses every "
              "match.",
     )
+    parser.add_argument(
+        "--targets", choices=("soft", "hard"), default="hard",
+        help="'soft' fits the search's own distribution over the placements "
+             "it evaluated; 'hard' fits the single move it played. Soft is "
+             "the better idea and the shards on disk cannot support it: the "
+             "target was built from candidate values scaled by their own "
+             "spread, and on the states where the search chose to wait those "
+             "values are equal to four decimal places, so 86%% of them carry "
+             "an exactly uniform distribution over fifteen-odd candidates of "
+             "which fourteen are placements. The pass action is the target's "
+             "argmax in none of 10,940 recorded decisions. cr_sim.train.clone "
+             "now floors the spread and gives waiting the margin the search "
+             "required of a play, so demonstrations collected from here on "
+             "can use 'soft'.",
+    )
     parser.add_argument("--tower-level", type=int, default=5)
+    parser.add_argument(
+        "--observation", default="v1",
+        help="which observation the demonstrations were recorded with. It has "
+             "to match, and a mismatch is a silent one: the shapes line up "
+             "whenever the channel counts do.")
+    parser.add_argument(
+        "--head", choices=("flat", "factored", "conv"), default="flat",
+        help="'flat' is one linear layer over all 720 actions; 'factored' "
+             "picks the card, then the tile, with the tile head conditioned "
+             "on an embedding of the card and its placement weights shared "
+             "across cards. Both parameterise the same masked categorical, so "
+             "the comparison is about sample efficiency, not expressiveness.",
+    )
+    parser.add_argument(
+        "--fraction", type=float, default=1.0,
+        help="train on this fraction of the demonstrations. The point of a "
+             "factored head is learning more per example, which only shows up "
+             "as a curve against how many examples there are.",
+    )
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--episodes", type=int, default=120,
                         help="battles in the final evaluation")
     args = parser.parse_args(argv)
 
     shards = sorted(args.demos.glob("shard-*.npz"))
     data = merge(shards)
+    if args.fraction < 1.0:
+        data = subset(data, args.fraction, args.seed)
+    if args.targets == "hard":
+        data.target = None
     print(f"{len(shards)} shards, {len(data):,} decisions from "
           f"{data.episodes} episodes, expert played on "
           f"{data.play_rate:.0%} of them\n", flush=True)
@@ -92,17 +170,13 @@ def main(argv: list[str] | None = None) -> int:
             build, levels, registry, DEFAULT_DECK, DEFAULT_DECK,
             ticks_per_second=20, frame_skip=30, max_ticks=20 * 120,
             tower_level=args.tower_level,
+            observation=parse_observation(args.observation),
             opponent_policy=_random_opponent(60_000 + seed_offset))
 
     probe = make_env()
-    observation, _ = probe.reset(seed=0)
+    probe.reset(seed=0)
     slots, width, height = (int(v) for v in probe.action_space.nvec)
-    net = ActorCritic(NetConfig(
-        grid_channels=observation["grid"].shape[0],
-        grid_height=observation["grid"].shape[1],
-        grid_width=observation["grid"].shape[2],
-        vector_size=observation["vector"].shape[0],
-        num_actions=slots * width * height))
+    net = ActorCritic(net_config_for(probe, head=args.head))
 
     started = time.perf_counter()
     history: list[dict] = []
@@ -119,12 +193,23 @@ def main(argv: list[str] | None = None) -> int:
     clone(net, data, CloneConfig(
         epochs=args.epochs, batch_size=args.batch_size,
         learning_rate=args.lr, pass_weight=args.pass_weight,
-        pass_action=(slots - 1) * width * height, seed=0), on_epoch=report)
+        pass_action=(slots - 1) * width * height, seed=args.seed),
+        on_epoch=report)
 
     args.out.mkdir(parents=True, exist_ok=True)
     torch.save({"state_dict": net.state_dict(),
+                "observation": args.observation,
+                "targets": args.targets, "pass_weight": args.pass_weight,
+                # Which head these weights are. A factored head's parameters
+                # do not fit a flat one, and whatever loads this needs to
+                # build the network they belong to.
+                "head": args.head,
                 "clone": history[-1] if history else {}},
                args.out / "cloned.pt")
+    if args.episodes <= 0:
+        print(f"\n{(time.perf_counter() - started) / 60:.1f} min -> {args.out} "
+              "(no battles played; --episodes 0)", flush=True)
+        return 0
 
     # The claim worth making. Agreement says the expert was learned; this says
     # whether the result can play, against the same control every other number
@@ -182,6 +267,8 @@ def main(argv: list[str] | None = None) -> int:
     # imply a trajectory it does not have.
     (args.out / "config.json").write_text(json.dumps({
         "reward": "behavioural cloning", "opponent": "random",
+        "eval_opponent": opponent_name(make_env()),
+        "eval_episodes": args.episodes,
         "tower_level": args.tower_level, "frame_skip": 30, "tps": 20,
         "match_seconds": 120, "num_envs": 0, "horizon": 0,
         "note": (f"Cloned from {data.episodes} expert episodes "
@@ -201,7 +288,15 @@ def main(argv: list[str] | None = None) -> int:
         "noop_fraction": 1.0 - last.get("play_rate", 0.0),
         "eval_lift_sd": best["lift"], "eval_win": best["win"],
         "control_win": float(np.mean(control_crowns > 0)),
+        # Named, because a lift compared against one measured on a different
+        # opponent is not a comparison. See cr_sim.train.selfplay.check_lift_is_named.
+        "eval_opponent": opponent_name(make_env()),
+        "eval_episodes": args.episodes,
+        "observation": args.observation, "head": args.head,
+        "targets": args.targets, "pass_weight": args.pass_weight,
+        "fraction": args.fraction,
     }
+    check_lift_is_named(row)
     with (args.out / "metrics.jsonl").open("w", encoding="utf-8") as stream:
         for update in (1, 2):
             stream.write(json.dumps({**row, "updates": update}) + chr(10))
