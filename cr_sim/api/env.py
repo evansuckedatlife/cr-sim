@@ -412,7 +412,14 @@ class CRSimEnv(_EnvBase):
             only = tuple(int(v) for v in np.argwhere(mask)[0])
             _apply_action(self.battle, opponent, only, self._config)
             return
-        action = self.opponent_policy(self._observe(opponent), mask)
+        # A searching opponent needs the board, not an encoded view of it --
+        # it branches the battle to evaluate placements. Passed only when the
+        # callable asks, so a network opponent keeps seeing exactly what a
+        # player would and cannot quietly read state it should not have.
+        if getattr(self.opponent_policy, "wants_battle", False):
+            action = self.opponent_policy(self._observe(opponent), mask, self.battle)
+        else:
+            action = self.opponent_policy(self._observe(opponent), mask)
         _apply_action(self.battle, opponent, action, self._config)
 
     def _run_out_forced_decisions(self) -> float:
