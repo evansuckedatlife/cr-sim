@@ -124,6 +124,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--save-every", type=int, default=10, help="updates between checkpoints")
     parser.add_argument(
+        "--init-from", type=Path, default=None,
+        help="start from these weights instead of from random. The order "
+             "every successful game agent used: AlphaStar's supervised agent "
+             "outranked 84%% of human players before any reinforcement "
+             "learning, and the learning refined a competent policy rather "
+             "than creating one. Unlike --resume this takes only the weights, "
+             "so the optimiser starts clean and the step count starts at zero.",
+    )
+    parser.add_argument(
+        "--opponent-temperature", type=float, default=1.0,
+        help="how sharply a self-play opponent plays its own policy. 1.0 "
+             "samples it as-is, which sounds neutral and is not: a policy "
+             "with entropy near the uniform maximum is still nearly random, "
+             "leaving the outcome as unpredictable as it was against a random "
+             "agent and the critic with nothing to fit. Below 1.0 sharpens "
+             "toward its own preferences.",
+    )
+    parser.add_argument(
         "--resume", action="store_true",
         help="continue from checkpoint.pt in the run directory, keeping the "
              "optimiser state and step count. Metrics are appended rather "
@@ -200,9 +218,15 @@ def _resolve_device(name: str) -> str:
         return name
     if torch.cuda.is_available():
         return "cuda"
-    xpu = getattr(torch, "xpu", None)
-    if xpu is not None and xpu.is_available():
-        return "xpu"
+    # XPU is deliberately not chosen automatically, even when present. On the
+    # machine this was developed on it reports available, runs a gradient step
+    # 6.6x faster than eight CPU threads, and then fails a real training loop
+    # three different ways: an unimplemented convolution, out of device
+    # memory, and out of Level Zero resources during the optimiser's own state
+    # allocation. The rollout's several hundred small forward passes, each
+    # with a blocking host readback, exhaust the driver's handles before the
+    # first update. A default that picks a backend which cannot finish an
+    # update is worse than no default at all -- ask for it explicitly.
     return "cpu"
 
 
@@ -282,6 +306,22 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.perf_counter()
     resume_state = None
+    if args.init_from:
+        if args.resume:
+            raise SystemExit(
+                "--init-from and --resume do different things and cannot be "
+                "combined: one starts a new run from borrowed weights, the "
+                "other continues a run that stopped.")
+        if not args.init_from.is_file():
+            raise SystemExit(f"no weights at {args.init_from}")
+        borrowed = torch.load(args.init_from, map_location="cpu",
+                              weights_only=False)
+        # Weights only. The optimiser state belongs to whatever produced these
+        # -- supervised cloning, in the case this exists for -- and its moment
+        # estimates describe a different objective entirely.
+        resume_state = {"state_dict": borrowed["state_dict"],
+                        "steps": 0, "updates": 0}
+        print(f"starting from {args.init_from}", flush=True)
     if args.resume:
         checkpoint_path = out / "checkpoint.pt"
         if not checkpoint_path.exists():
@@ -443,7 +483,9 @@ def main(argv: list[str] | None = None) -> int:
                 # once a refresh has happened.
                 pool.add(built)
                 for holder in opponents:
-                    snapshot = PooledOpponent(pool, built, nvec, seed=args.seed)
+                    snapshot = PooledOpponent(
+                        pool, built, nvec, seed=args.seed,
+                        temperature=args.opponent_temperature)
                     holder.append(snapshot)
                     snapshots.append(snapshot)
                 probe_holder["ancestor"] = ancestor_probe(
