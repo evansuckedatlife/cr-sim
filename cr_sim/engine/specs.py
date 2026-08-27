@@ -84,6 +84,10 @@ class UnitSpec:
 
     #: Consumed by its own attack (Ice Spirit, Wall Breakers, Balloon's bomb).
     kamikaze: bool = False
+    #: The rate the tick fields above were built at. Carried so anything
+    #: converting them back into real time gets the same answer whether the
+    #: run is a 20 TPS training episode or a 60 TPS verification one.
+    ticks_per_second: int = 60
     #: Name of the projectile this unit launches, if it is ranged. A unit
     #: with one deals its damage on impact rather than on the swing.
     projectile: str | None = None
@@ -187,9 +191,16 @@ class UnitSpec:
 
     @property
     def damage_per_second(self) -> float:
+        """Damage per real second.
+
+        This used to divide by ticks and multiply by 1000, which is damage per
+        *thousand ticks* -- every value 16.67x too large at 60 TPS, and a
+        different wrong number at 20. Nothing consumed it, so nothing was
+        broken by it, but the observation encoder does now.
+        """
         if self.hit_speed_ticks <= 0:
             return 0.0
-        return self.damage * 1000 / max(1, self.hit_speed_ticks)
+        return self.damage * self.ticks_per_second / self.hit_speed_ticks
 
     def damage_to(self, is_crown_tower: bool) -> int:
         """Damage this unit deals, reduced against towers where applicable.
@@ -336,6 +347,7 @@ def build_unit_spec(
         hitpoints=scale.scale(hitpoints, level),
         damage=scale.scale(damage, level) if damage else 0,
         shield_hitpoints=scale.scale(_int(raw.get("ShieldHitpoints")), level),
+        ticks_per_second=clock.ticks_per_second,
         hit_speed_ticks=clock.ticks(raw.get("HitSpeed")),
         load_time_ticks=clock.ticks(raw.get("LoadTime")),
         # A fuse spends its DeployTime counting down to its own death rather
@@ -434,6 +446,7 @@ def build_tower_spec(
         hitpoints=scale.hitpoints(hitpoints, level),
         damage=scale.damage(damage, level) if damage else 0,
         shield_hitpoints=0,
+        ticks_per_second=clock.ticks_per_second,
         hit_speed_ticks=clock.ticks(raw.get("HitSpeed")),
         load_time_ticks=clock.ticks(raw.get("LoadTime")),
         deploy_ticks=0,
