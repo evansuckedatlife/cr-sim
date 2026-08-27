@@ -750,3 +750,44 @@ def test_registering_a_job_makes_an_entry_the_watcher_can_read(tmp_path):
     rows = read_metrics(out / "metrics.jsonl")
     assert rows[0]["updates"] == 1, "unnumbered rows must still plot in order"
     assert summarise(rows)["latest_lift"] == 1.5
+
+
+# ------------------------------------------------- the payload a browser reads
+
+
+@needs_node
+def test_the_served_payload_parses_in_a_browser_not_only_in_python(tmp_path):
+    """`json.dumps` and `JSON.parse` disagree about NaN, and the page loses.
+
+    A critic that diverges writes `NaN` for explained variance. Python emits it
+    as a bare token and reads it straight back, so every test here passed and
+    every figure looked right from this side -- while `poll()`'s `r.json()`
+    rejected on the served file, the rejection landed in its own empty
+    `catch`, and the page sat frozen on the data it had loaded with,
+    re-arming its timer forever. It was stuck for a day before anyone opened
+    a console. Parsed with node, because Python cannot see this bug.
+    """
+    rows = [
+        _row(1, 1000, explained_variance=float("nan"), eval_lift_sd=0.4,
+             eval_win=0.5, control_win=0.26),
+        _row(2, 2000, explained_variance=0.31, eval_lift_sd=float("inf")),
+    ]
+    page = render(rows, "run")
+    blob = page.split("var DATA = ", 1)[1].split(";\n", 1)[0]
+    assert "NaN" not in blob, "a bare NaN token ships in the payload"
+
+    path = tmp_path / "data.json"
+    path.write_text(blob, encoding="utf-8")
+    script = (
+        "var d=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));"
+        "process.stdout.write(JSON.stringify(d.runs.run.series));"
+    )
+    result = subprocess.run([node, "-e", script, str(path)],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    series = json.loads(result.stdout)
+
+    # The finite reading survives at its own step; the two unusable ones are
+    # simply absent, which is already how this file says "no reading here".
+    assert series["explained_variance"] == [[2000, 0.31]]
+    assert series["lift"] == [[1000, 0.4]], "a non-finite lift was plotted"

@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import time
 import sys
 from pathlib import Path
@@ -191,13 +192,50 @@ def _note_of(run: Path) -> str:
         return ""
 
 
+def _plottable(value: Any) -> bool:
+    """Whether a value survives the trip through JSON into a browser.
+
+    ``json.dumps`` writes a bare ``NaN`` token and ``json.loads`` reads it
+    back, so a non-finite number is invisible from Python and fatal in the
+    page: ``JSON.parse`` rejects the whole document, ``poll()``'s ``r.json()``
+    rejects with it, the rejection lands in its own empty ``catch``, and the
+    view silently freezes on whatever it loaded with. One run's critic wrote
+    ``NaN`` for explained variance and froze the served page for a day.
+
+    A row missing a key is already how this file says "no reading here", so
+    dropping the point needs no handling anywhere downstream.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return isinstance(value, int)
+
+
+def _json_safe(value: Any) -> Any:
+    """The same structure with every non-finite number replaced by null.
+
+    `json.dumps` writes bare `NaN` and `Infinity` tokens, which are not JSON
+    and which `JSON.parse` refuses. Null is a value the page already renders
+    as `--` everywhere a number can be missing.
+    """
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 def _series_of(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     def pair(key):
-        return [(r.get("steps", 0), r[key]) for r in rows if key in r]
+        return [(r.get("steps", 0), r[key])
+                for r in rows if key in r and _plottable(r[key])]
 
     return {
         "steps": [r.get("steps", 0) for r in rows],
-        "lift": [(r.get("steps", 0), r["eval_lift_sd"]) for r in rows if "eval_lift_sd" in r],
+        "lift": pair("eval_lift_sd"),
         "win": pair("eval_win"),
         "control": pair("control_win"),
         "entropy": pair("entropy"),
@@ -259,6 +297,12 @@ def render_multi(
     # numbers that had not changed.
     # When this was built, so a countdown keeps ticking between polls rather
     # than freezing at whatever it said when the page last loaded.
+    # Applied to the whole payload, not only the series. `summarise` reads
+    # its figures straight off the last row, so a non-finite lift or entropy
+    # reaches the page around `_plottable` and breaks `JSON.parse` on the
+    # served file exactly as a NaN in a series does. Done before the
+    # fingerprint, so the hash covers what actually ships.
+    body = _json_safe(body)
     body["generated_at"] = time.time()
     body["version"] = hashlib.sha1(
         json.dumps({k: v for k, v in body.items() if k != "generated_at"},
