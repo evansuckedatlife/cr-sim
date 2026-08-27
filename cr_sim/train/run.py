@@ -28,13 +28,14 @@ import torch
 from ..data.cards import build_card_registry
 from ..data.leveling import build_level_table
 from ..data.source import LogicData
-from ..api.encoding import NOOP_SLOT
+from ..api.encoding import NOOP_SLOT, grid_channels, parse_observation
 from ..api.env import CRSimEnv
 from ..api.reward import ProjectionWeights, RewardWeights
+from .nets import net_config_for
 from .ppo import PPOConfig, train
 from .selfplay import (
     FrozenOpponent, OpponentPool, PooledOpponent,
-    ancestor_probe, evaluation_probe,
+    ancestor_probe, check_lift_is_named, evaluation_probe, opponent_name,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -70,6 +71,10 @@ def _random_opponent(seed: int):
             return (NOOP_SLOT, 0, 0)
         return tuple(int(v) for v in legal[rng.integers(len(legal))])
 
+    # Carried on the callable so a measurement can say which opponent it
+    # faced; see cr_sim.train.selfplay.opponent_name for why that is not
+    # optional here.
+    policy.opponent_name = "random"
     return policy
 
 
@@ -101,7 +106,57 @@ def build_parser() -> argparse.ArgumentParser:
              "the simulator: evaluate at 11 to see what transfers.",
     )
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument(
+        "--observation", default="v1",
+        help="which observation to encode: 'v1' (the original nine grid "
+             "channels and both hands in full), 'v2' (spell and area-effect "
+             "channels, per-cell body counts, and the opponent's hand and "
+             "elixir hidden), or a comma-separated subset of spells, swarm, "
+             "hide_enemy_hand, hide_enemy_elixir. Changing this invalidates "
+             "every checkpoint trained on the other one -- the first "
+             "convolution has a filter bank per input channel -- so it is "
+             "recorded in the run and in every checkpoint it writes.",
+    )
+    parser.add_argument(
+        "--head", choices=("flat", "factored", "conv"), default="flat",
+        help="'flat' is one linear layer over all 720 actions; 'factored' "
+             "picks the card, then the tile, with the tile head conditioned "
+             "on an embedding of the card and its weights shared across "
+             "cards. Not a correctness difference -- a flat masked "
+             "categorical can represent anything the factorisation can -- but "
+             "a sample-efficiency one, and placements are the sparse part.",
+    )
     parser.add_argument("--entropy", type=float, default=0.02)
+    parser.add_argument(
+        "--kl", type=float, default=0.0,
+        help="weight on KL(reference || policy), a trust region around the "
+             "weights --init-from supplied. The standard remedy for a "
+             "fine-tune that walks a competent policy back to nothing, and "
+             "measured here: plain PPO from the behavioural clone raised its "
+             "pass rate from 8%% to 36%% over 34 updates while entropy fell "
+             "the whole time, so the collapse is the policy gradient's doing "
+             "and an anchor is what holds it. Requires --init-from.",
+    )
+    parser.add_argument(
+        "--kl-reference", type=Path, default=None,
+        help="weights the trust region anchors to. Defaults to --init-from, "
+             "which is right for a fresh fine-tune and wrong for --resume: on "
+             "a restart the policy has already moved, and anchoring to where "
+             "it currently is holds it nowhere. Give the clone's own "
+             "checkpoint to continue a run against the same anchor it "
+             "started with.",
+    )
+    parser.add_argument(
+        "--elixir-weight", type=float, default=0.3,
+        help="weight on the elixir lead inside --reward projected's "
+             "potential. This is what makes a card cost something, and it is "
+             "also why passing pays: spending drops the potential now while "
+             "the card's effect on the board takes longer than the "
+             "projection's horizon to appear. Measured on the clone's own "
+             "rollouts, a pass earns +0.071 more reward than a placement at "
+             "0.3 and -0.010 less at 0.0. The searching bot needed it at 0.0 "
+             "for the same reason: at 0.3 it never played a card at all.",
+    )
     parser.add_argument(
         "--shaping", type=float, default=0.01,
         help="weight on tower-health difference. At 0.01 a whole match's tower "
@@ -230,19 +285,38 @@ def _resolve_device(name: str) -> str:
     return "cpu"
 
 
+def _load_reference(path, args, env):
+    """The frozen policy a trust region pulls back toward.
+
+    Built from the checkpoint rather than from the live network, because on a
+    resume the live network is already several thousand updates from the thing
+    it was supposed to stay near, and anchoring to it would hold it nowhere.
+    """
+    from .nets import ActorCritic, net_config_for
+
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    net = ActorCritic(net_config_for(env, head=payload.get("head", args.head)))
+    net.load_state_dict(payload["state_dict"])
+    net.eval()
+    return net
+
+
 def _reward_weights(args):
     """The weights object whose type selects the reward."""
     if args.reward == "five-term":
         return RewardWeights()
     if args.reward == "projected":
         return ProjectionWeights(
-            horizon_seconds=args.horizon_seconds if args.horizon_seconds > 0 else None
+            horizon_seconds=args.horizon_seconds if args.horizon_seconds > 0 else None,
+            elixir=args.elixir_weight,
         )
     return None
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Resolved before anything is written, because config.json records it.
+    anchor_path = args.kl_reference or args.init_from
 
     out = args.out / args.name
     out.mkdir(parents=True, exist_ok=True)
@@ -260,9 +334,12 @@ def main(argv: list[str] | None = None) -> int:
     # from an observation and the opponents hold a copy of the network.
     opponents: list = []
 
+    observation = parse_observation(args.observation)
+
     def _env(opponent=None) -> CRSimEnv:
         return CRSimEnv(
             data, levels, registry, DEFAULT_DECK, DEFAULT_DECK,
+            observation=observation,
             ticks_per_second=args.tps,
             frame_skip=args.frame_skip,
             max_ticks=args.tps * args.match_seconds,
@@ -271,6 +348,17 @@ def main(argv: list[str] | None = None) -> int:
             reward_weights=_reward_weights(args),
             opponent_policy=opponent,
         )
+
+    def _eval_env() -> CRSimEnv:
+        """The environment the honest evaluation is played in.
+
+        A *random* opponent, not an idle one. This used to be ``_env(None)``,
+        which never plays a card, while the large paired verdicts faced a
+        random agent -- and both were reported as "lift" and compared to each
+        other. They were never comparable: the control wins 92% of the idle
+        matches and 26% of the random ones.
+        """
+        return _env(_random_opponent(90_000))
 
     def make_env(index: int) -> CRSimEnv:
         # Each environment gets its own opponent, so eight parallel battles do
@@ -293,6 +381,8 @@ def main(argv: list[str] | None = None) -> int:
         learning_rate=args.lr,
         entropy_coefficient=args.entropy,
         seed=args.seed,
+        head=args.head,
+        kl_coefficient=args.kl,
     )
     (out / "config.json").write_text(
         json.dumps({**asdict(config), "deck": list(DEFAULT_DECK), "tps": args.tps,
@@ -300,12 +390,27 @@ def main(argv: list[str] | None = None) -> int:
                     "shaping": args.shaping, "reward": args.reward,
                     "tower_level": args.tower_level,
                     "horizon_seconds": args.horizon_seconds,
-                    "opponent": args.opponent}, indent=2),
+                    "opponent": args.opponent, "head": args.head,
+                    "kl": args.kl, "elixir_weight": args.elixir_weight,
+                    "kl_reference": str(anchor_path) if anchor_path else None,
+                    "observation": args.observation,
+                    "observation_channels": list(grid_channels(observation)),
+                    # Which opponent the in-run lift is measured against, read
+                    # off a real evaluation environment rather than asserted.
+                    # A run's own lift series is only comparable to another
+                    # run's when these agree.
+                    "eval_opponent": opponent_name(_eval_env()),
+                    "eval_episodes": args.eval_episodes}, indent=2),
         encoding="utf-8",
     )
 
     started = time.perf_counter()
     resume_state = None
+    if args.kl > 0.0 and not anchor_path:
+        raise SystemExit(
+            "--kl anchors the policy to a fixed reference. Without "
+            "--init-from or --kl-reference that reference is a random "
+            "initialisation, and anchoring to noise is not a trust region.")
     if args.init_from:
         if args.resume:
             raise SystemExit(
@@ -316,6 +421,12 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"no weights at {args.init_from}")
         borrowed = torch.load(args.init_from, map_location="cpu",
                               weights_only=False)
+        if borrowed.get("head", args.head) != args.head:
+            raise SystemExit(
+                f"--init-from holds a {borrowed.get('head')!r} head but "
+                f"--head is {args.head!r}. The two do not share a parameter "
+                "shape, and loading one into the other would fail on a tensor "
+                "name with no obvious owner.")
         # Weights only. The optimiser state belongs to whatever produced these
         # -- supervised cloning, in the case this exists for -- and its moment
         # estimates describe a different objective entirely.
@@ -347,13 +458,10 @@ def main(argv: list[str] | None = None) -> int:
     # the config; weights arrive per refresh, which is what lets self-play run
     # across processes instead of costing three and a half times the
     # throughput to stay in one.
-    net_shape = {
-        "grid_channels": int(probe_obs["grid"].shape[0]),
-        "grid_height": int(probe_obs["grid"].shape[1]),
-        "grid_width": int(probe_obs["grid"].shape[2]),
-        "vector_size": int(probe_obs["vector"].shape[0]),
-        "num_actions": int(probe_env.action_space.nvec.prod()),
-    }
+    # Built through the same helper the trainer uses, so a worker's opponent
+    # network cannot be a different shape -- or a different head -- from the
+    # learner whose weights it is about to be handed.
+    net_shape = asdict(net_config_for(probe_env, head=args.head))
 
     # Appended when resuming: the point of a restart is to keep what the
     # run had already recorded, and "w" would delete the hours being
@@ -421,6 +529,10 @@ def main(argv: list[str] | None = None) -> int:
                         torch.save(
                             {
                                 "state_dict": net.state_dict(),
+                                # Which head these weights are, so whatever
+                                # loads them builds the network they fit.
+                                "head": args.head,
+                                "observation": args.observation,
                                 "stats": stats,
                                 "rolling_lift": rolling,
                                 "window": _BEST_WINDOW,
@@ -435,6 +547,8 @@ def main(argv: list[str] | None = None) -> int:
                 torch.save(
                     {
                         "state_dict": net.state_dict(),
+                        "head": args.head,
+                        "observation": args.observation,
                         "optimiser": (
                             optimiser_holder["optimiser"].state_dict()
                             if "optimiser" in optimiser_holder else None
@@ -452,7 +566,7 @@ def main(argv: list[str] | None = None) -> int:
             # eval fields to this same dict, so writing first recorded every
             # row without the one number worth keeping -- the honest lift
             # against the control lived only in the console.
-            print(json.dumps(stats), file=stream)
+            print(json.dumps(check_lift_is_named(stats)), file=stream)
             stream.flush()  # a run that dies at hour three should keep hour two
 
         # The network's shapes come from the first observation, so it does not
@@ -496,18 +610,10 @@ def main(argv: list[str] | None = None) -> int:
                 # run, which is not self-play and not what the metrics claim.
                 if parallel is not None:
                     parallel.set_opponent(built.state_dict())
-            # Against a *random* opponent, not an idle one.
-            #
-            # This used to pass _env(None), which is an opponent that never
-            # plays a card. Every inline lift number on this project was
-            # therefore measured against a board where nobody defends, while
-            # the large paired evaluations that produced verdict.json faced a
-            # random agent -- and both were reported as "lift" and compared to
-            # each other. They were never comparable: the control wins 92% of
-            # the idle matches and 26% of the random ones.
+            # See _eval_env: a random opponent, not an idle one, and the
+            # probe records which it was on every row it produces.
             probe_holder["probe"] = evaluation_probe(
-                lambda: _env(_random_opponent(90_000)),
-                episodes=args.eval_episodes,
+                _eval_env, episodes=args.eval_episodes,
             )
 
         parallel = None
@@ -521,6 +627,7 @@ def main(argv: list[str] | None = None) -> int:
                     max_ticks=args.tps * args.match_seconds,
                     reward_shaping_weight=args.shaping,
                     reward_weights=_reward_weights(args),
+                    observation=observation,
                     opponent_seed=(args.seed * 1000 if args.opponent == "random" else None),
                     net_config=(net_shape if args.opponent == "self" else None),
                 ),
@@ -531,6 +638,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             net = train(
                 make_env, config,
+                reference=_load_reference(anchor_path, args, probe_env)
+                if args.kl > 0.0 else None,
                 device=device,
                 on_update=record,
                 on_net=_on_net,
@@ -554,7 +663,8 @@ def main(argv: list[str] | None = None) -> int:
                 parallel.close()
 
 
-    torch.save({"state_dict": net.state_dict()}, out / "final.pt")
+    torch.save({"state_dict": net.state_dict(), "head": args.head,
+                "observation": args.observation}, out / "final.pt")
     elapsed = time.perf_counter() - started
     print(f"\ndone in {elapsed / 60:.1f} min -> {out}", flush=True)
     return 0

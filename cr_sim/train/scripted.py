@@ -183,10 +183,16 @@ class SearchBot:
         indistinguishable from the control it is meant to beat.
         """
         if battle is None:
+            self.last_scores = []
             return (NOOP_SLOT, 0, 0)
 
         player = battle.players[self.team]
         if player.elixir.exact < self.config.reserve_elixir:
+            # Cleared, not left as it was. These early returns used to leave
+            # ``last_scores`` holding the *previous* decision's numbers, and
+            # anything reading them afterwards would be told what the search
+            # believed about a board that no longer exists.
+            self.last_scores = []
             return (NOOP_SLOT, 0, 0)
 
         horizon = int(self.config.horizon_seconds * battle.config.ticks_per_second)

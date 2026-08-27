@@ -88,6 +88,46 @@ class Demonstrations:
             target=raw["target"] if "target" in raw.files else None)
 
 
+
+def _expert_patience(expert) -> float:
+    """The margin a play had to beat waiting by for the expert to take it.
+
+    Recorded into the target because the target has to be over the same
+    numbers the decision was made from. Without it a state where waiting was
+    chosen -- because nothing beat it by the margin -- produces a target whose
+    largest entry is a placement, which is the opposite of what happened.
+    """
+    bot = getattr(expert, "bot", expert)
+    return float(getattr(getattr(bot, "config", None), "patience", 0.0) or 0.0)
+
+
+def _target_row(scores, index, width, height, slots, patience, temperature,
+                min_spread, size):
+    """The search's beliefs about one decision, as a distribution.
+
+    Falls back to the action actually taken in the two cases where the scores
+    say nothing: when there are none, and when they are all within
+    ``min_spread`` of each other. See :func:`collect`'s ``min_spread`` for the
+    measurement behind the second.
+    """
+    row = np.zeros(size, dtype=np.float32)
+    if not scores:
+        row[index] = 1.0
+        return row
+    indices = np.array([i for i, _ in scores])
+    raw = np.array([v for _, v in scores], dtype=np.float64)
+    # Waiting is scored the way the bot scored it: with its patience margin.
+    raw = raw + patience * (indices == (slots - 1) * width * height)
+    spread = float(raw.std())
+    if spread < min_spread:
+        row[index] = 1.0
+        return row
+    scale = max(1e-6, temperature * spread)
+    weights = np.exp((raw - raw.max()) / scale)
+    row[indices] = (weights / weights.sum()).astype(np.float32)
+    return row
+
+
 def collect(
     make_env: Callable[[int], Any],
     make_expert: Callable[[Any], Callable],
@@ -98,14 +138,47 @@ def collect(
     #: At 0.35 the best action takes roughly half the mass while the
     #: near-equivalent ones keep enough to say they were nearly as good.
     target_temperature: float = 0.35,
-) -> Demonstrations:
+    #: Below this spread in the search's candidate values, the search had no
+    #: preference at all and the only signal left is which action it took.
+    #:
+    #: Not a guess. Measured over 120 real decisions: on the ones where the
+    #: bot chose to wait the candidate values had a standard deviation of
+    #: 0.00014, and on the ones where it played, 0.10 -- three orders of
+    #: magnitude apart, with nothing in between. The softmax below is scaled
+    #: by that same spread, so it is scale-free and turns a set of values that
+    #: are equal to four decimal places into a *confident* preference for
+    #: whichever arbitrary placement happened to round highest. Where they are
+    #: exactly equal it produces a uniform distribution over the fifteen-odd
+    #: candidates, of which fourteen are placements and one is waiting.
+    #:
+    #: The damage that did: 86% of the states where the expert waited carried
+    #: an exactly uniform target, and the pass action was the target's argmax
+    #: in *none* of 10,940 recorded decisions. A policy trained on it played a
+    #: card at every single decision, against the expert's 56%.
+    min_spread: float = 1e-3,
+    variants: "dict[str, Any] | None" = None,
+):
     """Watch an expert play and write down every decision it faced.
 
     Only states where a real choice existed are kept. A state with one legal
     action teaches nothing -- the expert had no alternative, so copying it
     conveys no preference -- and including them would let the pass action
     dominate the dataset, since a player is broke for most of a match.
+
+    ``variants`` maps a name to an
+    :class:`~cr_sim.api.encoding.ObservationFeatures`, and makes this return a
+    dict of one :class:`Demonstrations` per name instead of a single set. The
+    expert reads the *battle*, not the observation, so every variant sees the
+    identical trajectory and the identical decisions -- which is the only way
+    an observation ablation is a comparison rather than two experiments. It is
+    also the only affordable way: a demonstration set costs seventeen seconds
+    a battle to produce, and collecting one per encoding would multiply that
+    by the number of things being compared.
     """
+    if variants:
+        return _collect_variants(make_env, make_expert, episodes, gamma,
+                                 on_episode, target_temperature, min_spread,
+                                 variants)
     grids: list[np.ndarray] = []
     vectors: list[np.ndarray] = []
     masks: list[np.ndarray] = []
@@ -142,28 +215,17 @@ def collect(
                 # temperature keeps this close to "the best few", while still
                 # telling the policy that several placements were nearly as
                 # good -- which a single label cannot say, and which is most
-                # of the signal when tiles are near-equivalent.
+                # of the signal when tiles are near-equivalent. Scaled by this
+                # position's own spread, because how much placements differ
+                # varies enormously; floored by min_spread, because below that
+                # they do not differ at all.
                 scores = list(getattr(expert, "last_scores", None)
                               or getattr(getattr(expert, "bot", None),
                                          "last_scores", []) or [])
-                row = np.zeros(len(flat), dtype=np.float32)
-                if scores:
-                    indices = np.array([i for i, _ in scores])
-                    raw = np.array([v for _, v in scores], dtype=np.float64)
-                    # Scaled by this position's own spread, not by a fixed
-                    # constant. How much placements differ varies enormously:
-                    # with a quiet board they are all worth about the same,
-                    # and mid-push they are not. A fixed temperature produced
-                    # a target with 8% of its mass on the best action out of
-                    # fifteen -- barely distinguishable from uniform, and so
-                    # carrying almost no signal.
-                    spread = float(raw.std())
-                    scale = max(1e-6, target_temperature * spread) if spread > 1e-9                         else 1e-6
-                    weights = np.exp((raw - raw.max()) / scale)
-                    row[indices] = (weights / weights.sum()).astype(np.float32)
-                else:
-                    row[index] = 1.0
-                targets.append(row)
+                targets.append(_target_row(
+                    scores, index, width, height, slots,
+                    _expert_patience(expert), target_temperature, min_spread,
+                    len(flat)))
             observation, reward, terminated, truncated, _ = env.step(choice)
             rewards.append(float(reward))
             if terminated or truncated:
@@ -194,6 +256,101 @@ def collect(
         play_rate=(played / total) if total else 0.0,
         target=np.asarray(targets, dtype=np.float32) if targets else None,
     )
+
+
+
+def _collect_variants(make_env, make_expert, episodes, gamma, on_episode,
+                      target_temperature, min_spread, variants):
+    """:func:`collect`, recording every observation variant off one playthrough.
+
+    Implemented by re-encoding the live battle once per variant at each
+    decision the plain path would have kept, rather than by replaying the
+    episode. The engine is deterministic and a replay would produce the same
+    states, but it would also cost the same seventeen seconds a battle again
+    for every variant compared.
+    """
+    from ..api.encoding import build_encoding_config, encode_observation
+
+    out: dict[str, dict[str, list]] = {
+        name: {"grid": [], "vector": []} for name in variants}
+    masks: list = []
+    actions: list[int] = []
+    values: list[float] = []
+    targets: list = []
+    played = total = 0
+
+    for episode in range(episodes):
+        env = make_env(episode)
+        observation, _ = env.reset(seed=episode)
+        expert = make_expert(env)
+        configs = {
+            name: build_encoding_config(
+                env.battle.arena, env.blue_deck, env.red_deck, features)
+            for name, features in variants.items()
+        }
+        rewards: list[float] = []
+        start = len(actions)
+
+        while True:
+            mask = env.legal_action_mask()
+            flat = mask.reshape(-1)
+            if not flat.any():
+                break
+            choice = expert(observation, mask, env.battle)
+            if int(flat.sum()) > 1:
+                slots, width, height = (int(v) for v in env.action_space.nvec)
+                index = (int(choice[0]) * width * height
+                         + int(choice[1]) * height + int(choice[2]))
+                for name, config in configs.items():
+                    encoded = encode_observation(
+                        env.battle, env.team, env.registry, config)
+                    out[name]["grid"].append(encoded["grid"])
+                    out[name]["vector"].append(encoded["vector"])
+                masks.append(flat.copy())
+                actions.append(index)
+                total += 1
+                played += int(choice[0] != slots - 1)
+                scores = list(getattr(expert, "last_scores", None)
+                              or getattr(getattr(expert, "bot", None),
+                                         "last_scores", []) or [])
+                targets.append(_target_row(
+                    scores, index, width, height, slots,
+                    _expert_patience(expert), target_temperature, min_spread,
+                    len(flat)))
+            observation, reward, terminated, truncated, _ = env.step(choice)
+            rewards.append(float(reward))
+            if terminated or truncated:
+                break
+
+        running = 0.0
+        tail: list[float] = []
+        for reward in reversed(rewards):
+            running = reward + gamma * running
+            tail.append(running)
+        tail.reverse()
+        kept = len(actions) - start
+        step = max(1, len(tail) // max(1, kept))
+        values.extend(tail[i * step] if i * step < len(tail) else 0.0
+                      for i in range(kept))
+        if on_episode is not None:
+            on_episode(episode + 1, len(actions))
+
+    shared = dict(
+        mask=np.asarray(masks, dtype=bool),
+        action=np.asarray(actions, dtype=np.int64),
+        value=np.asarray(values, dtype=np.float32),
+        episodes=episodes,
+        play_rate=(played / total) if total else 0.0,
+        target=np.asarray(targets, dtype=np.float32) if targets else None,
+    )
+    return {
+        name: Demonstrations(
+            grid=np.asarray(parts["grid"], dtype=np.float32),
+            vector=np.asarray(parts["vector"], dtype=np.float32),
+            **shared,
+        )
+        for name, parts in out.items()
+    }
 
 
 @dataclass(slots=True)
