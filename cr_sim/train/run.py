@@ -496,8 +496,18 @@ def main(argv: list[str] | None = None) -> int:
                 # run, which is not self-play and not what the metrics claim.
                 if parallel is not None:
                     parallel.set_opponent(built.state_dict())
+            # Against a *random* opponent, not an idle one.
+            #
+            # This used to pass _env(None), which is an opponent that never
+            # plays a card. Every inline lift number on this project was
+            # therefore measured against a board where nobody defends, while
+            # the large paired evaluations that produced verdict.json faced a
+            # random agent -- and both were reported as "lift" and compared to
+            # each other. They were never comparable: the control wins 92% of
+            # the idle matches and 26% of the random ones.
             probe_holder["probe"] = evaluation_probe(
-                lambda: _env(None), episodes=args.eval_episodes
+                lambda: _env(_random_opponent(90_000)),
+                episodes=args.eval_episodes,
             )
 
         parallel = None
