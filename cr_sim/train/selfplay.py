@@ -36,8 +36,57 @@ from .nets import ActorCritic
 
 __all__ = [
     "FrozenOpponent", "OpponentPool", "PooledOpponent",
-    "evaluation_probe", "ancestor_probe",
+    "evaluation_probe", "ancestor_probe", "opponent_name",
+    "check_lift_is_named",
 ]
+
+
+def check_lift_is_named(stats: dict) -> dict:
+    """Refuse to record a lift that does not say who it was measured against.
+
+    A comment is not a guardrail, and this class of error has already cost
+    this project two rounds of invalid comparisons: the in-run probe faced an
+    opponent that never plays a card while the large paired verdicts faced a
+    random agent, both were called "lift", and they were compared to each
+    other. The control wins 92% of the idle matches and 26% of the random
+    ones, so the two numbers never lived on the same scale.
+
+    Every writer of a metrics row goes through here, so a lift without its
+    opponent cannot reach the file at all. Rows written before the field
+    existed have no ``eval_opponent`` and are the idle ones.
+    """
+    if "eval_lift_sd" in stats and not stats.get("eval_opponent"):
+        raise ValueError(
+            "a metrics row carries eval_lift_sd but no eval_opponent. A lift "
+            "is meaningless without the opponent it was measured against -- "
+            "the same policy scores wildly differently against an idle and a "
+            "random one. See cr_sim.train.selfplay.opponent_name."
+        )
+    return stats
+
+
+def opponent_name(env: CRSimEnv) -> str:
+    """What ``env``'s opponent is, as a short label to record beside a lift.
+
+    Read off the environment rather than taken as an argument, so a caller
+    cannot label a measurement with an opponent it did not actually face.
+    Policies carry their own ``opponent_name``; anything that does not is
+    reported as ``"unknown"`` rather than guessed at, because a wrong label is
+    worse than an absent one.
+
+    This exists because "lift" was reported on two incompatible scales for
+    most of this project's life: the in-run probe faced an opponent that never
+    plays a card, the large paired verdicts faced a random agent, and the two
+    numbers were compared to each other. The random control wins 92% of the
+    idle matches and 26% of the random ones, so a lift means nothing at all
+    without this string next to it.
+    """
+    from ..api.env import idle_opponent_policy
+
+    policy = getattr(env, "opponent_policy", None)
+    if policy is None or policy is idle_opponent_policy:
+        return "idle"
+    return str(getattr(policy, "opponent_name", None) or "unknown")
 
 
 class FrozenOpponent:
@@ -93,7 +142,11 @@ class FrozenOpponent:
             return (0, 0, 0)
         torch = self._torch
         with torch.no_grad():
-            logits, _ = self._net(
+            # The actor only. An opponent chooses an action and never reads a
+            # value, and with a separate critic encoder ``forward`` spends
+            # about half its time computing one to throw away -- on the batch
+            # of one an opponent does, that is most of the cost of self-play.
+            logits = self._net.policy_logits(
                 torch.from_numpy(observation["grid"]).unsqueeze(0),
                 torch.from_numpy(observation["vector"]).unsqueeze(0),
                 torch.from_numpy(flat).unsqueeze(0),
@@ -219,6 +272,10 @@ def evaluation_probe(
     control = evaluate(control_env, None, episodes=episodes, seeds=seeds)
     control_wins = float(np.mean([c > 0 for c in control["crowns"]]))
     control_return = float(np.mean(control["returns"]))
+    # Recorded here, from the environment the control actually played in, so
+    # every lift this probe produces arrives with the scale it was measured
+    # on attached. See :func:`opponent_name`.
+    faced = opponent_name(control_env)
 
     def probe(net: ActorCritic) -> dict[str, Any]:
         result = evaluate(make_env(), net, episodes=episodes, seeds=seeds, greedy=False)
@@ -232,6 +289,8 @@ def evaluation_probe(
             # In control standard deviations, because the raw gap means
             # nothing without knowing how noisy the control is.
             "eval_lift_sd": (float(np.mean(result["returns"])) - control_return) / spread,
+            "eval_opponent": faced,
+            "eval_episodes": int(episodes),
         }
 
     return probe
