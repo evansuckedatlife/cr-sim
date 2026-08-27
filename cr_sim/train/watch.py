@@ -154,6 +154,25 @@ def _started_at(run: Path) -> float:
     return 0.0
 
 
+def _label_for(run: Path) -> str:
+    """A name that stays unique once runs nest and worktrees join in.
+
+    ``run.name`` alone was fine while every run sat directly in ``runs/``.
+    A sweep writes ``runs/<sweep>/<variant>/metrics.jsonl``, and every
+    variant of every sweep is then called the same thing as some other
+    sweep's -- so the page silently showed one and dropped the rest.
+    """
+    parts = run.resolve().parts
+    if "runs" not in parts:
+        return run.name
+    index = len(parts) - 1 - parts[::-1].index("runs")
+    label = "/".join(parts[index + 1:])
+    if "worktrees" in parts:
+        tag = parts[parts.index("worktrees") + 1].replace("agent-", "")[:7]
+        return f"{tag}:{label}"
+    return label
+
+
 def _note_of(run: Path) -> str:
     """One line of prose from config.json saying what this entry is.
 
@@ -323,6 +342,8 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .tabbar{display:flex;align-items:flex-end;gap:10px;border-bottom:1px solid var(--rule)}
 .tabs{display:flex;gap:2px;flex:1;overflow-x:auto;scrollbar-width:none;padding-bottom:1px}
 .tabs::-webkit-scrollbar{display:none}
+/* Expanded: every run visible at once instead of one scrolling row. With two dozen runs the strip hid most of them behind a scroll gesture that gives no sign there is anything to scroll to. */
+.tabs.expanded{flex-wrap:wrap;overflow:visible;max-height:none;row-gap:3px;padding-bottom:4px}
 .tab{appearance:none;border:1px solid transparent;border-bottom:0;background:none;
   font-family:Archivo,sans-serif;font-size:13px;font-weight:600;color:var(--muted);
   padding:8px 12px;border-radius:3px 3px 0 0;cursor:pointer;display:flex;align-items:center;
@@ -414,6 +435,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--rule);font-si
 
 <div class="tabbar">
   <div class="tabs" id="tabs" role="tablist"></div>
+  <button class="split-toggle" id="expand" aria-pressed="false" title="Show every run at once">All runs</button>
   <button class="split-toggle" id="split" aria-pressed="false">Split</button>
 </div>
 
@@ -702,6 +724,23 @@ function paintTabs(){
   Array.prototype.forEach.call(document.querySelectorAll('.tab'),function(t){
     t.addEventListener('click',function(){picked[0]=t.dataset.run;remember('crsim-pane0',picked[0]);draw();});
   });
+  var ex=document.getElementById('expand');
+  ex.textContent=expanded?'Collapse':'All '+DATA.order.length;
+  ex.setAttribute('aria-pressed',String(expanded));
+  document.getElementById('tabs').classList.toggle('expanded',expanded);
+}
+
+/* Repainted on every poll, so the expanded state has to survive a repaint
+   and a reload -- collapsing the strip under someone mid-scan is how the
+   page loses the run they were looking for. */
+var expanded=recall('crsim-expanded','')==='1';
+
+function wireExpand(){
+  document.getElementById('expand').addEventListener('click',function(){
+    expanded=!expanded;
+    remember('crsim-expanded',expanded?'1':'');
+    paintTabs();
+  });
 }
 
 function draw(){
@@ -763,6 +802,9 @@ function poll(){
   toggle.addEventListener('click',function(){
     split=!split;remember('crsim-split',split?'1':'0');
     toggle.setAttribute('aria-pressed',String(split));draw();});
+
+  wireExpand();
+  if(DATA.order.length<3) document.getElementById('expand').style.display='none';
 
   var bell=document.getElementById('bell');
   function paintBell(){
@@ -906,13 +948,23 @@ def main(argv: list[str] | None = None) -> int:
         """
         if args.runs:
             return list(args.runs)
-        root = ROOT / "runs"
-        if not root.is_dir():
-            return []
-        found = [
-            d for d in root.iterdir()
-            if d.is_dir() and (d / "metrics.jsonl").is_file()
-        ]
+        roots = [ROOT / "runs"]
+        # Agents work in git worktrees, each with its own runs/ directory, so
+        # the experiments actually moving right now are usually not in this
+        # checkout at all. A page showing only main's runs showed nothing
+        # live while four sweeps were running a directory away.
+        worktrees = ROOT / ".claude" / "worktrees"
+        if worktrees.is_dir():
+            roots += [w / "runs" for w in sorted(worktrees.iterdir())
+                      if (w / "runs").is_dir()]
+        found: list[Path] = []
+        for root in roots:
+            if not root.is_dir():
+                continue
+            # rglob rather than iterdir: a sweep nests its variants one level
+            # deeper than a plain run, and iterdir could not see them.
+            found += [m.parent for m in root.rglob("metrics.jsonl")]
+        found = list(dict.fromkeys(found))
         # Ordered by when each run started, not by name. Alphabetical put
         # today's run between two from last week, and the question being
         # asked of this page is almost always "what changed since the last
@@ -943,10 +995,11 @@ def main(argv: list[str] | None = None) -> int:
             by_update = {r.get("updates", i): r for i, r in enumerate(rows)}
             rows = [by_update[k] for k in sorted(by_update)]
             live = metrics.is_file() and (now - metrics.stat().st_mtime) < _LIVE_SECONDS
-            collected.append((run.name, rows, live))
+            label = _label_for(run)
+            collected.append((label, rows, live))
             note = _note_of(run)
             if note:
-                notes[run.name] = note
+                notes[label] = note
         if not collected:
             return 0
         html, body = render_multi(collected, notes=notes)
