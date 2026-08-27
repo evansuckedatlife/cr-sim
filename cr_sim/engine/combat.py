@@ -38,6 +38,7 @@ __all__ = [
     "advance_attack",
     "ramp_damage",
     "apply_hit",
+    "damage_for",
     "apply_area_damage",
 ]
 
@@ -67,6 +68,11 @@ class AttackState:
     #: the counter is what a retarget or a stun resets. Without it an Inferno
     #: Tower is a flat 17-damage building.
     locked_ticks: int = 0
+    #: Swings this unit has landed in total, which drives ``AttackSequence``.
+    #: Deliberately *not* reset by a retarget: Monk's third hit is his third
+    #: hit, not his third hit on one victim, so pulling him onto something else
+    #: does not save you from the one that hurts.
+    swings: int = 0
 
     def engage(self, spec: UnitSpec, target_id: int) -> None:
         """Begin winding up against a target.
@@ -130,7 +136,7 @@ class DamageEvent:
     lethal: bool = False
 
 
-def _damage_for(
+def damage_for(
     spec: UnitSpec,
     target: Entity,
     attacker: Entity | None = None,
@@ -154,17 +160,31 @@ def _damage_for(
     return damage
 
 
-def ramp_damage(spec: UnitSpec, locked_ticks: int) -> int | None:
+def ramp_damage(
+    spec: UnitSpec, locked_ticks: int, sequence_index: int = 0
+) -> int | None:
     """Where a ramping attacker is on its damage ladder, or None if it has none.
 
-    Inferno Tower reads 17 / 62 / 331 with two 2000ms steps between them: four
-    seconds from tickle to melting a Golem. The escalation is the card -- it is
-    why an Inferno answers a tank and is useless against a swarm, and why
-    resetting it is worth a whole card.
+    Two different ladders share the ``VariableDamage`` columns, and which one a
+    unit is on is decided by whether it also carries ``VariableDamageTime``.
+
+    **Timed.** Inferno Tower reads 17 / 62 / 331 with two 2000ms steps between
+    them: four seconds from tickle to melting a Golem. The escalation is the
+    card -- it is why an Inferno answers a tank and is useless against a swarm,
+    and why resetting it is worth a whole card.
+
+    **Per swing.** Monk reads 55 / 55 / 165 with *no* time steps at all, and an
+    ``AttackSequence`` of ``[0, 1, 2]`` instead. Walked as a timed ladder those
+    steps never advance and he swings for 55 forever, which deletes the card's
+    entire mechanic: every third hit is triple damage and a knockback. The
+    sequence index cycles with the unit's swing count, so the ladder repeats
+    rather than topping out.
     """
     ladder = spec.variable_damage
     if not ladder:
         return None
+    if spec.attack_sequence_length > 0 and not spec.variable_damage_ticks:
+        return ladder[min(sequence_index, len(ladder) - 1)]
     stage = 0
     elapsed = locked_ticks
     for step in spec.variable_damage_ticks:
@@ -187,6 +207,10 @@ class PendingHit:
     #: both mechanics land through one path rather than two special cases
     #: inside the damage calculation.
     damage: int | None = None
+    #: Where this swing sits in the unit's ``AttackSequence``. Carried on the
+    #: hit because the knockback that rides Monk's third swing has to know it
+    #: was the third, and only the attack cycle counts them.
+    sequence_index: int = 0
 
 
 def advance_attack(
@@ -223,18 +247,25 @@ def advance_attack(
     state.loaded = True
     state.cooldown = max(1, spec.hit_speed_ticks)
     state.stop_ticks = spec.stop_time_after_attack_ticks
+    index = (
+        state.swings % spec.attack_sequence_length
+        if spec.attack_sequence_length > 0
+        else 0
+    )
+    state.swings += 1
     return PendingHit(
         attacker=attacker,
         spec=spec,
         target=target,
-        damage=ramp_damage(spec, state.locked_ticks),
+        damage=ramp_damage(spec, state.locked_ticks, index),
+        sequence_index=index,
     )
 
 
 def apply_hit(hit: PendingHit, tick: int) -> DamageEvent | None:
     """Apply a decided hit. Its target may already have died this tick."""
     dealt = hit.target.apply_damage(
-        _damage_for(hit.spec, hit.target, hit.attacker, hit.damage)
+        damage_for(hit.spec, hit.target, hit.attacker, hit.damage)
     )
     if not dealt:
         return None
@@ -272,7 +303,7 @@ def apply_area_damage(
             continue
         if distance_squared(origin[0], origin[1], target.x, target.y) > radius_squared:
             continue
-        dealt = target.apply_damage(_damage_for(spec, target))
+        dealt = target.apply_damage(damage_for(spec, target))
         if dealt:
             events.append(
                 DamageEvent(

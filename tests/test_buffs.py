@@ -1,7 +1,8 @@
 """Buff system: timed status effects, read directly against real game data.
 
 These tests are about mechanics, not code shape: a Poison cloud really does
-tick 8 times over its 8 second life with the first hit landing immediately, a
+tick 8 times over its 8 second life with the first hit landing one interval
+after contact rather than on it, a
 non-stacking buff really does refresh instead of piling up, and the raw
 numbers this module reads for Freeze/Poison/Ice Wizard really do match the
 percentages every Clash Royale player knows. See the module docstring in
@@ -303,3 +304,32 @@ def test_active_buff_is_a_plain_mutable_record():
     assert active.spec is r
     active.ticks_left -= 1
     assert active.ticks_left == 4
+
+
+# ------------------------------------------------- crown-tower damage forms
+
+
+def test_a_flat_crown_tower_figure_replaces_the_troop_damage():
+    """``CrownTowerDamagePerHit`` is a second, unrelated spelling.
+
+    Six buffs in the build carry it instead of ``CrownTowerDamagePercent``:
+    Vines (14 against 60 damage-per-second), Goblin Curse (4 against 36), the
+    Snowball, Cannon and Tesla evolutions, and Dark Magic's three tiers. Read
+    only the percentage column and every one of them hits a crown tower for its
+    full troop damage -- for Dark Magic, about seven times what the card does.
+    """
+    vines = spec("Vines_Trap_Snare_Base")
+    assert vines.crown_tower_damage_per_hit == 14
+    assert vines.crown_tower_damage_percent == 0, "it carries no percentage form"
+    assert vines.damage_to(is_crown_tower=False) == vines.damage_per_second
+    assert vines.damage_to(is_crown_tower=True) == 14
+    assert vines.damage_to(is_crown_tower=True) < vines.damage_to(is_crown_tower=False)
+
+
+def test_the_percentage_form_still_works_where_a_buff_uses_it():
+    """Poison is ``CrownTowerDamagePercent: -77`` and no flat figure, so the
+    two spellings must not shadow each other."""
+    poison = spec("Poison")
+    assert poison.crown_tower_damage_per_hit == 0
+    assert poison.crown_tower_damage_percent < 0
+    assert 0 < poison.damage_to(is_crown_tower=True) < poison.damage_per_second

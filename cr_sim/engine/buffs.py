@@ -60,20 +60,26 @@ somewhere harder to find. Whoever wires :func:`apply_multiplier` up to a
 unit's actual speed should see this docstring and decide with the full
 picture -- flagged in the module's final report, not silently resolved here.
 
-**Damage-over-time: the first application is immediate.**
-:class:`~cr_sim.engine.areaeffects.AreaEffect` already answers this question
-for the identical mechanism one layer up (an area effect's own periodic
-damage) and says so explicitly: it seeds ``ticks_to_next = 0`` so the first
-hit lands "on the tick it lands rather than after one interval", naming
-Poison as the example ("a Poison cloud that waited would let a unit walk
-through the first quarter-second untouched"). ``ActiveBuff`` mirrors that
-field (``ticks_to_next_damage``) and the same seeding for consistency. This
-also reproduces a fact every player can check: Poison's ``LifeDuration`` is
-8000ms with ``HitFrequency`` 1000ms, and Poison is universally described as
-"8 ticks over 8 seconds" -- with an immediate first tick and a duration of
-exactly 8000ms/8 ticks, applications land at relative offsets 0, 1000, ...,
-7000ms, which is 8 of them. Waiting one interval before the first hit would
-only produce 7 within the same window.
+**Damage-over-time: the first application lands after a full interval, not on
+contact.** ``ActiveBuff.ticks_to_next_damage`` is seeded at one whole
+``HitFrequency`` and :meth:`BuffState.tick` counts down before it fires, so a
+buff applied on tick *t* first hurts on tick *t + HitFrequency*.
+
+This is deliberately *not* the same clock as an area effect's own periodic
+damage one layer up, which is immediate --
+:class:`~cr_sim.engine.areaeffects.AreaEffect` seeds ``ticks_to_next = 0``
+because Zap has to be instant. The two mechanisms look alike and behave
+differently on their first tick, which is exactly why they are separate
+fields.
+
+The count still comes out at the figure players know, because a cloud
+re-applies its buff on every scan and a refresh extends the remaining
+duration without restarting the damage rhythm: the status therefore outlives
+the cloud by up to one full ``BuffTime``, and the last tick still lands.
+Measured end to end in this engine, a Poison (``LifeDuration`` 8000ms,
+``HitFrequency`` 1000ms) deals its 8 ticks of 92 at 1000ms through 8000ms for
+736 total, and an Earthquake 3 ticks for 243 -- the published totals for both,
+one interval later than an immediate first tick would put them.
 
 **DamagePerSecond is a rate, not a per-hit amount, and needs converting.**
 Most damage buffs tick once a second (``HitFrequency: 1000``), so for them
@@ -128,6 +134,7 @@ __all__ = [
     "as_delta",
     "BuffSpec",
     "build_buff_spec",
+    "buff_spec_from_row",
     "ActiveBuff",
     "BuffState",
     "apply_multiplier",
@@ -245,6 +252,15 @@ class BuffSpec:
     #: existing one's timer instead. See the module docstring.
     stacks: bool
     crown_tower_damage_percent: int
+    #: A flat per-application amount against a crown tower, replacing the
+    #: ordinary damage rather than scaling it. Six buffs in the build use this
+    #: spelling instead of ``CrownTowerDamagePercent`` -- Vines (14 against
+    #: 60), Goblin Curse (4 against 36), the Snowball, Cannon and Tesla
+    #: evolutions, and Dark Magic's three damage tiers (38 against 272 at the
+    #: top). It is a separate column, not a synonym: read only the percentage
+    #: one, every one of those buffs hits a tower for its full troop damage,
+    #: which for Dark Magic is seven times too much.
+    crown_tower_damage_per_hit: int = 0
     #: Multiplier on damage dealt to a *building* (not a crown tower), read
     #: the same ``>= 100 is a whole multiplier`` way as every other field in
     #: this column family. Earthquake is the card built on it -- 350, a flat
@@ -300,6 +316,8 @@ class BuffSpec:
         also "a building" here; the two multipliers are mutually exclusive by
         construction, not by a check against each other.
         """
+        if is_crown_tower and self.crown_tower_damage_per_hit:
+            return self.crown_tower_damage_per_hit
         if is_crown_tower and self.crown_tower_damage_percent:
             return apply_multiplier(self.damage_per_second, self.crown_tower_damage_percent)
         if is_building and self.building_damage_percent:
@@ -326,6 +344,27 @@ def build_buff_spec(
         raw: Mapping[str, Any] = data.resolve(f"BUFF.{name}")
     except (UnknownEntity, KeyError):
         return None
+    return buff_spec_from_row(raw, scale, level=level, clock=clock, name=name)
+
+
+def buff_spec_from_row(
+    raw: Mapping[str, Any],
+    scale: RarityScale,
+    *,
+    level: int,
+    clock: TickClock,
+    name: str | None = None,
+) -> BuffSpec:
+    """Convert an already-resolved buff row to engine units.
+
+    Split out from :func:`build_buff_spec` because not every buff in the build
+    has a namespace entry to resolve. Dark Magic's three damage tiers are
+    written out inside the action that applies them and appear nowhere in
+    ``BUFF``, so a name-only builder cannot reach them; the same conversion
+    has to work from the row itself.
+    """
+    if name is None:
+        name = str(raw.get("Name", ""))
 
     hit_frequency_ticks = clock.ticks(raw.get("HitFrequency"))
     raw_dps = _int(raw.get("DamagePerSecond"))
@@ -362,6 +401,11 @@ def build_buff_spec(
         hit_frequency_ticks=hit_frequency_ticks,
         stacks=_bool(raw.get("EnableStacking")),
         crown_tower_damage_percent=_int(raw.get("CrownTowerDamagePercent")),
+        # Scaled on the same ladder as the ordinary damage: it is a damage
+        # figure at level 1, not a ratio.
+        crown_tower_damage_per_hit=scale.scale(
+            _int(raw.get("CrownTowerDamagePerHit")), level
+        ),
         building_damage_percent=_int(raw.get("BuildingDamagePercent")),
         heal_per_second=heal_per_application,
         allowed_over_heal_percent=_int(raw.get("AllowedOverHealPerc")),

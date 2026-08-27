@@ -48,6 +48,7 @@ from .combat import (
     advance_attack,
     apply_area_damage,
     apply_hit,
+    damage_for,
 )
 from .pathgrid import PathGrid, load_path_costs
 from .pathing import (
@@ -59,7 +60,13 @@ from .pathing import (
 )
 from .areaeffects import AreaEffect, AreaEffectSpec, build_area_effect_spec
 from .actions import ActionContext, ActionInterpreter
-from .buffs import BuffSpec, BuffState, apply_delta, build_buff_spec
+from .buffs import (
+    BuffSpec,
+    BuffState,
+    apply_delta,
+    buff_spec_from_row,
+    build_buff_spec,
+)
 from .projectiles import (
     Projectile,
     ProjectileSpec,
@@ -76,6 +83,7 @@ from .specs import UnitSpec, build_tower_spec, build_unit_spec
 __all__ = [
     "Battle", "BattleConfig", "Player", "BattleResult", "KING_ACTIVATION_MS",
     "CLONE_HITPOINTS",
+    "CLONE_SHIELD_HITPOINTS",
     "MIRROR_EXTRA_ELIXIR",
 ]
 
@@ -85,12 +93,36 @@ __all__ = [
 #: as an anchor rather than presented as read.
 MIRROR_EXTRA_ELIXIR = 1
 
-#: A clone's hitpoints. Every other number the Clone spell needs is in the
-#: build -- the offset, the shield rule, whether a clone may be cloned -- but
-#: this one is in none of them, so it is the card's documented behaviour rather
-#: than a value read from the files. See `clone-hitpoints` in
+#: A clone's hitpoints, read from the card's own displayed stat sheet:
+#: ``STATS.clone`` carries a literal ``Value = "1"`` row under
+#: ``TID_SPELL_ATTRIBUTE_CLONE_HEALTH``. See `clone-hitpoints` in
 #: reference/anchors.json.
 CLONE_HITPOINTS = 1
+
+#: And its shield, from the row beside it --
+#: ``TID_SPELL_ATTRIBUTE_CLONE_SHIELD_HEALTH``, also a literal 1. A cloned Dark
+#: Prince keeps *a* shield rather than *its* shield: one point, so one hit of
+#: anything strips it and the next kills the body.
+CLONE_SHIELD_HITPOINTS = 1
+
+
+@dataclass(slots=True)
+class _Counter:
+    """One armed ``ActionCounter`` -- Ronin's parry, and nothing else in this build.
+
+    ``defense_scalar`` is the percentage of a parried hit the holder still
+    takes (0 for Ronin: the swing is fully blocked) and ``damage_scalar`` the
+    percentage handed back to whoever swung (200, displayed on the card as
+    ``parry_damage``). Both are read from the row rather than assumed, because
+    a future counter with a partial block would otherwise be silently wrong.
+    """
+
+    cooldown_ticks: int
+    ready_tick: int
+    damage_scalar: int
+    defense_scalar: int
+    self_action: object = None
+    instigator_action: object = None
 
 
 def _int_global(globals_map: dict, key: str, default: int) -> int:
@@ -209,6 +241,7 @@ class Battle:
         "fire_pending_waves",
         "advance_deploy_timers",
         "advance_lifetimes",
+        "advance_grounding",
         "run_actions",
         "run_spawners",
         "update_buffs",
@@ -271,6 +304,8 @@ class Battle:
         "_hit_counts",
         "actions",
         "_buff_specs",
+        "_grounded",
+        "_counters",
     )
 
     def __init__(
@@ -298,6 +333,12 @@ class Battle:
             self._place_area_from_action,
             self._count_living,
             self._apply_buff_from_action,
+            nearby=self._nearby_entities,
+            set_grounded=self._set_grounded,
+            change_data=self._change_game_object_data,
+            deal_damage=self._deal_flat_damage,
+            arm_counter=self._arm_counter,
+            fire_projectile=self._fire_projectile_from_action,
         )
 
         reset_entity_ids()
@@ -349,6 +390,11 @@ class Battle:
         self._occupancy_signature: tuple = ()
         #: Hits each unit has landed, for the after-hits buff ladders.
         self._hit_counts: dict[int, int] = {}
+        #: Flying units currently pinned to the ground, and for how much
+        #: longer. Vines and the Hunter evolution's net both work this way.
+        self._grounded: dict[int, int] = {}
+        #: Armed parries, by entity id. Ronin's is the only one in the build.
+        self._counters: dict[int, _Counter] = {}
         _globals = self.data.globals_map()
         # Grace band that stops a unit flickering between two equidistant enemies.
         _ext = _globals.get('LOGIC_RANGE_EXTENSION_TO_KEEP_TARGET', 0)
@@ -829,6 +875,30 @@ class Battle:
             if not entity.dead and entity.lifetime_left > 0 and not entity.is_deploying:
                 entity.tick_lifetime()
 
+    def _phase_advance_grounding(self) -> None:
+        """Let netted air units back into the air when their timer runs out.
+
+        Its own countdown rather than a buff, because being pulled down is not
+        a modifier on anything a buff carries -- it changes which half of the
+        board the unit belongs to, and every layer that asks ``entity.flying``
+        (targeting, collision, area effects) has to see the change with no
+        further plumbing.
+        """
+        if not self._grounded:
+            return
+        expired: list[int] = []
+        for entity_id, left in self._grounded.items():
+            left -= 1
+            if left > 0:
+                self._grounded[entity_id] = left
+                continue
+            expired.append(entity_id)
+        for entity_id in expired:
+            del self._grounded[entity_id]
+            entity = self._entity(entity_id)
+            if entity is not None and not entity.dead and entity.spec is not None:
+                entity.flying = entity.spec.flying
+
     def _phase_run_actions(self) -> None:
         """Advance the ACTION graph.
 
@@ -859,6 +929,16 @@ class Battle:
 
         ``SpawnStartTime`` delays only the first wave; where it is absent the
         first wave waits a full cycle like every one after it.
+
+        **No ``SpawnPauseTime`` means one wave, not an infinitely fast one.**
+        Four entities in the build set ``SpawnCharacter`` with no pause, and
+        every one of them also sets ``SpawnAttach``: they are riders, not
+        spawners. Goblin Giant's two Spear Goblins and Ram Rider's rider are
+        put on their carrier's back once, when it lands. Falling back to a
+        one-tick period turned that into a wave *every tick*: a single Goblin
+        Giant produced 242 Spear Goblins in five seconds and a Ram Rider 121
+        riders, which is not a rounding error in a card, it is a different
+        game.
         """
         for entity in self.entities:
             spec = entity.spec
@@ -868,13 +948,17 @@ class Battle:
                 # A hut that has not finished landing is not producing yet.
                 continue
             due = self._spawn_timers.get(entity.id)
+            if due is not None and due < 0:
+                continue  # a one-shot rider that has already been put down
             if due is None:
                 due = spec.spawn_start_ticks or spec.spawn_pause_ticks
             if due > 0:
                 self._spawn_timers[entity.id] = due - 1
                 continue
 
-            self._spawn_timers[entity.id] = max(1, spec.spawn_pause_ticks)
+            self._spawn_timers[entity.id] = (
+                spec.spawn_pause_ticks if spec.spawn_pause_ticks > 0 else -1
+            )
             if spec.spawn_limit:
                 living = [
                     cid for cid in self._spawn_children.get(entity.id, ())
@@ -1079,9 +1163,24 @@ class Battle:
                 # one -- without this it is untargetable for its whole life.
                 hit.attacker.buffs.on_attack()
             launched = self._launch(hit)
-            event = None if launched else apply_hit(hit, self.tick)
+            event = None
+            if not launched:
+                # Ronin's parry, on the melee path. A ranged attacker's damage
+                # is carried by the projectile and is parried where the
+                # projectile lands instead -- checking here as well would spend
+                # the parry on the swing and still let the arrow through.
+                incoming = damage_for(hit.spec, hit.target, hit.attacker, hit.damage)
+                parried = self._try_parry(hit.attacker, hit.target, incoming)
+                if parried is None:
+                    event = apply_hit(hit, self.tick)
+                else:
+                    self._deal_flat_damage(hit.attacker.id, hit.target, parried)
             if event is not None:
                 self.damage_log.append(event)
+            # Displacement last, so the shot leaves from where the unit stood
+            # when it fired and a shoved victim is shoved from where it was hit.
+            self._recoil(hit)
+            self._melee_pushback(hit)
             if hit.spec.kamikaze:
                 # The attack *is* the death: Ice Spirit, Balloon and Wall
                 # Breakers each land one hit and are consumed by it. Without
@@ -1105,6 +1204,93 @@ class Battle:
                         self.tick,
                     )
                 )
+
+    def _recoil(self, hit) -> None:
+        """Throw an attacker backwards off its own shot.
+
+        ``AttackPushBack`` is set by exactly three units and every one of them
+        is a card you can watch do it: Firecracker kicks a full tile back on
+        each volley (which is why she drifts away from the bridge she is
+        defending), Sparky 0.75, and the evolved Battle Ram two whole tiles --
+        with ``KeepChargingAfterAttack`` beside it, so the recoil is what buys
+        it the run-up to charge again.
+
+        It is a *self* push and is deliberately not gated on
+        ``IgnorePushback``: that flag is this engine's marker for "cannot be
+        displaced by someone else" (a Log, a Fireball, a crowd), and Sparky
+        carries it while still recoiling from her own gun. Gating on it would
+        leave the field inert for two of its three users.
+
+        Distinct from ``PROJECTILE.Pushback``, the column that shoves the
+        *victim* -- that one is already read, on the projectile, and several
+        cards carry one field without the other.
+        """
+        spec = hit.spec
+        if not spec.attack_push_back:
+            return
+        attacker, target = hit.attacker, hit.target
+        if attacker.dead or attacker.kind is not EntityKind.TROOP:
+            return
+        x, y = push_away(
+            (target.x, target.y), (attacker.x, attacker.y), spec.attack_push_back
+        )
+        self._step_aside(attacker, x, y)
+
+    def _melee_pushback(self, hit) -> None:
+        """The shove that rides a particular swing of an attack sequence.
+
+        Monk is the card: ``MeleePushback3`` of 1800 against an
+        ``AttackSequence`` of three, so the same third swing that lands triple
+        damage also clears 1.8 tiles of space around him.
+        ``IsMeleePushbackAll3`` widens it from the unit he hit to everything he
+        can reach -- the data gives no radius of its own for that, so his own
+        melee ``Range`` is used, which is the distance the swing covers.
+        """
+        spec = hit.spec
+        pushes = spec.melee_pushback
+        if not pushes or hit.sequence_index >= len(pushes):
+            return
+        amount = pushes[hit.sequence_index]
+        if amount <= 0:
+            return
+        attacker = hit.attacker
+        hits_all = (
+            hit.sequence_index < len(spec.melee_pushback_all)
+            and spec.melee_pushback_all[hit.sequence_index]
+        )
+        victims = [hit.target]
+        if hits_all:
+            reach = spec.attack_range
+            victims = [
+                e
+                for e in self._index.near(attacker.x, attacker.y, reach)
+                if e.team is not attacker.team
+                and e.kind is EntityKind.TROOP
+                and not e.dead
+                and e.is_targetable
+                and distance(attacker.x, attacker.y, e.x, e.y)
+                <= reach + e.collision_radius + attacker.collision_radius
+            ]
+        for victim in victims:
+            if victim.kind is not EntityKind.TROOP or self._pushback_immune(victim):
+                continue
+            x, y = push_away((attacker.x, attacker.y), (victim.x, victim.y), amount)
+            self._step_aside(victim, x, y)
+
+    def _step_aside(self, entity: Entity, x: int, y: int) -> None:
+        """Move an entity to a shoved-to position, refusing illegal ground.
+
+        Deliberately not :meth:`_place`: that one also feeds the charge
+        accumulator, and being knocked about must not build a Prince's charge.
+        """
+        if self.arena.is_walkable(x, y, flying=entity.flying):
+            entity.x, entity.y = x, y
+            return
+        if self.arena.is_walkable(x, entity.y, flying=entity.flying):
+            entity.x = x
+            return
+        if self.arena.is_walkable(entity.x, y, flying=entity.flying):
+            entity.y = y
 
     def _after_hits(self, hit) -> None:
         """Grant a unit the buff it has earned by landing hits.
@@ -1259,9 +1445,18 @@ class Battle:
             # The reworked spells keep everything here. AEO.Graveyard_rework
             # carries only a radius and a lifetime; its twelve skeletons, their
             # timings and their ring positions are all in the action graph.
+            #
+            # The spell's own rarity and level ride along, because anything the
+            # graph applies scales on the *caster's* ladder. Dark Magic's
+            # damage buffs are built from this, and without it they would be
+            # scaled by whatever unit they happened to land on.
             self.actions.start(
                 aspec.on_start_action,
-                ActionContext(team=team, x=x, y=y, source=effect),
+                ActionContext(
+                    team=team, x=x, y=y, source=effect,
+                    variables={"buff_rarity": rarity, "buff_level": level,
+                               "owner": owner_id},
+                ),
                 self.tick,
             )
         return effect
@@ -1571,6 +1766,12 @@ class Battle:
 
     def _deal(self, pspec: ProjectileSpec, attacker: Entity | None, victim: Entity) -> None:
         amount = pspec.damage_to(victim.kind is EntityKind.TOWER)
+        parried = self._try_parry(attacker, victim, amount)
+        if parried is not None:
+            # A Ronin parries an arrow the same way he parries a sword: the
+            # counter is armed against whatever hits him next, and the shot's
+            # owner is the instigator that takes the reflection.
+            amount = parried
         dealt = victim.apply_damage(amount)
         if dealt:
             self.damage_log.append(
@@ -1907,6 +2108,8 @@ class Battle:
                 self._spawn_children.pop(entity.id, None)
                 self._charge.pop(entity.id, None)
                 self._hit_counts.pop(entity.id, None)
+                self._grounded.pop(entity.id, None)
+                self._counters.pop(entity.id, None)
                 died = True
                 if entity.kind is EntityKind.TOWER:
                     self.players[entity.team.opponent].crowns += 1
@@ -1958,6 +2161,16 @@ class Battle:
             self._place_area(
                 entity.team, spec.death_area_effect, spec.rarity, spec.level,
                 entity.x, entity.y, owner_id=entity.id,
+            )
+
+        if spec.death_spawn_projectile:
+            # Detonated where the body fell. Goblin Demolisher is the card that
+            # needs it most: its kamikaze form has no Damage and no Projectile
+            # column of its own, so this dynamite -- 158 damage over 2.5 tiles
+            # with a 2-tile shove -- is the entire payload of a suicide unit
+            # that otherwise charged a building and did nothing to it.
+            self._fire_projectile_from_action(
+                entity, spec.death_spawn_projectile, entity.x, entity.y
             )
 
         for character in (spec.death_spawn_character, spec.death_spawn_character2):
@@ -2083,8 +2296,8 @@ class Battle:
             owner_id=source.id if source is not None else 0,
         )
 
-    def _apply_buff_from_action(self, ctx, name: str, row) -> None:
-        """Put a named buff on whatever the action is running against.
+    def _apply_buff_from_action(self, ctx, name, row) -> None:
+        """Put a buff on whatever the action is running against.
 
         The duration is the one puzzle. A buff carries no lifetime of its own
         -- that belongs to whatever applies it -- and these actions carry a
@@ -2093,20 +2306,221 @@ class Battle:
         is right for the case this exists for: Goblin Curse's cloud re-applies
         every 50ms for six seconds, so each application only has to outlive the
         next one.
+
+        ``name`` may be the buff written out in place rather than a reference.
+        Dark Magic's three damage tiers exist only inside the action that
+        applies them -- there is no ``BUFF.DarkMagicAOE_Damage_lv3`` to look
+        up -- so an inline row is built directly.
+
+        Which power ladder to scale on is the second puzzle, and it is the
+        *caster's*, not the victim's. A Dark Magic is an Epic spell whatever
+        it lands on; taking the rarity off the unit being hit would scale the
+        spell by the Knight it happened to catch. The effect that started the
+        chain seeds ``buff_rarity``/``buff_level`` for exactly that reason, and
+        the victim's own spec is only the fallback for the older callers
+        (Goblin Curse) that never set them.
         """
         target = ctx.source
         if target is None or target.dead:
             return
         spec = target.spec
-        bspec = self._buff_spec(
-            name,
-            spec.rarity if spec is not None else "Common",
-            spec.level if spec is not None else self.config.level,
-        )
+        rarity = ctx.variables.get("buff_rarity")
+        if not isinstance(rarity, str) or not rarity:
+            rarity = spec.rarity if spec is not None else "Common"
+        level = ctx.variables.get("buff_level")
+        if not isinstance(level, int):
+            # `is int` rather than truthiness: a Champion's internal level is 1
+            # today but the ladder is free to put a rarity at 0, and a falsy
+            # test there would silently reach for the config default instead.
+            level = spec.level if spec is not None else self.config.level
+        if isinstance(name, str):
+            bspec = self._buff_spec(name, rarity, level)
+        else:
+            bspec = buff_spec_from_row(
+                name, self.levels.get(rarity), level=level, clock=self.clock
+            )
         if bspec is None:
             return
         duration = ctx.variables.get("buff_ticks") or self.clock.ticks(row.get("SpawnTime"))
         self._apply_buff(target, bspec, max(1, int(duration)), source=ctx.variables.get("owner", 0))
+
+    # -- the rest of what the ACTION graph asks the battle for --------------
+
+    def _nearby_entities(self, x: int, y: int, radius: int) -> list[Entity]:
+        """Everything the spatial index has near a point.
+
+        Deliberately unfiltered: which of these an action may act on is a
+        ``FILTER`` row, and only the interpreter resolves data.
+        """
+        return list(self._index.near(x, y, radius))
+
+    def _set_grounded(self, entity: Entity, ticks: int) -> None:
+        """Pin a unit to the ground for ``ticks``.
+
+        Applied to anything, not only to fliers: the Royal Hogs evolution uses
+        the same node to end its river jump, and a ground unit that is already
+        grounded simply stays that way.
+        """
+        if ticks <= 0 or entity.dead:
+            return
+        entity.flying = False
+        self._grounded[entity.id] = max(self._grounded.get(entity.id, 0), ticks)
+
+    def _change_game_object_data(
+        self, entity: Entity, character: str, reset_target: bool
+    ) -> bool:
+        """Replace a live unit's character definition with another.
+
+        Cannon Cart's half-health collapse into a stationary ``BrokenCannon``
+        and Goblin Demolisher's into its kamikaze form are both this. Current
+        hitpoints ride across unchanged -- both cards transform *at* half
+        health and must stay there -- while everything the new definition
+        describes (kind, speed, range, hitbox, mass, lifetime, whether it
+        flies) is taken from the new spec.
+
+        The attack state is dropped as well. The kamikaze form has its own
+        ``LoadTime``, and carrying a half-finished windup from the old form
+        across would let it swing early on a weapon it no longer has.
+        """
+        if entity.dead:
+            return False
+        old = entity.spec
+        try:
+            spec = self._spec(
+                character, rarity=old.rarity if old is not None else "Common"
+            )
+        except Exception:
+            self.actions.unsupported[f"<changedata:{character}>"] += 1
+            return False
+        entity.spec = spec
+        entity.kind = spec.kind
+        entity.max_hitpoints = spec.hitpoints
+        if entity.hitpoints > spec.hitpoints:
+            entity.hitpoints = spec.hitpoints
+        entity.collision_radius = spec.collision_radius
+        entity.mass = spec.mass
+        entity.flying = spec.flying
+        entity.lifetime_left = spec.lifetime_ticks
+        self._attacks.pop(entity.id, None)
+        self._charge.pop(entity.id, None)
+        if reset_target:
+            entity.target_id = 0
+        # Nothing else to do about the path grid: `_refresh_occupancy` builds
+        # its signature from every live BUILDING and TOWER, so a Cannon Cart
+        # that has just become a building shows up there on its own and troops
+        # start routing around the wreck.
+        self._begin_actions(entity)
+        return True
+
+    def _deal_flat_damage(self, source_id: int, target: Entity, amount: int) -> None:
+        """Damage from an action rather than from an attack."""
+        if target.dead or amount <= 0:
+            return
+        dealt = target.apply_damage(amount)
+        if dealt:
+            self.damage_log.append(
+                DamageEvent(
+                    tick=self.tick,
+                    attacker_id=source_id,
+                    target_id=target.id,
+                    amount=dealt,
+                    lethal=target.hitpoints <= 0,
+                )
+            )
+
+    def _fire_projectile_from_action(
+        self, source: Entity, name: str, x: int, y: int
+    ) -> None:
+        """Launch a projectile from a unit at a fixed spot on the ground.
+
+        Goblin Machine's rocket is the user. It is aimed at a *place*, not at a
+        unit, which is why the card marks the ground first and why walking off
+        the mark is how the rocket is answered.
+        """
+        spec = source.spec
+        pspec = self._projectile_spec(
+            name,
+            spec.rarity if spec is not None else "Common",
+            spec.level if spec is not None else self.config.level,
+        )
+        if pspec is None or pspec.speed_per_tick <= 0:
+            return
+        marker = Entity(
+            kind=EntityKind.AREA_EFFECT, team=source.team, x=x, y=y,
+            hitpoints=1, spawn_tick=self.tick,
+        )
+        marker.dead = True  # never simulated; it only carries the aim point
+        shot = Projectile(
+            pspec=pspec, team=source.team, x=source.x, y=source.y,
+            target=marker, owner_id=source.id, spawn_tick=self.tick,
+        )
+        shot.target_x, shot.target_y = x, y
+        self.entities.append(shot)
+        self._by_id_map[shot.id] = shot
+
+    def _arm_counter(self, entity: Entity, row, ctx) -> None:
+        """Register an ``ActionCounter`` on a unit. See :class:`_Counter`."""
+        if entity.dead:
+            return
+        cooldown = self.clock.ticks(row.get("Cooldown"))
+        self._counters[entity.id] = _Counter(
+            cooldown_ticks=cooldown,
+            # DeployActive: the parry is up from the moment he lands rather
+            # than after one cooldown, which is why a Ronin dropped onto a
+            # committed attacker turns the first swing straight back.
+            ready_tick=self.tick if row.get("DeployActive") is True else self.tick + cooldown,
+            damage_scalar=int(row.get("DamageScalar", 0) or 0),
+            defense_scalar=int(row.get("DefenseScalar", 100) or 0),
+            self_action=row.get("SelfAction"),
+            instigator_action=row.get("InstigatorAction"),
+        )
+
+    def _try_parry(self, attacker: Entity | None, victim: Entity, amount: int) -> int | None:
+        """Run ``victim``'s parry against an incoming hit, if it has one ready.
+
+        Returns the damage that should actually land, or ``None`` when there
+        was no parry. Ronin's ``DefenseScalar`` is 0, so a parried hit lands
+        for nothing at all; the number is honoured rather than hard-coded
+        because the field is what says so.
+
+        An instigator is required. ``ActionCounter`` is a block *and* a
+        riposte -- ``SelfAction`` on the holder, ``InstigatorAction`` on
+        whoever swung -- and a cast spell has no instigator entity at all
+        (spell projectiles carry ``owner_id`` 0). Whether Ronin's parry eats a
+        Fireball is not settled anywhere in the files, so the narrower reading
+        is taken: it counters attackers, and a spell goes through. Spelled out
+        rather than left to fall out of the code, because it is a choice and
+        not a derivation.
+        """
+        counter = self._counters.get(victim.id)
+        if counter is None or victim.dead or attacker is None:
+            return None
+        if self.tick < counter.ready_tick:
+            return None
+        counter.ready_tick = self.tick + max(1, counter.cooldown_ticks)
+        if counter.self_action:
+            self.actions.run(
+                counter.self_action,
+                ActionContext(team=victim.team, x=victim.x, y=victim.y, source=victim),
+                self.tick,
+            )
+        if counter.instigator_action and attacker is not None and not attacker.dead:
+            self.actions.run(
+                counter.instigator_action,
+                ActionContext(
+                    team=victim.team,
+                    x=attacker.x,
+                    y=attacker.y,
+                    source=attacker,
+                    variables={
+                        "damage_amount": amount * counter.damage_scalar // 100,
+                        "damage_source": victim.id,
+                        "owner": victim.id,
+                    },
+                ),
+                self.tick,
+            )
+        return amount * counter.defense_scalar // 100
 
     def _count_living(self, team: Team, names: set[str]) -> int:
         """How many living units of the given names a team has on the board."""
@@ -2123,14 +2537,24 @@ class Battle:
         """Duplicate a troop, the way the Clone spell does.
 
         A clone is the same unit with one hitpoint. Full damage, full speed,
-        the original's shield if it had one -- which is the whole reason to
+        and a shield if the original had one -- which is the whole reason to
         clone a Dark Prince, and why the spell is a damage multiplier rather
         than a health one.
 
-        The single hitpoint is the one figure not in this build: not in
-        ``ACTION.CloneAction``, not in ``BUFF.Clone``, and not in any
-        ``CLONE_*`` global. It is applied as the card's known behaviour and
-        recorded as an open anchor rather than passed off as data.
+        Both hitpoint figures are in the build, in the one place a search of
+        ``ACTION.CloneAction``, ``BUFF.Clone`` and the ``CLONE_*`` globals does
+        not reach: the card's own displayed stat sheet, ``STATS.clone``, which
+        carries two literal rows -- ``TID_SPELL_ATTRIBUTE_CLONE_HEALTH`` with
+        ``Value = "1"`` and ``TID_SPELL_ATTRIBUTE_CLONE_SHIELD_HEALTH`` with
+        ``Value = "1"``. Every other row in that table names a stats tag to
+        look up; those two are written as literals because the numbers are
+        constants.
+
+        The shield one matters. ``CLONE_PRESERVE_SHIELD`` says the clone gets a
+        shield, not that it gets the *original's* shield: copying the source's
+        remaining shield gave a cloned Dark Prince about 94 effective hitpoints
+        where the card says 1, so it survived a Zap and a Log and everything
+        else that is supposed to erase a clone outright.
         """
         spec = source.spec
         if spec is None:
@@ -2151,7 +2575,7 @@ class Battle:
             collision_radius=source.collision_radius,
             mass=source.mass,
             flying=source.flying,
-            shield=source.shield if keep_shield else 0,
+            shield=CLONE_SHIELD_HITPOINTS if keep_shield and source.shield > 0 else 0,
             lifetime_ticks=spec.lifetime_ticks,
         )
         clone.max_hitpoints = CLONE_HITPOINTS

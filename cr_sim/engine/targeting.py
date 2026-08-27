@@ -85,6 +85,15 @@ def can_target(spec: UnitSpec, attacker: Entity, target: Entity) -> bool:
         return False
     if spec.target_only_buildings and target.kind not in STRUCTURE_KINDS:
         return False
+    if spec.target_only_troops and target.kind is not EntityKind.TROOP:
+        # The mirror image of the flag above, and Ram Rider's rider is the only
+        # unit in the build that a standard deck can put on the board carrying
+        # it. The ram underneath is ``TargetOnlyBuildings`` and charges the
+        # tower; the rider on top only ever throws her bola at troops, which is
+        # why the card is a building-targeting win condition that still snares
+        # your defence. Unread, a Cannon or a Princess Tower in her sight range
+        # was a perfectly good target and she shot it.
+        return False
     return True
 
 
