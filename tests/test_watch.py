@@ -791,3 +791,395 @@ def test_the_served_payload_parses_in_a_browser_not_only_in_python(tmp_path):
     # simply absent, which is already how this file says "no reading here".
     assert series["explained_variance"] == [[2000, 0.31]]
     assert series["lift"] == [[1000, 0.4]], "a non-finite lift was plotted"
+
+
+# ------------------------------------------------------------ the all-time view
+#
+# The one thing this view must never do is put two numbers in one column when
+# they were measured against different opponents. The control wins 92% of its
+# matches against an agent that never plays a card and 26% against a random
+# one, so the two scales are nothing like each other, and `eval_opponent` --
+# which would say which is which -- is on none of the 93 lift rows on disk.
+
+
+def _block(name="headtohead", control=0.26, note=None):
+    """A job that measured several arms under one stated set of conditions."""
+    rows = [
+        _row(1, 0, episodes=150, arm="beta, greedy",
+             eval_lift_sd=0.55, eval_win=0.61, control_win=control),
+        _row(2, 0, episodes=150, arm="alpha, greedy",
+             eval_lift_sd=0.40, eval_win=0.52, control_win=control),
+        _row(3, 0, episodes=150, arm="beta, sampled",
+             eval_lift_sd=0.22, eval_win=0.44, control_win=control),
+    ]
+    if note is None:
+        note = ("All three arms against the SAME random opponent on the SAME "
+                "150 paired seeds.")
+    return name, rows, note
+
+
+def test_only_arms_from_one_stated_measurement_are_ranked_against_each_other():
+    """A lift is meaningless without the opponent that produced it.
+
+    This project lost a session to exactly that. The in-run probe faced an
+    opponent that never plays a card while the paired verdicts faced a random
+    one, both wrote the number to `eval_lift_sd`, and the two were compared.
+    The control wins 92% of the idle matches and 26% of the random ones, so
+    an all-time board that sorts every lift it can find ranks one scale
+    against the other and is confidently wrong.
+
+    The decoy here holds the largest number on the page, so an implementation
+    that sorts everything fails loudly instead of reordering quietly.
+    """
+    name, ladder, note = _block()
+    idler = [_row(1, 1000, eval_lift_sd=0.90, eval_win=0.95, control_win=0.925)]
+
+    _page, payload = render_multi(
+        [("idler", idler, False), (name, ladder, False)],
+        notes={name: note}, kinds={name: "job"})
+    block = payload["alltime"]["block"]
+
+    assert block is not None, "the one comparable measurement was not found"
+    assert block["job"] == name
+    # Best-first, and computed rather than copied: the fixture is not in this
+    # order and beta appears twice under two different ways of playing.
+    assert [(a["arm"], a["lift"]) for a in block["arms"]] == [
+        ("beta, greedy", 0.55), ("alpha, greedy", 0.40), ("beta, sampled", 0.22)]
+    assert block["seeds"] == 150
+
+    ranked = [a["arm"] for a in block["arms"]]
+    assert not any("idler" in arm for arm in ranked), \
+        "an idle-scale lift was ranked against random-scale ones"
+    # And it is not simply dropped -- the largest number on the machine is
+    # shown, in the one place it cannot be mistaken for the record.
+    assert payload["alltime"]["demoted"]["name"] == "idler"
+    assert payload["alltime"]["demoted"]["lift"] == 0.90
+    assert payload["alltime"]["record"]["top"]["lift"] == 0.55, \
+        "the record was taken from the biggest number rather than the best comparable one"
+
+
+def test_an_equal_control_rate_does_not_by_itself_license_a_ranking():
+    """Two jobs sit at the same control rate and only one of them is comparable.
+
+    The sweep labels its arms and reads 0.26 exactly like the head-to-head
+    does, and its own note says only the within-sweep ordering is sound
+    because it changed the training targets at the same time. Ranking the two
+    jobs together would compare a hard-target arm against a soft-target one
+    and call the difference pass weight.
+    """
+    good_name, good_rows, good_note = _block("headtohead")
+    sweep_name, sweep_rows, _ = _block("sweep")
+    sweep_note = ("150 paired battles each, random opponent.\n"
+                  "CAVEAT: the sweep runs hard targets while the baseline "
+                  "used soft, so only the within-sweep ordering is sound.")
+
+    _page, payload = render_multi(
+        [(good_name, good_rows, False), (sweep_name, sweep_rows, False)],
+        notes={good_name: good_note, sweep_name: sweep_note},
+        kinds={good_name: "job", sweep_name: "job"})
+
+    assert payload["alltime"]["block"]["job"] == good_name, \
+        "a caveated sweep was treated as a comparable measurement"
+    # It is still shown, grouped with everything else at its control rate.
+    at_26 = [g for g in payload["alltime"]["groups"] if g["control"] == 0.26][0]
+    assert sorted(r["name"] for r in at_26["runs"]) == ["headtohead", "sweep"]
+
+
+def test_with_no_comparable_measurement_the_page_says_so_rather_than_ranking_anyway():
+    """The ladder is one job directory deep, and that job can vanish.
+
+    `register_job.register` writes with `write_text`, which truncates, so
+    re-registering a job to update its status wipes the rows unless the
+    caller supplies them again. The failure has to be an empty state, not a
+    quiet fallback to sorting whatever lifts are left -- that fallback is the
+    original bug wearing the ladder's clothes.
+    """
+    idler = [_row(1, 1000, eval_lift_sd=0.90, eval_win=0.95, control_win=0.925)]
+    random_scale = [_row(1, 2000, eval_lift_sd=0.31, eval_win=0.4, control_win=0.26)]
+
+    _page, payload = render_multi([("idler", idler, False),
+                                   ("cloned", random_scale, False)])
+    alltime = payload["alltime"]
+
+    assert alltime["block"] is None, "ranked arms that no job vouched for"
+    assert alltime["record"] is None, "named a record with nothing to compare"
+    # Every reading is still on the page, grouped by what it was read against.
+    assert [g["control"] for g in alltime["groups"]] == [0.925, 0.26]
+    assert alltime["lift_rows"] == 2
+
+
+def test_a_run_is_grouped_by_its_control_rate_and_unmatched_rates_stay_unnamed():
+    """Three of the five control rates on disk match nothing that was measured.
+
+    47 of 93 readings sit on one of them. Rounding those to the nearer of the
+    two known controls would put a number on an idle scale or a random one on
+    no evidence at all, so they are labelled unidentified and dimmed instead.
+    """
+    _page, payload = render_multi([
+        ("idle-ish", [_row(1, 1000, eval_lift_sd=0.5, control_win=0.925)], False),
+        ("neither", [_row(1, 1000, eval_lift_sd=0.9, control_win=0.85)], False),
+        ("random-ish", [_row(1, 1000, eval_lift_sd=0.3, control_win=0.26)], False),
+    ])
+    groups = payload["alltime"]["groups"]
+
+    # Descending by control rate, which is a property of the measurement --
+    # so the order cannot be read as a ranking of the policies.
+    assert [g["control"] for g in groups] == [0.925, 0.85, 0.26]
+    assert [g["scale"]["opponent"] for g in groups] == ["idle", None, "random"]
+    # The largest lift on the page sits in the group nobody has identified,
+    # and gets no name from being large.
+    assert groups[1]["runs"][0]["best"] == 0.9
+    assert groups[1]["scale"]["opponent"] is None, "an unmatched rate was guessed"
+
+
+def test_greedy_and_sampled_readings_of_one_checkpoint_are_kept_apart():
+    """The same weights give two different numbers and only one gets written.
+
+    `clone_policy.py` keeps `max(greedy, sampled)` and discards the other, so
+    a metrics row holds whichever flattered the checkpoint. A fine-tuning run
+    was written off as worthless on that basis: its greedy arm was flat
+    because the argmax had not moved, while sampled had gone from +0.718 to
+    +1.239 with the intervals cleanly apart.
+    """
+    name, rows, note = _block()
+    _page, payload = render_multi([(name, rows, False)],
+                                  notes={name: note}, kinds={name: "job"})
+    modes = payload["alltime"]["modes"]
+
+    # beta was measured both ways; alpha only greedy, so it is not a pair.
+    assert [(p["weight"], p["greedy"]["lift"], p["sampled"]["lift"])
+            for p in modes["pairs"]] == [("beta", 0.55, 0.22)]
+    # The gap is computed, and equals neither reading.
+    assert modes["pairs"][0]["gap"] == pytest.approx(0.33)
+    assert modes["with_mode"] == 3 and modes["lift_rows"] == 3
+
+    record = payload["alltime"]["record"]
+    assert record["top"]["mode"] == "greedy" and record["twin"]["mode"] == "sampled", \
+        "the record is not a pair, so one of the two numbers can be quoted alone"
+    assert record["twin"]["lift"] == 0.22
+
+
+def test_an_unrecognised_arm_label_reads_as_unknown_rather_than_greedy():
+    """`arm` is free text with no validator anywhere.
+
+    `register_job.py` is the one writer of a metrics file that never calls
+    `check_lift_is_named`, so an arm can say anything. Defaulting an
+    unlabelled reading to greedy is the assumption that hid a working
+    fine-tune for a day, and it must never be the fallback.
+    """
+    from cr_sim.train.watch import _mode_of
+
+    assert _mode_of("cloned, greedy") == ("cloned", "greedy")
+    assert _mode_of("selfplay-1m best, sampled") == ("selfplay-1m best", "sampled")
+    assert _mode_of("checkpoint 12, argmax") == ("checkpoint 12, argmax", None)
+    assert _mode_of("") == ("", None)
+    assert _mode_of(None) == ("", None)
+
+
+def test_every_run_on_the_page_is_counted_once_in_the_census():
+    """Two runs that produce the same label overwrite each other silently.
+
+    `_label_for`'s output is the key of the runs dict, so a collision drops a
+    run with no error -- which is how the page showed 22 of 29 for a week.
+    Counting the census off the same dict is the only way the number on the
+    page and the tabs beside it can disagree loudly rather than quietly.
+    """
+    runs = [(f"run{i}", [_row(1, 1000 * i)], False) for i in range(1, 6)]
+    _page, payload = render_multi(runs)
+    assert payload["alltime"]["census"] == len(payload["runs"]) == 5
+
+
+def test_the_same_evaluation_written_twice_counts_once():
+    """Two runs wrote one evaluation into two rows, under updates 1 and 2.
+
+    The dedupe in `once()` keys on `updates`, so both rows survive it and the
+    lift-row count says 93 where 91 measurements were actually taken. A page
+    headlining "93 evaluations" is overstating the evidence by two.
+    """
+    rows = [_row(1, 4096, eval_lift_sd=1.62, eval_win=0.83, control_win=0.26),
+            _row(2, 4096, eval_lift_sd=1.62, eval_win=0.83, control_win=0.26),
+            _row(3, 8192, eval_lift_sd=0.71, eval_win=0.55, control_win=0.26)]
+    _page, payload = render_multi([("cloned", rows, False)])
+    assert payload["alltime"]["lift_rows"] == 3
+    assert payload["alltime"]["distinct_evals"] == 2
+
+
+def test_a_resumed_run_is_totalled_by_its_segments_not_its_largest_row():
+    """These counters restart when a run is resumed into a fresh process.
+
+    Four runs on disk are non-monotone for that reason, and the rules
+    disagree by hundreds of episodes and by ten minutes of compute. Neither
+    the last row nor the biggest one is the total, so the numbers here are
+    chosen to equal no single row -- a fixture whose answer happens to match
+    one of the wrong rules proves nothing.
+    """
+    resumed = [
+        _row(1, 1000, episodes=100, elapsed_seconds=60),
+        _row(2, 2000, episodes=200, elapsed_seconds=120),
+        # Resumed here: a fresh process, so both counters restart near zero
+        # while steps carry on from the checkpoint.
+        _row(3, 3000, episodes=50, elapsed_seconds=30),
+        _row(4, 4000, episodes=120, elapsed_seconds=75),
+    ]
+    plain = [_row(1, 500, episodes=40, elapsed_seconds=10)]
+    # A job: a batch size parked in `steps` and a count of spreadsheet
+    # comparisons parked in `episodes`.
+    job = [_row(1, 512, episodes=7), _row(2, 512, episodes=9000)]
+
+    _page, payload = render_multi([("resumed", resumed, False),
+                                   ("plain", plain, False),
+                                   ("bench", job, False)],
+                                  kinds={"bench": "job"})
+    ever = payload["alltime"]["ever"]
+
+    # 200 + 120 across the resume, plus 40. The largest row would give 240
+    # and the last row 160, so neither wrong rule can pass this.
+    assert ever["episodes"]["models"] == 360
+    assert ever["seconds"] == 205
+    # Rule-independent, because nothing here resets them.
+    assert ever["steps"]["models"] == 4500
+    assert ever["updates"]["models"] == 5
+
+    assert ever["models"] == 2 and ever["jobs"] == 1
+    assert ever["episodes"]["jobs"] == 9000, "a job leaked into the model tally"
+    assert ever["steps"]["models"] == 4500, "a batch size was counted as training steps"
+    assert ever["runs"] == 3
+
+
+def test_the_battle_ledger_names_its_sources_and_leaves_the_estimate_out():
+    """One number for "battles ever" hides that most of them are not battles.
+
+    A job stores 8,765 engine-versus-spreadsheet comparisons in `episodes`,
+    which is a table lookup rather than a match, and the in-run probe figure
+    is an estimate at the evaluation default rather than anything recorded.
+    Adding either into a total that says "exactly" makes the whole ledger
+    unusable, so they sit below the rule with their reasons.
+    """
+    trained = [_row(1, 1000, episodes=120)]
+    job = [
+        _row(1, 0, episodes=600, what="sim vs arithmetic winner"),
+        _row(2, 0, episodes=8765, what="engine vs community sheet"),
+    ]
+    # No episodes of its own, so the training figure stays readable here.
+    evaluated = [_row(1, 1000, episodes=0, eval_lift_sd=0.3, eval_win=0.4,
+                      control_win=0.26)]
+    extras = {
+        "soak": {"matches": 10000, "mean_ticks": 1770.15},
+        "verdicts": {"cloned": {"episodes": 150, "greedy": {"lift": 1.6},
+                                "sampled": {"lift": 0.7}}},
+    }
+
+    _page, payload = render_multi([("trained", trained, False),
+                                   ("gate", job, False),
+                                   ("evaluated", evaluated, False)],
+                                  kinds={"gate": "job"}, extras=extras)
+    battles = payload["alltime"]["ever"]["battles"]
+    counted = {c["what"]: c["n"] for c in battles["counted"]}
+
+    assert counted["training episodes"] == 120
+    assert counted["engine soak matches"] == 10000
+    # Both modes of the paired verdict, because they are separate battles.
+    assert counted["paired verdict battles"] == 300
+    assert counted["sim vs arithmetic winner"] == 600
+    assert battles["total"] == 120 + 10000 + 300 + 600 == 11020
+
+    # One evaluation and one run that evaluated, at the 40-episode default.
+    assert battles["estimated"]["n"] == 80
+    assert battles["estimated"]["n"] not in (battles["total"],), "the estimate was added in"
+    assert battles["excluded"]["n"] == 8765
+    assert battles["excluded"]["items"][0]["what"] == "engine vs community sheet"
+    # Every line says how it was counted, or it does not belong on the page.
+    lines = list(battles["counted"]) + [battles["estimated"], battles["excluded"]]
+    assert all(str(line.get("rule", "")).strip() for line in lines),         "a figure shipped with no counting rule beside it"
+
+
+def test_a_verdict_is_read_by_its_fields_and_an_unknown_shape_says_so():
+    """Four verdict files exist and three of them disagree about the lift.
+
+    `runs/cloned/verdict.json` carries a flat lift beside its greedy and
+    sampled sub-objects, and that flat block is a byte-identical copy of the
+    greedy one -- so reading it hands you greedy without telling you and
+    hides a sampled reading 2.3x lower. Two more evaluation processes are
+    writing verdicts right now, so a fifth shape is a matter of time and has
+    to be reported rather than guessed at.
+    """
+    extras = {"verdicts": {
+        "cloned": {"episodes": 150,
+                   "greedy": {"lift": 1.623, "ci_low": 1.39, "ci_high": 1.86},
+                   "sampled": {"lift": 0.709, "ci_low": 0.46, "ci_high": 0.96},
+                   "lift": 1.623, "ci_low": 1.39, "ci_high": 1.86},
+        "expert": {"episodes": 40, "lift": 2.716, "ci_low": 2.37, "ci_high": 3.06},
+        "paired": [{"name": "_diag", "mode": "greedy", "lift": 1.623,
+                    "episodes": 150, "eval_opponent": "random"},
+                   {"name": "_diag", "mode": "sampled", "lift": 0.734,
+                    "ci_low": -0.15, "ci_high": 0.35, "episodes": 150,
+                    "eval_opponent": "random"}],
+        "future": {"arms": [{"score": 3}]},
+    }}
+    _page, payload = render_multi([("cloned", [_row(1, 1000)], False)],
+                                  extras=extras)
+    alltime = payload["alltime"]
+
+    assert alltime["unreadable"] == ["future"], \
+        "a shape nobody has seen was read as though it were understood"
+
+    recorded = alltime["modes"]["recorded"]
+    assert len(recorded) == 1
+    # Renamed for the reader: "_diag" is a scratch directory, not an arm.
+    assert recorded[0]["weight"] == "baseline clone"
+    assert recorded[0]["opponent"] == "random", \
+        "the one file that records its opponent was not read for it"
+    assert recorded[0]["gap"] == pytest.approx(1.623 - 0.734)
+    assert recorded[0]["straddles_zero"] is True
+
+    # 150 greedy + 150 sampled for the clone, 40 for the expert, 300 for the
+    # arms file -- and nothing at all from the shape that was not recognised.
+    counted = {c["what"]: c["n"] for c in alltime["ever"]["battles"]["counted"]}
+    assert counted["paired verdict battles"] == 300 + 40 + 300
+
+
+def test_no_interval_is_invented_for_a_row_that_does_not_carry_one():
+    """No lift row on disk has ever carried a confidence interval.
+
+    All 93 of them lack `eval_ci_low` and `eval_ci_high`; the intervals live
+    in the verdict files and in note prose. Drawing a whisker on a ladder row
+    means inventing one, and reading one out of prose with a regular
+    expression means inventing one more carefully. The note is printed whole
+    above the ladder instead, which loses nothing.
+    """
+    name, rows, note = _block()
+    _page, payload = render_multi([(name, rows, False)],
+                                  notes={name: note}, kinds={name: "job"},
+                                  extras={"verdicts": {
+                                      "expert": {"episodes": 40, "lift": 2.7,
+                                                 "ci_low": 2.4, "ci_high": 3.1}}})
+    alltime = payload["alltime"]
+
+    for arm in alltime["block"]["arms"]:
+        assert "ci" not in arm, "a ladder row grew an interval from nowhere"
+    for pair in alltime["modes"]["pairs"]:
+        assert pair["greedy"]["ci"] is None and pair["sampled"]["ci"] is None
+    # The note is the interval channel, and it ships verbatim.
+    assert alltime["block"]["note"] == note
+
+
+def test_the_all_time_aggregate_is_inside_the_payload_fingerprint():
+    """A stale total beside a fresh curve on the same screen is worse than no total.
+
+    The page re-renders only when `version` changes. Anything attached after
+    the hash ships in the HTML and is invisible to it, so the aggregates
+    would sit at whatever they were when the tab was opened while the run
+    tabs beside them kept moving.
+    """
+    first = [_row(1, 1000, episodes=50)]
+    second = [_row(1, 1000, episodes=50), _row(2, 2000, episodes=90)]
+
+    _p, before = render_multi([("run", first, True)])
+    _p, same = render_multi([("run", first, True)])
+    _p, after = render_multi([("run", second, True)])
+
+    assert before["version"] == same["version"], "the fingerprint drifted with no data change"
+    assert before["alltime"]["ever"]["episodes"]["models"] == 50
+    assert after["alltime"]["ever"]["episodes"]["models"] == 90
+    assert before["version"] != after["version"], \
+        "the aggregate moved and the page would never have redrawn"

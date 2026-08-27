@@ -252,6 +252,745 @@ def _series_of(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
         # itself still in the pool. Only self-play runs record it.
         "ancestor_win": pair("ancestor_win"),
         "ancestor_loss": pair("ancestor_loss"),
+        # The eval rows joined back together. Lift and control are separate
+        # pair-lists above and cannot be zipped downstream, so a reader who
+        # wants a lift together with the control rate that scales it -- which
+        # is the only honest way to show one -- has nowhere to get it.
+        "evals": [{"steps": r.get("steps", 0), "lift": r["eval_lift_sd"],
+                   "win": r.get("eval_win"), "control": r.get("control_win"),
+                   "arm": r.get("arm")}
+                  for r in rows
+                  if "eval_lift_sd" in r and _plottable(r["eval_lift_sd"])],
+    }
+
+
+# ------------------------------------------------------------------ all time
+#
+# A cross-run view has exactly one way to go badly wrong on this project, and
+# it has already gone wrong once: a lift is a number against an opponent, and
+# the opponents differ. The in-run probe used to face an agent that never
+# plays a card while the paired verdicts faced a random one; both wrote to
+# ``eval_lift_sd``, and the two were compared. The control wins 92% of the
+# first kind of match and 26% of the second, so those are not the same scale
+# and a column that sorts both is a confident lie.
+#
+# ``eval_opponent`` would settle it, and appears on none of the lift rows on
+# disk. So the only cross-run ordering drawn here is one where a single job
+# measured every arm against one opponent on one seed set and said so in its
+# own note. Everything else is grouped by the control's own win rate -- a
+# property of the measurement rather than a score -- and never ranked across
+# groups.
+
+#: The two evaluation setups whose control has actually been measured here.
+#: A control that never plays a card wins 92.5% of its matches; a random one
+#: wins 26%. A reading sitting on neither is on a scale nobody has
+#: identified, and says so rather than being rounded to whichever is closer.
+_ANCHORS = ((0.925, "idle"), (0.26, "random"))
+_ANCHOR_TOLERANCE = 0.005
+
+#: What one in-run evaluation costs, for the estimate in the battle ledger
+#: that is deliberately not added into the total.
+_PROBE_EPISODES = 40
+
+#: Job rows whose ``episodes`` really are battles that were played. Jobs are
+#: excluded from every counter by default, because they reuse standard key
+#: names for unrelated quantities -- a batch size in ``steps``, a speedup
+#: ratio in ``steps_per_second``, a count of spreadsheet comparisons in
+#: ``episodes``. This list is rendered on the page beside the number it
+#: contributes, so the exception is as visible as the rule.
+_BATTLE_ROWS = ("sim vs arithmetic winner",)
+
+#: Two readings this close are the same reading, for the exhibit that shows
+#: one number meaning two different things.
+_COINCIDENCE = 0.01
+
+
+def _anchor_for(control: Any) -> "str | None":
+    """Which measured control this reading's control rate matches, if any."""
+    if not isinstance(control, (int, float)) or isinstance(control, bool):
+        return None
+    for value, label in _ANCHORS:
+        if abs(control - value) <= _ANCHOR_TOLERANCE:
+            return label
+    return None
+
+
+def _scale_of(control: Any, stated: bool = False) -> dict[str, Any]:
+    """The provenance chip that travels with a lift, in the same object.
+
+    Never a bare number. A screenshot of a figure with no scale beside it is
+    how an idle-scale reading gets quoted as a random-scale one.
+    """
+    opponent = _anchor_for(control)
+    return {"control": control, "opponent": opponent,
+            "stated": bool(stated and opponent)}
+
+
+def _mode_of(arm: Any) -> "tuple[str, str | None]":
+    """Split a free-text arm label into the weights it names and how they played.
+
+    Greedy and sampled play are different numbers for the same weights and
+    must never be collapsed: a fine-tuning run was written off as worthless
+    because its greedy arm was flat -- the argmax had not moved -- while
+    sampled had gone from +0.718 to +1.239 with the intervals cleanly apart.
+
+    ``arm`` is free text with no validator, and ``register_job.py`` is the one
+    writer of a metrics file that never calls ``check_lift_is_named``. So
+    anything unrecognised comes back as an unknown mode. It must never
+    default to greedy, which is the assumption that hid that run.
+    """
+    text = str(arm or "").strip()
+    head, sep, tail = text.rpartition(",")
+    mode = tail.strip().lower()
+    if sep and mode in ("greedy", "sampled"):
+        return head.strip(), mode
+    return text, None
+
+
+def _segment_total(rows: Sequence[dict[str, Any]], key: str) -> float:
+    """A cumulative counter totalled across resumes.
+
+    These counters restart when a run is resumed into a fresh process, so the
+    last row is not the total and neither is the largest value. Every fall
+    starts a new segment, and the segments add.
+
+    Two defensible rules disagree here by a few hundred episodes, which is
+    why this one is printed on the page beside every number it produces
+    rather than left for a reader to assume.
+    """
+    total = 0.0
+    seen = None
+    segment = 0.0
+    for row in rows:
+        value = row.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if not math.isfinite(value):
+            continue
+        if seen is not None and value < seen:
+            total += segment
+            segment = 0.0
+        segment = max(segment, value)
+        seen = value
+    return total + segment
+
+
+def _verdict_shape(raw: Any) -> str:
+    """What kind of verdict object this is, from the fields it actually has.
+
+    Four have been written and three of them disagree about where the lift
+    lives. More are being written right now, so a shape that is not
+    recognised says so on the page instead of being guessed at. Guessing is
+    what makes the flat mirror in ``runs/cloned/verdict.json`` dangerous: it
+    is a byte-identical copy of the greedy sub-object, so reading it hands
+    you greedy without telling you, and hides a sampled reading 2.3x lower.
+    """
+    if isinstance(raw, list):
+        if raw and all(isinstance(r, dict) and "lift" in r and "mode" in r
+                       for r in raw):
+            return "arms"
+        return "unrecognised"
+    if isinstance(raw, dict):
+        both = [k for k in ("greedy", "sampled")
+                if isinstance(raw.get(k), dict) and "lift" in raw[k]]
+        if len(both) == 2:
+            return "paired"
+        if "lift" in raw:
+            return "flat"
+    return "unrecognised"
+
+
+def _states_shared_conditions(note: str) -> bool:
+    """Whether a job's note claims its arms are actually comparable.
+
+    Read as a flag and never mined for numbers. The one job that qualifies
+    says its arms met "the SAME random opponent on the SAME 150 paired
+    seeds" -- the author's own emphasis, twice. The sweep that sits at the
+    same control rate and also labels its arms makes no such claim, and its
+    note carries a caveat saying only the within-sweep ordering is sound.
+    Equal control rates do not license ranking; a stated method does.
+
+    A note that stops matching costs the page its ladder and produces the
+    empty state, which is the safe direction to fail in.
+    """
+    return note.count("SAME") >= 2 and "CAVEAT" not in note
+
+
+def _ci_of(raw: dict[str, Any]) -> "list[float] | None":
+    """An interval, only where both ends are fields of the object.
+
+    No lift row anywhere on disk carries one. Intervals exist in the verdict
+    files and in note prose, and prose is never parsed for a number here --
+    the note is printed whole instead, which loses nothing.
+    """
+    low, high = raw.get("ci_low"), raw.get("ci_high")
+    if _plottable(low) and _plottable(high):
+        return [low, high]
+    return None
+
+
+def _verdict_of(raw: Any) -> dict[str, Any]:
+    """One verdict file, normalised, or a note saying it could not be read."""
+    shape = _verdict_shape(raw)
+    out: dict[str, Any] = {"shape": shape}
+    if shape == "flat":
+        out.update(lift=raw.get("lift"), ci=_ci_of(raw), win=raw.get("win"),
+                   loss=raw.get("loss"), draw=raw.get("draw"),
+                   episodes=raw.get("episodes"),
+                   control_win=raw.get("control_win"),
+                   control_draw=raw.get("control_draw"),
+                   note=str(raw.get("note", "") or ""))
+    elif shape == "paired":
+        for mode in ("greedy", "sampled"):
+            sub = raw[mode]
+            out[mode] = {"lift": sub.get("lift"), "ci": _ci_of(sub),
+                         "win": sub.get("win"), "loss": sub.get("loss")}
+        out.update(episodes=raw.get("episodes"),
+                   note=str(raw.get("note", "") or ""))
+    elif shape == "arms":
+        out["records"] = [{
+            # "_diag" names a scratch directory, not an experiment. It is the
+            # unmodified clone every other arm here is a variation on.
+            "name": ("baseline clone" if r.get("name") == "_diag"
+                     else str(r.get("name", ""))),
+            "mode": r.get("mode"), "lift": r.get("lift"), "ci": _ci_of(r),
+            "win": r.get("win"), "loss": r.get("loss"),
+            "episodes": r.get("episodes"),
+            # The only field on this machine that puts a lift and the
+            # opponent that produced it on the same object.
+            "opponent": r.get("eval_opponent"),
+        } for r in raw]
+    return out
+
+
+def _weight_key(label: Any) -> str:
+    """The part of an arm name identifying the weights rather than the run.
+
+    ``w0.5 hard`` in a sweep's metrics and ``w0.5`` in its verdict are the
+    same checkpoint measured twice.
+    """
+    parts = str(label or "").split()
+    return parts[0].lower() if parts else ""
+
+
+def _block_of(entries: list[dict[str, Any]]) -> "dict[str, Any] | None":
+    """The one measurement block whose arms may be ranked against each other.
+
+    Every condition has to hold at once: the arms come from a single job, the
+    rows carry an ``arm`` label, every row shares one control rate, that rate
+    matches a control that has actually been measured, and the job's own note
+    states the conditions. Nothing else on the page is sorted by value.
+    """
+    qualifying = []
+    for entry in entries:
+        evals = entry["evals"]
+        if not entry["job"] or len(evals) < 2:
+            continue
+        if not all(str(r.get("arm", "")).strip() for r in evals):
+            continue
+        controls = {r.get("control_win") for r in evals}
+        if len(controls) != 1:
+            continue
+        control = controls.pop()
+        if _anchor_for(control) is None:
+            continue
+        if not _states_shared_conditions(entry["note"]):
+            continue
+        qualifying.append((entry, control))
+    if not qualifying:
+        return None
+    entry, control = max(qualifying, key=lambda pair: (len(pair[0]["evals"]),
+                                                       pair[0]["name"]))
+    arms = []
+    for row in entry["evals"]:
+        weight, mode = _mode_of(row.get("arm"))
+        arms.append({"arm": str(row.get("arm")), "weight": weight, "mode": mode,
+                     "lift": row["eval_lift_sd"], "win": row.get("eval_win"),
+                     "episodes": row.get("episodes"),
+                     "scale": _scale_of(control, stated=True)})
+    arms.sort(key=lambda a: a["lift"], reverse=True)
+    seeds = {a["episodes"] for a in arms}
+    return {
+        "job": entry["name"],
+        "note": entry["note"],
+        "control": control,
+        "scale": _scale_of(control, stated=True),
+        "seeds": seeds.pop() if len(seeds) == 1 else None,
+        "arms": arms,
+        # The control is drawn as the zero row, and is one of the arms the
+        # job ran.
+        "count": len(arms) + 1,
+    }
+
+
+def _pairs_of(arms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Arms that are the same weights played two ways, greedy beside sampled."""
+    by_weight: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for arm in arms:
+        if arm.get("mode") is None:
+            continue
+        key = arm["weight"]
+        if key not in by_weight:
+            by_weight[key] = {}
+            order.append(key)
+        by_weight[key][arm["mode"]] = arm
+    pairs = []
+    for key in order:
+        found = by_weight[key]
+        if "greedy" in found and "sampled" in found:
+            pairs.append({"weight": key,
+                          "greedy": found["greedy"], "sampled": found["sampled"],
+                          "gap": found["greedy"]["lift"] - found["sampled"]["lift"]})
+    return pairs
+
+
+def _groups_of(entries: list[dict[str, Any]],
+               verdicts: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every lift on disk, gathered by the control rate it was read against.
+
+    Grouped, never ranked across groups, and ordered by the control rate
+    itself -- descending, because that is a property of the measurement and
+    an ordering on it cannot be misread as a ranking of the policies.
+    """
+    buckets: dict[Any, dict[str, Any]] = {}
+    for entry in entries:
+        for row in entry["evals"]:
+            control = row.get("control_win")
+            key = round(control, 6) if isinstance(control, (int, float)) else None
+            bucket = buckets.setdefault(key, {"control": control, "runs": {}})
+            run = bucket["runs"].setdefault(entry["name"], {
+                "name": entry["name"], "readings": [], "job": entry["job"],
+                "ranking": False, "arms": [],
+            })
+            run["readings"].append(row)
+    groups = []
+    for key in sorted(buckets, key=lambda k: (k is not None, k), reverse=True):
+        bucket = buckets[key]
+        runs = []
+        for name in sorted(bucket["runs"]):
+            run = bucket["runs"][name]
+            rows = run["readings"]
+            best = max(rows, key=lambda r: r["eval_lift_sd"])
+            # A job whose every row is a labelled arm is a table of separate
+            # measurements, not a trajectory. It has no "current" value and
+            # its last row is simply its worst arm.
+            ranking = run["job"] and all(str(r.get("arm", "")).strip()
+                                         for r in rows)
+            entry = {
+                "name": name, "job": run["job"], "ranking": ranking,
+                "evals": len(rows),
+                "best": best["eval_lift_sd"],
+                "best_at_steps": best.get("steps", 0),
+                "best_win": best.get("eval_win"),
+            }
+            if ranking:
+                entry["arms"] = sorted(
+                    [{"arm": str(r.get("arm")), "lift": r["eval_lift_sd"],
+                      "win": r.get("eval_win"),
+                      "mode": _mode_of(r.get("arm"))[1]} for r in rows],
+                    key=lambda a: a["lift"], reverse=True)
+            # A verdict that re-measured the same policy and disagreed about
+            # the control's own win rate makes this whole bucketing
+            # provisional, so it is printed inside the card it undermines.
+            verdict = verdicts.get(name) or {}
+            other = verdict.get("control_win")
+            if (verdict.get("shape") == "flat" and _plottable(other)
+                    and _plottable(bucket["control"])
+                    and abs(other - bucket["control"]) > _ANCHOR_TOLERANCE):
+                entry["disputed"] = {
+                    "in_run": bucket["control"], "verdict": other,
+                    "verdict_draw": verdict.get("control_draw"),
+                    "episodes": verdict.get("episodes"),
+                }
+            runs.append(entry)
+        # Sorting exists only inside a card.
+        runs.sort(key=lambda r: r["best"], reverse=True)
+        groups.append({
+            "control": bucket["control"],
+            "scale": _scale_of(bucket["control"]),
+            "rows": sum(r["evals"] for r in runs),
+            "runs": runs,
+        })
+    return groups
+
+
+def _exhibits_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
+                 verdicts: dict[str, Any]) -> dict[str, Any]:
+    """Three short demonstrations of why the rest of the page is shaped as it is."""
+    out: dict[str, Any] = {}
+
+    # (a) The same figure, read against two different opponents. Found rather
+    # than asserted: the closest pair of near-identical lifts that sit in
+    # different scale groups.
+    if block:
+        best = None
+        for arm in block["arms"]:
+            for entry in entries:
+                if entry["name"] == block["job"]:
+                    continue
+                for row in entry["evals"]:
+                    control = row.get("control_win")
+                    if control == block["control"]:
+                        continue
+                    gap = abs(row["eval_lift_sd"] - arm["lift"])
+                    if gap <= _COINCIDENCE and (best is None or gap < best[0]):
+                        best = (gap, arm, entry, row)
+        if best:
+            _, arm, entry, row = best
+            out["coincidence"] = {
+                "ladder": {"arm": arm["arm"], "lift": arm["lift"],
+                           "scale": arm["scale"], "job": block["job"]},
+                "in_run": {"run": entry["name"], "lift": row["eval_lift_sd"],
+                           "scale": _scale_of(row.get("control_win")),
+                           "steps": row.get("steps", 0)},
+                "gap": best[0],
+            }
+
+    # (b) A peak chosen from many short readings, replayed at length.
+    chosen = None
+    for entry in entries:
+        verdict = verdicts.get(entry["name"]) or {}
+        if verdict.get("shape") != "flat" or not verdict.get("note"):
+            continue
+        if not entry["evals"]:
+            continue
+        best = max(r["eval_lift_sd"] for r in entry["evals"])
+        if not _plottable(verdict.get("lift")) or best <= verdict["lift"]:
+            continue
+        if chosen is None or best > chosen["best_in_run"]:
+            chosen = {"run": entry["name"], "best_in_run": best,
+                      "readings": len(entry["evals"]),
+                      "verdict_lift": verdict["lift"],
+                      "verdict_ci": verdict.get("ci"),
+                      "verdict_episodes": verdict.get("episodes"),
+                      "note": verdict["note"]}
+    if chosen:
+        out["selection"] = chosen
+
+    # (c) How much a reading moves when it is simply run again. Greedy play on
+    # a fixed seed set is deterministic, so the same weights read twice give
+    # the same digits; sampled play on the same seeds does not.
+    seen: dict[str, list[dict[str, Any]]] = {}
+    for source, verdict in sorted(verdicts.items()):
+        found = []
+        if verdict.get("shape") == "paired":
+            for mode in ("greedy", "sampled"):
+                found.append({"weight": "clone", "mode": mode,
+                              "lift": verdict[mode]["lift"]})
+        elif verdict.get("shape") == "arms":
+            for record in verdict.get("records", []):
+                found.append({"weight": _weight_key(record["name"]),
+                              "mode": record.get("mode"),
+                              "lift": record.get("lift")})
+        for item in found:
+            if not _plottable(item["lift"]):
+                continue
+            seen.setdefault(str(item["mode"]), []).append(
+                dict(item, source=source))
+    identical, spread = None, None
+    for mode, items in seen.items():
+        by_value: dict[float, list[dict[str, Any]]] = {}
+        for item in items:
+            by_value.setdefault(item["lift"], []).append(item)
+        for value, group in by_value.items():
+            sources = {g["source"] for g in group}
+            if len(sources) > 1 and identical is None:
+                identical = {"mode": mode, "value": value,
+                             "digits": repr(value), "sources": sorted(sources)}
+        if identical and mode != identical["mode"]:
+            values = sorted({i["lift"] for i in items
+                             if i["weight"] in ("clone", "baseline")})
+            if len(values) > 1:
+                spread = {"mode": mode, "values": values,
+                          "range": max(values) - min(values)}
+    if identical:
+        out["resolution"] = {"identical": identical, "spread": spread}
+        if block and block["arms"]:
+            top = block["arms"][0]
+            runner = block["arms"][1] if len(block["arms"]) > 1 else None
+            out["resolution"]["top"] = {
+                "arm": top["arm"], "lift": top["lift"],
+                "runner_arm": runner["arm"] if runner else None,
+                "runner_lift": runner["lift"] if runner else None,
+                "gap": (top["lift"] - runner["lift"]) if runner else None,
+            }
+    return out
+
+
+def _ever_of(entries: list[dict[str, Any]], verdicts: dict[str, Any],
+             soak: Any, lift_rows: int, lift_files: int) -> dict[str, Any]:
+    """The all-time counters, each carrying the rule that produced it."""
+    models = [e for e in entries if not e["job"]]
+    jobs = [e for e in entries if e["job"]]
+
+    def total(group, key):
+        return sum(_segment_total(e["rows"], key) for e in group)
+
+    reporting = sum(1 for e in entries
+                    if _segment_total(e["rows"], "elapsed_seconds") > 0)
+
+    counted = [
+        {"what": "training episodes",
+         "n": int(round(total(models, "episodes"))),
+         "rule": "every battle a training run played, resumes added up, jobs left out"},
+    ]
+    if isinstance(soak, dict) and _plottable(soak.get("matches")):
+        counted.append({
+            "what": "engine soak matches", "n": int(soak["matches"]),
+            "rule": "runs/soak-spells, which has a summary but no metrics file, so the run itself is invisible to this page"})
+    verdict_battles = 0
+    for verdict in verdicts.values():
+        if verdict.get("shape") == "flat" and _plottable(verdict.get("episodes")):
+            verdict_battles += int(verdict["episodes"])
+        elif verdict.get("shape") == "paired" and _plottable(verdict.get("episodes")):
+            verdict_battles += 2 * int(verdict["episodes"])
+        elif verdict.get("shape") == "arms":
+            verdict_battles += sum(int(r["episodes"]) for r in verdict["records"]
+                                   if _plottable(r.get("episodes")))
+    if verdict_battles:
+        counted.append({"what": "paired verdict battles", "n": verdict_battles,
+                        "rule": "every arm of every verdict file, greedy and sampled counted separately"})
+    duels = []
+    excluded_rows = []
+    for entry in jobs:
+        for row in entry["rows"]:
+            what = str(row.get("what", "") or "")
+            episodes = row.get("episodes")
+            if not _plottable(episodes) or not episodes:
+                continue
+            if what in _BATTLE_ROWS:
+                duels.append({"job": entry["name"], "what": what,
+                              "n": int(episodes)})
+            elif what:
+                excluded_rows.append({"job": entry["name"], "what": what,
+                                      "n": int(episodes)})
+    for duel in duels:
+        counted.append({"what": duel["what"], "n": duel["n"],
+                        "rule": "a job row that records battles actually played, named one by one rather than counted in by kind"})
+    excluded_rows.sort(key=lambda r: r["n"], reverse=True)
+
+    return {
+        "steps": {"models": int(round(total(models, "steps"))),
+                  "jobs": int(round(total(jobs, "steps")))},
+        "episodes": {"models": int(round(total(models, "episodes"))),
+                     "jobs": int(round(total(jobs, "episodes")))},
+        "updates": {"models": int(round(total(models, "updates"))),
+                    "jobs": int(round(total(jobs, "updates")))},
+        "seconds": int(round(total(models, "elapsed_seconds"))),
+        "reporting_elapsed": reporting,
+        "runs": len(entries),
+        "models": len(models),
+        "jobs": len(jobs),
+        "lift_rows": lift_rows,
+        "battles": {
+            "counted": counted,
+            "total": sum(c["n"] for c in counted),
+            # Not added in. It is an estimate at the evaluation default,
+            # and an estimate does not belong in a total that says "exactly".
+            "estimated": {
+                "what": "in-run probe battles",
+                "n": (lift_rows + lift_files) * _PROBE_EPISODES,
+                "rule": str(_PROBE_EPISODES) + " episodes per evaluation and one control run per run that evaluated -- the default, not a recorded figure",
+            },
+            "excluded": {
+                "what": "job episodes",
+                "n": int(round(total(jobs, "episodes"))),
+                "items": excluded_rows[:3],
+                "rule": "jobs reuse the episode key for things that are not battles; the duels above are counted in by name and are not part of this figure, because the rule keeps the larger row",
+            },
+        },
+        "soak": soak if isinstance(soak, dict) else None,
+    }
+
+
+def _record_of(block: "dict[str, Any] | None") -> "dict[str, Any] | None":
+    """The best comparable reading, and the same weights played the other way.
+
+    Always a pair. ``clone_policy.py`` writes ``max(greedy, sampled)`` and
+    discards the loser, so the single number in a metrics row is whichever
+    flattered the checkpoint. Where both survive, both are shown, at the same
+    size, and neither can be folded away.
+    """
+    if not block or not block["arms"]:
+        return None
+    top = block["arms"][0]
+    twin = next((a for a in block["arms"]
+                 if a["weight"] == top["weight"] and a["mode"] != top["mode"]
+                 and a["mode"] is not None), None)
+    return {
+        "job": block["job"], "arms": block["count"], "seeds": block["seeds"],
+        "control": block["control"], "scale": block["scale"],
+        "top": top, "twin": twin,
+    }
+
+
+def _demoted_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
+                verdicts: dict[str, Any]) -> "dict[str, Any] | None":
+    """The largest lift anywhere, and every reason it is not the record.
+
+    It appears here so it can never appear anywhere else. The biggest number
+    on this machine belongs to a one-ply search that consults the engine at
+    decision time, over a fifth of the battles the comparable arms ran, at a
+    control rate matching nothing that has been measured.
+    """
+    job = block["job"] if block else None
+    best = None
+    for entry in entries:
+        if entry["name"] == job:
+            continue
+        for row in entry["evals"]:
+            if best is None or row["eval_lift_sd"] > best[1]["eval_lift_sd"]:
+                best = (entry, row)
+    if best is None:
+        return None
+    entry, row = best
+    verdict = verdicts.get(entry["name"]) or {}
+    control = row.get("control_win")
+    return {
+        "name": entry["name"], "lift": row["eval_lift_sd"],
+        "win": row.get("eval_win"), "scale": _scale_of(control),
+        "note": entry["note"],
+        # Only where an interval is a field of an object. Never from prose.
+        "ci": verdict.get("ci") if verdict.get("shape") == "flat" else None,
+        "episodes": (verdict.get("episodes") if verdict.get("shape") == "flat"
+                     else row.get("episodes")),
+        "verdict_note": (verdict.get("note", "")
+                         if verdict.get("shape") == "flat" else ""),
+        "compare_episodes": block["seeds"] if block else None,
+        "anchored": _anchor_for(control) is not None,
+    }
+
+
+def _modes_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
+              verdicts: dict[str, Any], lift_rows: int,
+              with_mode: int) -> dict[str, Any]:
+    """Every checkpoint where both ways of playing the same weights survive."""
+    pairs = []
+    if block:
+        for pair in _pairs_of(block["arms"]):
+            pairs.append({
+                "source": block["job"], "weight": pair["weight"],
+                "greedy": {"lift": pair["greedy"]["lift"],
+                           "win": pair["greedy"]["win"], "ci": None},
+                "sampled": {"lift": pair["sampled"]["lift"],
+                            "win": pair["sampled"]["win"], "ci": None},
+                "gap": pair["gap"], "recorded": False,
+            })
+    recorded = []
+    for source, verdict in sorted(verdicts.items()):
+        if verdict.get("shape") != "arms":
+            continue
+        by_weight: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for record in verdict["records"]:
+            key = record["name"]
+            if key not in by_weight:
+                by_weight[key] = {}
+                order.append(key)
+            if record.get("mode") in ("greedy", "sampled"):
+                by_weight[key][record["mode"]] = record
+        for key in order:
+            found = by_weight[key]
+            if "greedy" not in found or "sampled" not in found:
+                continue
+            greedy, sampled = found["greedy"], found["sampled"]
+            if not (_plottable(greedy.get("lift")) and _plottable(sampled.get("lift"))):
+                continue
+            # A checkpoint whose two modes fall either side of zero. Reading
+            # one of them alone is not a partial answer, it is the wrong sign.
+            flips = (greedy["lift"] < 0) != (sampled["lift"] < 0)
+            straddles = bool(sampled.get("ci")
+                             and sampled["ci"][0] < 0 < sampled["ci"][1])
+            recorded.append({
+                "source": source, "weight": key,
+                "greedy": {"lift": greedy["lift"], "win": greedy.get("win"),
+                           "ci": greedy.get("ci")},
+                "sampled": {"lift": sampled["lift"], "win": sampled.get("win"),
+                            "ci": sampled.get("ci")},
+                "gap": greedy["lift"] - sampled["lift"],
+                "opponent": greedy.get("opponent") or sampled.get("opponent"),
+                "recorded": True, "flips": flips, "straddles_zero": straddles,
+            })
+    # Where a metrics file transcribed only one mode of a checkpoint whose
+    # other mode was measured, the per-run dashboard is reporting a number
+    # that reverses when read the other way.
+    transcribed: dict[str, set] = {}
+    for entry in entries:
+        for row in entry["evals"]:
+            weight, mode = _mode_of(row.get("arm"))
+            if mode:
+                transcribed.setdefault(_weight_key(weight), set()).add(
+                    (entry["name"], mode))
+    for item in recorded:
+        seen = transcribed.get(_weight_key(item["weight"]), set())
+        modes = {mode for _, mode in seen}
+        if len(modes) == 1:
+            only = sorted(modes)[0]
+            item["half_transcribed"] = {
+                "mode": only,
+                "runs": sorted({name for name, _ in seen}),
+                "shown": item[only]["lift"],
+                "hidden": item["sampled" if only == "greedy" else "greedy"]["lift"],
+            }
+    return {
+        "pairs": pairs, "recorded": recorded,
+        "with_mode": with_mode, "lift_rows": lift_rows,
+    }
+
+
+def _all_time(runs, notes, kinds, extras) -> dict[str, Any]:
+    """Everything the all-time view shows, computed from the same rows.
+
+    Nothing in here may vary with the clock, the path or the machine. The
+    page re-renders when the payload fingerprint moves, so a term that
+    drifted on its own would throw away scroll position, an open glossary and
+    any chart mid-scrub every fifteen seconds.
+    """
+    notes = notes or {}
+    kinds = kinds or {}
+    extras = extras or {}
+    soak = (extras.get("soak") if isinstance(extras.get("soak"), dict) else None)
+    verdicts = {name: _verdict_of(raw)
+                for name, raw in sorted((extras.get("verdicts") or {}).items())}
+
+    entries = []
+    for name, rows, _live in runs:
+        rows = list(rows)
+        entries.append({
+            "name": name,
+            "rows": rows,
+            "evals": [r for r in rows if "eval_lift_sd" in r
+                      and _plottable(r["eval_lift_sd"])],
+            "note": str(notes.get(name, "") or ""),
+            "job": kinds.get(name) == "job",
+        })
+
+    lift_rows = sum(len(e["evals"]) for e in entries)
+    lift_files = sum(1 for e in entries if e["evals"])
+    # Two runs wrote the same evaluation twice, under updates 1 and 2, before
+    # the double-write was fixed. The dedupe keys on `updates`, so both
+    # survive it and the row count overstates the measurements by two.
+    distinct = len({(e["name"], r["eval_lift_sd"], r.get("eval_win"),
+                     r.get("control_win"))
+                    for e in entries for r in e["evals"]})
+    with_mode = sum(1 for e in entries for r in e["evals"]
+                    if _mode_of(r.get("arm"))[1] is not None)
+
+    block = _block_of(entries)
+    return {
+        "census": len(entries),
+        "lift_rows": lift_rows,
+        "distinct_evals": distinct,
+        "block": block,
+        "record": _record_of(block),
+        "demoted": _demoted_of(entries, block, verdicts),
+        "groups": _groups_of(entries, verdicts),
+        "modes": _modes_of(entries, block, verdicts, lift_rows, with_mode),
+        "exhibits": _exhibits_of(entries, block, verdicts),
+        "ever": _ever_of(entries, verdicts, soak, lift_rows, lift_files),
+        "unreadable": sorted(name for name, v in verdicts.items()
+                             if v["shape"] == "unrecognised"),
     }
 
 
@@ -259,6 +998,8 @@ def render_multi(
     runs: "Sequence[tuple[str, Sequence[dict[str, Any]], bool]]",
     back: str | None = None,
     notes: "dict[str, str] | None" = None,
+    kinds: "dict[str, str] | None" = None,
+    extras: "dict[str, Any] | None" = None,
 ) -> "tuple[str, dict[str, Any]]":
     """One page holding several runs, as ``(name, rows, live)`` triples.
 
@@ -291,6 +1032,11 @@ def render_multi(
         "order": [name for name, _, _ in reversed(list(runs))],
         "back": back,
     }
+    # The cross-run view. Attached here rather than after the hash, because
+    # anything added below ships in the HTML and is invisible to `version`,
+    # so the page would never re-render for it -- stale aggregates sitting
+    # beside fresh per-run curves on the same screen.
+    body["alltime"] = _all_time(runs, notes, kinds, extras)
     # A fingerprint of the data, so the page can re-render only when something
     # actually moved. Reloading on a timer throws away scroll position, an
     # open glossary and any chart mid-scrub, several times an hour, to redraw
@@ -878,6 +1624,81 @@ function poll(){
 
 
 
+def _run_roots() -> list[Path]:
+    """Every directory a run might be under.
+
+    Agents work in git worktrees, each with its own runs/ directory, so the
+    experiments actually moving right now are usually not in this checkout at
+    all. A page showing only main's runs showed nothing live while four
+    sweeps were running a directory away.
+    """
+    roots = [ROOT / "runs"]
+    worktrees = ROOT / ".claude" / "worktrees"
+    if worktrees.is_dir():
+        roots += [w / "runs" for w in sorted(worktrees.iterdir())
+                  if (w / "runs").is_dir()]
+    return [r for r in roots if r.is_dir()]
+
+
+def _kind_of(run: Path) -> "str | None":
+    """Whether this directory is a training run or a piece of work someone did.
+
+    ``scripts/register_job.py`` writes ``kind: "job"`` on every entry it
+    registers and no trainer writes the key at all, so this is exact. Name
+    prefixes are not: ``bench-*`` and ``agent-*`` are jobs, ``probe-*`` and
+    ``ab-*`` are models, and two of the jobs carry lift rows that look
+    exactly like a model's.
+    """
+    path = run / "config.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("kind")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _read_json(path: Path) -> Any:
+    """One JSON file, or None if it cannot be read.
+
+    Two evaluation processes are writing verdict files right now, so a
+    half-written one is normal rather than an error.
+    """
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None
+
+
+def _extras_of(roots: Sequence[Path]) -> dict[str, Any]:
+    """The measurements that live beside the runs rather than inside them.
+
+    Verdict files hold the paired evaluations -- the intervals, and the only
+    record anywhere of which opponent was faced -- and one of them sits in a
+    directory with no metrics file at all, so ``discover`` cannot see it.
+    ``runs/soak-spells`` is the same: ten thousand matches, a summary, no
+    metrics file, and therefore invisible to this page until now.
+    """
+    verdicts: dict[str, Any] = {}
+    soak = None
+    for root in roots:
+        for path in sorted(root.rglob("*verdict*.json")):
+            raw = _read_json(path)
+            if raw is None:
+                continue
+            # Keyed by the run it belongs to, so it joins against the rows.
+            # A verdict under some other name keeps that name instead.
+            name = _label_for(path.parent) if path.stem == "verdict" else path.stem
+            if name in verdicts:
+                name = _label_for(path.parent) + "/" + path.stem
+            verdicts[name] = raw
+        for path in sorted(root.rglob("summary.json")):
+            raw = _read_json(path)
+            if isinstance(raw, dict) and "matches" in raw and soak is None:
+                soak = dict(raw, run=_label_for(path.parent))
+    return {"verdicts": verdicts, "soak": soak}
+
+
 #: A run whose metrics file has not been touched this recently is shown as
 #: finished. Generous on purpose: an update at the slowest cadence measured
 #: here takes a couple of minutes, and calling a live run dead is worse than
@@ -992,16 +1813,8 @@ def main(argv: list[str] | None = None) -> int:
         """
         if args.runs:
             return list(args.runs)
-        roots = [ROOT / "runs"]
-        # Agents work in git worktrees, each with its own runs/ directory, so
-        # the experiments actually moving right now are usually not in this
-        # checkout at all. A page showing only main's runs showed nothing
-        # live while four sweeps were running a directory away.
-        worktrees = ROOT / ".claude" / "worktrees"
-        if worktrees.is_dir():
-            roots += [w / "runs" for w in sorted(worktrees.iterdir())
-                      if (w / "runs").is_dir()]
         found: list[Path] = []
+        roots = _run_roots()
         for root in roots:
             if not root.is_dir():
                 continue
@@ -1028,6 +1841,7 @@ def main(argv: list[str] | None = None) -> int:
         now = time.time()
         collected = []
         notes: dict[str, str] = {}
+        kinds: dict[str, str] = {}
         for run in discover():
             metrics = run / "metrics.jsonl"
             rows = read_metrics(metrics)
@@ -1044,9 +1858,13 @@ def main(argv: list[str] | None = None) -> int:
             note = _note_of(run)
             if note:
                 notes[label] = note
+            kind = _kind_of(run)
+            if kind:
+                kinds[label] = kind
         if not collected:
             return 0
-        html, body = render_multi(collected, notes=notes)
+        html, body = render_multi(collected, notes=notes, kinds=kinds,
+                                  extras=_extras_of(_run_roots()))
         out.write_text(html, encoding="utf-8")
         # Beside the page, because a served copy polls this rather than
         # reloading itself. Written second so a reader never sees data newer
