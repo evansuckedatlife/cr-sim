@@ -929,6 +929,16 @@ class Battle:
 
         ``SpawnStartTime`` delays only the first wave; where it is absent the
         first wave waits a full cycle like every one after it.
+
+        **No ``SpawnPauseTime`` means one wave, not an infinitely fast one.**
+        Four entities in the build set ``SpawnCharacter`` with no pause, and
+        every one of them also sets ``SpawnAttach``: they are riders, not
+        spawners. Goblin Giant's two Spear Goblins and Ram Rider's rider are
+        put on their carrier's back once, when it lands. Falling back to a
+        one-tick period turned that into a wave *every tick*: a single Goblin
+        Giant produced 242 Spear Goblins in five seconds and a Ram Rider 121
+        riders, which is not a rounding error in a card, it is a different
+        game.
         """
         for entity in self.entities:
             spec = entity.spec
@@ -938,13 +948,17 @@ class Battle:
                 # A hut that has not finished landing is not producing yet.
                 continue
             due = self._spawn_timers.get(entity.id)
+            if due is not None and due < 0:
+                continue  # a one-shot rider that has already been put down
             if due is None:
                 due = spec.spawn_start_ticks or spec.spawn_pause_ticks
             if due > 0:
                 self._spawn_timers[entity.id] = due - 1
                 continue
 
-            self._spawn_timers[entity.id] = max(1, spec.spawn_pause_ticks)
+            self._spawn_timers[entity.id] = (
+                spec.spawn_pause_ticks if spec.spawn_pause_ticks > 0 else -1
+            )
             if spec.spawn_limit:
                 living = [
                     cid for cid in self._spawn_children.get(entity.id, ())
@@ -1163,6 +1177,10 @@ class Battle:
                     self._deal_flat_damage(hit.attacker.id, hit.target, parried)
             if event is not None:
                 self.damage_log.append(event)
+            # Displacement last, so the shot leaves from where the unit stood
+            # when it fired and a shoved victim is shoved from where it was hit.
+            self._recoil(hit)
+            self._melee_pushback(hit)
             if hit.spec.kamikaze:
                 # The attack *is* the death: Ice Spirit, Balloon and Wall
                 # Breakers each land one hit and are consumed by it. Without
@@ -1186,6 +1204,93 @@ class Battle:
                         self.tick,
                     )
                 )
+
+    def _recoil(self, hit) -> None:
+        """Throw an attacker backwards off its own shot.
+
+        ``AttackPushBack`` is set by exactly three units and every one of them
+        is a card you can watch do it: Firecracker kicks a full tile back on
+        each volley (which is why she drifts away from the bridge she is
+        defending), Sparky 0.75, and the evolved Battle Ram two whole tiles --
+        with ``KeepChargingAfterAttack`` beside it, so the recoil is what buys
+        it the run-up to charge again.
+
+        It is a *self* push and is deliberately not gated on
+        ``IgnorePushback``: that flag is this engine's marker for "cannot be
+        displaced by someone else" (a Log, a Fireball, a crowd), and Sparky
+        carries it while still recoiling from her own gun. Gating on it would
+        leave the field inert for two of its three users.
+
+        Distinct from ``PROJECTILE.Pushback``, the column that shoves the
+        *victim* -- that one is already read, on the projectile, and several
+        cards carry one field without the other.
+        """
+        spec = hit.spec
+        if not spec.attack_push_back:
+            return
+        attacker, target = hit.attacker, hit.target
+        if attacker.dead or attacker.kind is not EntityKind.TROOP:
+            return
+        x, y = push_away(
+            (target.x, target.y), (attacker.x, attacker.y), spec.attack_push_back
+        )
+        self._step_aside(attacker, x, y)
+
+    def _melee_pushback(self, hit) -> None:
+        """The shove that rides a particular swing of an attack sequence.
+
+        Monk is the card: ``MeleePushback3`` of 1800 against an
+        ``AttackSequence`` of three, so the same third swing that lands triple
+        damage also clears 1.8 tiles of space around him.
+        ``IsMeleePushbackAll3`` widens it from the unit he hit to everything he
+        can reach -- the data gives no radius of its own for that, so his own
+        melee ``Range`` is used, which is the distance the swing covers.
+        """
+        spec = hit.spec
+        pushes = spec.melee_pushback
+        if not pushes or hit.sequence_index >= len(pushes):
+            return
+        amount = pushes[hit.sequence_index]
+        if amount <= 0:
+            return
+        attacker = hit.attacker
+        hits_all = (
+            hit.sequence_index < len(spec.melee_pushback_all)
+            and spec.melee_pushback_all[hit.sequence_index]
+        )
+        victims = [hit.target]
+        if hits_all:
+            reach = spec.attack_range
+            victims = [
+                e
+                for e in self._index.near(attacker.x, attacker.y, reach)
+                if e.team is not attacker.team
+                and e.kind is EntityKind.TROOP
+                and not e.dead
+                and e.is_targetable
+                and distance(attacker.x, attacker.y, e.x, e.y)
+                <= reach + e.collision_radius + attacker.collision_radius
+            ]
+        for victim in victims:
+            if victim.kind is not EntityKind.TROOP or self._pushback_immune(victim):
+                continue
+            x, y = push_away((attacker.x, attacker.y), (victim.x, victim.y), amount)
+            self._step_aside(victim, x, y)
+
+    def _step_aside(self, entity: Entity, x: int, y: int) -> None:
+        """Move an entity to a shoved-to position, refusing illegal ground.
+
+        Deliberately not :meth:`_place`: that one also feeds the charge
+        accumulator, and being knocked about must not build a Prince's charge.
+        """
+        if self.arena.is_walkable(x, y, flying=entity.flying):
+            entity.x, entity.y = x, y
+            return
+        if self.arena.is_walkable(x, entity.y, flying=entity.flying):
+            entity.x = x
+            return
+        if self.arena.is_walkable(entity.x, y, flying=entity.flying):
+            entity.y = y
 
     def _after_hits(self, hit) -> None:
         """Grant a unit the buff it has earned by landing hits.
@@ -2056,6 +2161,16 @@ class Battle:
             self._place_area(
                 entity.team, spec.death_area_effect, spec.rarity, spec.level,
                 entity.x, entity.y, owner_id=entity.id,
+            )
+
+        if spec.death_spawn_projectile:
+            # Detonated where the body fell. Goblin Demolisher is the card that
+            # needs it most: its kamikaze form has no Damage and no Projectile
+            # column of its own, so this dynamite -- 158 damage over 2.5 tiles
+            # with a 2-tile shove -- is the entire payload of a suicide unit
+            # that otherwise charged a building and did nothing to it.
+            self._fire_projectile_from_action(
+                entity, spec.death_spawn_projectile, entity.x, entity.y
             )
 
         for character in (spec.death_spawn_character, spec.death_spawn_character2):

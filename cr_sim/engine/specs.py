@@ -28,6 +28,56 @@ from .fixed import SUBTILES_PER_TILE, milli_tiles
 __all__ = ["UnitSpec", "build_unit_spec", "SpecError"]
 
 
+#: Columns that exist in the schema and are deliberately NOT read, with the
+#: reason. Kept here rather than in a report so the next person to notice one
+#: missing finds the answer where they are looking.
+#:
+#: ``MeleePushback`` / ``MeleePushback2`` / ``IsMeleePushbackAll`` /
+#: ``IsMeleePushbackAll2``
+#:     Populated on nothing at all in this build. Only the *third* slot has any
+#:     user (Monk 1800, the event Mega Monk 3000), and that one is read.
+#:
+#: ``RetargetAfterAttack``
+#:     Three users, all buildings, none of them reachable from a standard card:
+#:     ``Fisherbarrel``, ``GoblinCannon``, ``Neutral_RageBarbarians``. Walking
+#:     the transitive closure of everything the 122 standard cards can put on
+#:     the board -- summons, death spawns, spawner output, transformations --
+#:     finds no user, so there is nothing to verify an implementation against.
+#:
+#: ``TargetOnlyTowers`` / ``TargetOnlyKingTower``
+#:     One user each, both mode-only: ``Mortar_Owned`` and
+#:     ``GoblinRocketSilo2``. Same reasoning.
+#:
+#: ``BuildingTarget``
+#:     Declared in both ``characters.csv`` and ``buildings.csv`` and set by
+#:     **no entity anywhere** in the build, TOML included. There is nothing to
+#:     read.
+#:
+#: ``SpecialAttacksToIgnoreList`` / ``DeathInheritIgnoreList``
+#:     Both are declared ``boolean`` in the CSV header despite the "List" in
+#:     their names, and both are set to a bare ``true`` by their only users --
+#:     ``Fisherbarrel`` for the first (not reachable), ``SpearGoblinGiant`` and
+#:     its evolution for the second. No list content exists anywhere to say
+#:     what is being ignored, so what the flag suppresses cannot be recovered
+#:     from the data. ``SpearGoblinGiant`` is the bag on a Goblin Giant's back
+#:     and does carry a ``DeathSpawnCharacter``, which places the flag near the
+#:     death-spawn path, but not what it does there.
+#:
+#: ``AttackFinishTime`` / ``OverrideAttackFinishTime`` and the
+#: ``ATTACK_FINISH_TIME_MS`` global (250)
+#:     Not implementable from the data. No entity in the build sets
+#:     ``OverrideAttackFinishTime`` at all, so the two units carrying an
+#:     ``AttackFinishTime`` (``GoblinBrawlerParty`` and ``GoblinBrawlerDouble``,
+#:     both 500, both event-only) never actually override anything -- which
+#:     leaves the global with no example to calibrate against. Nothing in the
+#:     files says whether the 250ms stops movement, delays a retarget, or is
+#:     purely an animation blend, and applying a quarter-second freeze after
+#:     every attack in the game on a guess would change every duel in the
+#:     simulator. ``StopTimeAfterAttack``, which unambiguously *is* a movement
+#:     stop, is read (:attr:`UnitSpec.stop_time_after_attack_ticks`) and is
+#:     zero on every entity that ships.
+
+
 class SpecError(ValueError):
     """Raised when an entity cannot be turned into a usable spec."""
 
@@ -120,6 +170,14 @@ class UnitSpec:
     death_pushback: int = 0
     #: An area effect left where it died -- Ice Golem's slow, for instance.
     death_area_effect: str | None = None
+    #: A projectile detonated where it died. A separate column from
+    #: ``DeathDamage``, and for three cards it is the *only* death payload
+    #: there is: Goblin Demolisher's dynamite (158 damage, 2.5-tile splash,
+    #: 2-tile pushback), the Phoenix's fireball, Goblin Party Hut's parting
+    #: shot. The Demolisher's kamikaze form carries no ``Damage`` and no
+    #: ``Projectile`` of its own at all, so without this the card's whole point
+    #: -- charging a building and blowing up on it -- lands for nothing.
+    death_spawn_projectile: str | None = None
 
     #: Periodic spawning, for the huts and for Witch and Tombstone. The first
     #: wave lands after ``spawn_start_ticks`` and then every
@@ -141,11 +199,6 @@ class UnitSpec:
     charge_speed_multiplier: int = 0
     damage_special: int = 0
 
-    #: Inferno ramp. Damage steps up the longer it holds one target, which is
-    #: why breaking line of sight (or a stun) resets it and is the only real
-    #: answer to an Inferno Tower.
-    variable_damage: tuple[int, ...] = ()
-    variable_damage_ticks: tuple[int, ...] = ()
     #: Inferno ramp. Damage steps up the longer it holds one target, which is
     #: why breaking line of sight (or a stun) resets it and is the only real
     #: answer to an Inferno Tower.
@@ -307,6 +360,21 @@ def _variable_damage_ticks(raw: Mapping[str, Any], clock: TickClock) -> tuple[in
     return tuple(times)
 
 
+def _melee_pushback(raw: Mapping[str, Any]) -> tuple[int, ...]:
+    """The per-swing shove ladder, empty where a unit has none.
+
+    Empty rather than ``(0, 0, 0)`` so the check in the attack loop is one
+    truth test on the overwhelming majority of units that never shove
+    anything: only Monk and the event Mega Monk populate any slot, and both
+    populate the third.
+    """
+    steps = tuple(
+        milli_tiles(_int(raw.get(key)))
+        for key in ("MeleePushback", "MeleePushback2", "MeleePushback3")
+    )
+    return steps if any(steps) else ()
+
+
 def build_unit_spec(
     data: LogicData,
     levels: LevelTable,
@@ -427,6 +495,7 @@ def build_unit_spec(
         death_damage_radius=milli_tiles(_int(raw.get("DeathDamageRadius"))),
         death_pushback=milli_tiles(_int(raw.get("DeathPushBack"))),
         death_area_effect=_opt_str(raw.get("DeathAreaEffect")) or None,
+        death_spawn_projectile=_opt_str(raw.get("DeathSpawnProjectile")) or None,
         spawn_character=_opt_str(raw.get("SpawnCharacter")) or None,
         spawn_count=_int(raw.get("SpawnNumber"), 1),
         spawn_start_ticks=clock.ticks(raw.get("SpawnStartTime")),
@@ -438,6 +507,14 @@ def build_unit_spec(
         damage_special=scale.scale(_int(raw.get("DamageSpecial")), level),
         variable_damage=_variable_damage(raw, scale, level),
         variable_damage_ticks=_variable_damage_ticks(raw, clock),
+        attack_sequence_length=len(_int_tuple(raw.get("AttackSequence"))),
+        melee_pushback=_melee_pushback(raw),
+        melee_pushback_all=tuple(
+            _bool(raw.get(key))
+            for key in ("IsMeleePushbackAll", "IsMeleePushbackAll2", "IsMeleePushbackAll3")
+        ),
+        attack_push_back=milli_tiles(_int(raw.get("AttackPushBack"))),
+        target_only_troops=_bool(raw.get("TargetOnlyTroops")),
         load_first_hit=_bool(raw.get("LoadFirstHit")),
         stop_time_after_attack_ticks=clock.ticks(raw.get("StopTimeAfterAttack")),
         source_ref=ref,

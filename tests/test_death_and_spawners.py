@@ -271,3 +271,81 @@ def test_a_flying_unit_is_settled_against_its_own_rules(world):
     top, bottom = battle.arena.river_band()
     over_water = (tiles(9), top + (bottom - top) // 2)
     assert battle._settle(*over_water, flying=True) == over_water
+
+
+# --------------------------------------------------------- riders, not huts
+
+
+@pytest.mark.parametrize(
+    "card, rider, expected",
+    [("GoblinGiant", "SpearGoblinGiant", 2), ("RamRider", "RamRider", 1)],
+)
+def test_a_carried_rider_is_put_down_once_and_not_on_a_loop(world, card, rider, expected):
+    """No ``SpawnPauseTime`` means one wave, not an infinitely fast one.
+
+    Four entities in the build set ``SpawnCharacter`` with no pause time, and
+    every one of them also sets ``SpawnAttach``: they are riders, not spawners.
+    Goblin Giant carries two Spear Goblins on its back and the Ram carries its
+    rider, each put down once when the carrier lands.
+
+    Falling back to a one-tick period turned that into a wave *every tick*. A
+    single Goblin Giant produced 242 Spear Goblins in five seconds and a Ram
+    Rider 121 riders -- not a rounding error in a card, a different game.
+    """
+    battle = _battle(world, card)
+    assert battle.play_card(Team.BLUE, card, tiles(9), tiles(8))
+    for _ in range(600):
+        battle.step()
+
+    carried = [
+        e for e in battle.entities
+        if not e.dead and e.spec is not None and e.spec.name == rider
+        and e.team is Team.BLUE
+    ]
+    assert len(carried) == expected, f"{len(carried)} {rider}s from one {card}"
+
+
+def test_a_hut_still_produces_on_its_cycle(world):
+    """The guard above must not stop the buildings that genuinely repeat.
+
+    Witch's ``SpawnPauseTime`` is 7000ms for four Skeletons, which is the
+    seven-second cycle the card is known for.
+    """
+    battle = _battle(world, "Witch")
+    assert battle.play_card(Team.BLUE, "Witch", tiles(9), tiles(8))
+    for _ in range(700):
+        battle.step()
+    skeletons = [
+        e for e in battle.entities + battle.graveyard
+        if e.spec is not None and e.spec.name == "Skeleton" and e.team is Team.BLUE
+    ]
+    assert len(skeletons) >= 8, f"{len(skeletons)} skeletons in 11 seconds"
+
+
+def test_a_death_spawn_projectile_detonates_where_the_body_fell(world):
+    """``DeathSpawnProjectile`` is a separate column from ``DeathDamage``.
+
+    Five entities use it and none of them also carries ``DeathDamage``, so for
+    every one of them it is the *only* death payload there is. Goblin
+    Demolisher is the clearest: neither its ordinary form nor its kamikaze form
+    has a ``Damage`` column at all, so unread, a suicide unit charged a
+    building and did nothing whatsoever to it. Phoenix and Goblin Party Hut
+    carry the same field.
+    """
+    battle = _battle(world, "GoblinDemolisher")
+    demolisher = battle._spawn_units(
+        team=Team.BLUE, character="GoblinDemolisher", count=1,
+        x=tiles(9), y=tiles(12),
+    )[0]
+    victim = battle._spawn_units(
+        team=Team.RED, character="Golem", count=1,
+        x=tiles(9), y=tiles(12.5), rarity="Epic",
+    )[0]
+    demolisher.deploy_ticks_left = 0
+    victim.deploy_ticks_left = 0
+
+    before = victim.hitpoints
+    demolisher.kill()
+    for _ in range(60):
+        battle.step()
+    assert victim.hitpoints < before, "the Demolisher's dynamite did nothing"
