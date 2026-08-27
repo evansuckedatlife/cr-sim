@@ -32,6 +32,7 @@ from cr_sim.api.encoding import (
     HP_NORM,
     OBSERVATION_V1,
     OBSERVATION_V2,
+    OBSERVATION_V3,
     SPELL_NORM,
     ObservationFeatures,
     build_encoding_config,
@@ -399,8 +400,8 @@ def test_a_new_feature_set_is_selectable_by_name_without_a_second_list():
         assert getattr(parsed, flag) is True
         assert sum(getattr(parsed, other) for other in names) == 1, (
             f"selecting {flag} by name turned something else on too")
-        assert getattr(OBSERVATION_V2, flag) is True, (
-            f"{flag} is not part of v2, which is supposed to be all of them")
+        assert getattr(OBSERVATION_V3, flag) is True, (
+            f"{flag} is not part of v3, which is supposed to be all of them")
 
     for flag, added in GRID_FEATURE_CHANNELS.items():
         channels = grid_channels(parse_observation(flag))

@@ -13,6 +13,8 @@ reimplementation of the placement rules.
 
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 import pytest
 
@@ -22,23 +24,27 @@ from cr_sim.data.source import LogicData
 from cr_sim.engine.arena import load_arena
 from cr_sim.engine.battle import Battle, BattleConfig
 from cr_sim.engine.entity import Entity, EntityKind, Team
-from cr_sim.engine.fixed import tiles
+from cr_sim.engine.fixed import tiles, to_tiles
 from cr_sim.engine.specs import build_unit_spec
 
 from cr_sim.api.encoding import (
+    DPS_NORM,
     GRID_CHANNELS,
     N_GRID_CHANNELS,
     NOOP_SLOT,
     NUM_CARD_SLOTS,
     PLACEMENT_TILE_SPAN,
+    REACH_NORM,
     _placement_grid,
     action_grid_shape,
     build_encoding_config,
     cell_to_world,
     decode_action,
     encode_observation,
+    grid_channels,
     legal_action_mask,
     observation_shapes,
+    parse_observation,
 )
 
 from .test_data_pipeline import BUILD
@@ -156,6 +162,187 @@ def test_grid_places_entities_at_the_mirrored_own_perspective_cell(world):
     blue_cells = np.argwhere(obs_blue["grid"][own_ground] > 0).tolist()
     red_cells = np.argwhere(obs_red["grid"][own_ground] > 0).tolist()
     assert blue_cells == red_cells == [[2, 9]]
+
+
+# ------------------------------------------------------------ threat channels
+#
+# What a cell can *do*, as opposed to how much of it there is. Hitpoint mass
+# alone puts a Musketeer and a Knight in a cell as roughly the same number,
+# and the difference between them -- 6.0 tiles of reach against 1.2, so she
+# kills him without ever being touched -- is the whole fight. These check that
+# the set is four channels wide, that it fills with the values the units
+# actually have, and that switching it off leaves the encoding every
+# checkpoint on disk was trained on byte for byte where it was.
+
+THREAT = "threat"
+
+
+def _threat_channels():
+    return grid_channels(parse_observation(THREAT))
+
+
+def _encode(world, battle, spec=None):
+    """``battle`` through BLUE's eyes, under ``spec``'s feature set (v1 if None)."""
+    data, _levels, registry = world
+    arena = load_arena(data)
+    config = (build_encoding_config(arena, DECK, DECK, parse_observation(spec)) if spec
+              else build_encoding_config(arena, DECK, DECK))
+    return encode_observation(battle, Team.BLUE, registry, config)
+
+
+def _stacked(world, unit, count, *, x=9, y=12):
+    """A bare board -- towers stripped -- with ``count`` of ``unit`` on one cell."""
+    battle = _bare(_battle(world, seed=7))
+    for _ in range(count):
+        _spawn(battle, world, unit, Team.BLUE, x, y)
+    return battle
+
+
+def _dps_reach(world, battle):
+    channels = _threat_channels()
+    grid = _encode(world, battle, THREAT)["grid"]
+    return grid[channels.index("own_dps")], grid[channels.index("own_reach")]
+
+
+def test_the_threat_set_adds_four_channels_and_moves_none_of_the_others(world):
+    """One entry in the registry, four channels, terrain still last -- and the
+    eight hitpoint channels bit-identical, so the set is additive rather than a
+    rearrangement that would quietly repoint every existing conv filter."""
+    channels = _threat_channels()
+    assert channels == GRID_CHANNELS[:-1] + (
+        "own_dps", "enemy_dps", "own_reach", "enemy_reach", "terrain")
+    assert len(channels) == N_GRID_CHANNELS + 4 == 13
+
+    battle = _battle(world, seed=3, hand=HAND)
+    battle.play_card(Team.BLUE, "Knight", tiles(9), tiles(12))
+    for _ in range(60):
+        battle.step()
+    plain = _encode(world, battle)["grid"]
+    threat = _encode(world, battle, THREAT)["grid"]
+    assert np.array_equal(threat[:N_GRID_CHANNELS - 1], plain[:-1]), (
+        "enabling threat moved the hitpoint channels")
+    assert np.array_equal(threat[-1], plain[-1]), "terrain did not stay last"
+
+
+def test_leaving_the_threat_set_off_encodes_exactly_what_it_did_before(world):
+    """The default observation is what every checkpoint in ``runs/`` was
+    trained on, so this pins the bytes and not just the shape: a channel that
+    displaced an existing one would not fail on a shape mismatch, it would
+    just make an old policy read the wrong plane and play badly.
+
+    The digest was taken from this same battle before the threat set existed.
+    If it moves, the default encoding moved with it.
+    """
+    battle = _battle(world, seed=3, hand=HAND)
+    battle.play_card(Team.BLUE, "Knight", tiles(9), tiles(12))
+    for _ in range(120):
+        battle.step()
+    obs = _encode(world, battle)
+    assert obs["grid"].shape == (9, 32, 18)
+    digest = hashlib.sha256()
+    digest.update(obs["grid"].tobytes())
+    digest.update(obs["vector"].tobytes())
+    assert digest.hexdigest() == (
+        "771c41111b29335f88c4fddd356850c3601c0c03fd1233378c2aa0653829b915")
+
+
+def test_damage_sums_over_a_stack_while_reach_takes_the_cell_maximum(world):
+    """The one decision in this set that is not obvious. Two Musketeers in a
+    cell put out twice the damage but do not shoot a tile further, so the two
+    halves accumulate differently: summing reach as well would read a pair of
+    Musketeers as a 12-tile siege weapon.
+    """
+    data, levels, _registry = world
+    one, two = _stacked(world, "Musketeer", 1), _stacked(world, "Musketeer", 2)
+    spec = build_unit_spec(data, levels, "Musketeer", level=11, rarity="Common",
+                           clock=one.clock)
+    # Sanity on the fixture itself: a Musketeer really is the long-reach,
+    # moderate-damage unit the rest of this reasons about.
+    assert spec.damage_per_second == pytest.approx(217.0, abs=0.1)
+    assert to_tiles(spec.attack_range) == pytest.approx(6.0)
+
+    one_dps, one_reach = _dps_reach(world, one)
+    two_dps, two_reach = _dps_reach(world, two)
+    assert one_dps.max() == pytest.approx(spec.damage_per_second / DPS_NORM)
+    assert two_dps.max() == pytest.approx(2 * spec.damage_per_second / DPS_NORM)
+    assert one_reach.max() == pytest.approx(6.0 / REACH_NORM)
+    assert two_reach.max() == pytest.approx(6.0 / REACH_NORM), (
+        "two Musketeers were read as reaching further than one")
+    # A whole card's worth of damage still reads below saturation, which is
+    # what DPS_NORM was set above the build's hardest hitter for.
+    assert 0.0 < two_dps.max() < 1.0
+
+
+def test_a_musketeer_and_a_knight_are_one_number_under_v1_and_two_under_threat(world):
+    """The gap the set closes, demonstrated the way the swarm channel's was:
+    the same hitpoints in the same cell, indistinguishable until the threat
+    channels separate them."""
+    musketeer = _stacked(world, "Musketeer", 1)
+    knight = _stacked(world, "Knight", 1)
+    # Forced equal so the v1 comparison is exact rather than approximate. The
+    # two cards' real hitpoints differ; the point is that mass is all v1 has
+    # to tell them apart with.
+    hitpoints = next(e.hitpoints for e in musketeer.entities)
+    for entity in knight.entities:
+        entity.hitpoints = hitpoints
+
+    ground = GRID_CHANNELS.index("own_ground_hp")
+    assert np.array_equal(_encode(world, musketeer)["grid"][ground],
+                          _encode(world, knight)["grid"][ground]), (
+        "the two boards were supposed to be indistinguishable under v1")
+
+    _, musketeer_reach = _dps_reach(world, musketeer)
+    _, knight_reach = _dps_reach(world, knight)
+    gap = (musketeer_reach.max() - knight_reach.max()) * REACH_NORM
+    assert gap == pytest.approx(4.8, abs=0.05), (
+        f"the reach channel put {gap:.2f} tiles between a Musketeer and a "
+        f"Knight; the measured difference is 4.8")
+
+
+def test_the_towers_are_the_boards_baseline_threat(world):
+    """A Princess Tower is the reason a defence that would lose on its own
+    holds, so it belongs in these channels -- unlike the body-count channel,
+    which deliberately leaves towers out. On an otherwise empty board the
+    threat channels are exactly the three towers a side and nothing else.
+    """
+    battle = _battle(world, seed=1)
+    channels = _threat_channels()
+    grid = _encode(world, battle, THREAT)["grid"]
+    for side in ("own", "enemy"):
+        dps = grid[channels.index(f"{side}_dps")]
+        reach = grid[channels.index(f"{side}_reach")]
+        # King 92.0 dps at 7.0 tiles, two Princesses 115.0 at 7.5.
+        assert dps.sum() == pytest.approx((92.0 + 115.0 + 115.0) / DPS_NORM, rel=1e-4)
+        assert reach.max() == pytest.approx(7.5 / REACH_NORM)
+        assert int((dps > 0).sum()) == 3, "a tower is missing from the threat channels"
+
+
+def test_threat_channels_populate_and_stay_normalised_in_a_real_battle(world):
+    """End to end rather than on a hand-built board: play a card, run the
+    engine, and check the channels carry the unit that was played on top of
+    the tower baseline -- and that nothing leaves [0, 1]."""
+    channels = _threat_channels()
+    data, levels, _registry = world
+
+    quiet = _battle(world, seed=3, hand=HAND)
+    baseline = _encode(world, quiet, THREAT)["grid"][channels.index("own_dps")].sum()
+
+    battle = _battle(world, seed=3, hand=HAND)
+    assert battle.play_card(Team.BLUE, "Knight", tiles(9), tiles(12)), (
+        "the Knight was never played, so the test proves nothing")
+    for _ in range(120):
+        battle.step()
+    grid = _encode(world, battle, THREAT)["grid"]
+    knight = build_unit_spec(data, levels, "Knight", level=11, rarity="Common",
+                             clock=battle.clock)
+
+    added = grid[channels.index("own_dps")].sum() - baseline
+    assert added == pytest.approx(knight.damage_per_second / DPS_NORM, rel=1e-3), (
+        "the played Knight did not show up in the damage channel")
+    assert grid[channels.index("enemy_dps")].sum() > 0.0, "the enemy towers vanished"
+    assert grid[channels.index("enemy_reach")].max() > 0.0
+    assert np.all(grid >= 0.0) and np.all(grid <= 1.0)
+    assert np.all(np.isfinite(grid))
 
 
 # -------------------------------------------------------------------- action
