@@ -106,7 +106,8 @@ class SearchBot:
     against a board that no longer exists.
     """
 
-    __slots__ = ("config", "team", "_rng", "_evaluated", "_encoding")
+    __slots__ = ("config", "team", "_rng", "_evaluated", "_encoding",
+                 "last_scores")
 
     def __init__(self, team: Team, config: SearchBotConfig | None = None) -> None:
         self.team = team
@@ -118,6 +119,16 @@ class SearchBot:
         self._encoding = None
         #: Branches evaluated, for reporting what a decision actually cost.
         self._evaluated = 0
+        #: Every action the last decision looked at, with what it scored:
+        #: ``[(flat_index, value), ...]``.
+        #:
+        #: The single chosen action is a poor training target. Candidates are
+        #: sampled, so the same board yields a different choice depending on
+        #: which placements happened to be drawn -- the expert is not a
+        #: function of the state, and no policy can learn one. The scores are:
+        #: they say what the search actually believed about each move, which
+        #: is what AlphaZero trains on rather than the move it played.
+        self.last_scores: list[tuple[int, float]] = []
 
     @property
     def evaluated(self) -> int:
@@ -179,11 +190,16 @@ class SearchBot:
             return (NOOP_SLOT, 0, 0)
 
         horizon = int(self.config.horizon_seconds * battle.config.ticks_per_second)
+        slots, width, height = mask.shape
         # What the board is worth if nothing more is played. Every candidate is
         # measured against this, so the bot is asking "does this card improve
         # the position" rather than "which card looks best".
-        best_value = self._score(battle, horizon) + self.config.patience
+        waiting = self._score(battle, horizon)
+        best_value = waiting + self.config.patience
         best_action = (NOOP_SLOT, 0, 0)
+        scores: list[tuple[int, float]] = [
+            (NOOP_SLOT * width * height, waiting)
+        ]
 
         for action in self._sample_actions(mask):
             branch = battle.clone()
@@ -191,8 +207,11 @@ class SearchBot:
                 continue
             self._evaluated += 1
             value = self._score(branch, horizon)
+            index = action[0] * width * height + action[1] * height + action[2]
+            scores.append((int(index), float(value)))
             if value > best_value:
                 best_value, best_action = value, action
+        self.last_scores = scores
         return best_action
 
 

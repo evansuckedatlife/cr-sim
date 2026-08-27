@@ -83,6 +83,9 @@ def main(argv: list[str] | None = None) -> int:
 
         def expert(observation, mask, battle=None):
             return bot(observation, mask, battle)
+        # collect reads the search's scores off this, and they are the real
+        # training target -- the chosen move is not a function of the state.
+        expert.bot = bot
         return expert
 
     started = time.perf_counter()
