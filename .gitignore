@@ -30,3 +30,6 @@ progress.html
 report/
 replay.html
 out.html
+*.out
+*.err
+*.log
