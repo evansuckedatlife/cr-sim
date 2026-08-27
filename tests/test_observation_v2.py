@@ -370,3 +370,40 @@ def test_the_two_encodings_do_not_produce_the_same_network(world):
 
     assert channels(OBSERVATION_V1) == 9
     assert channels(OBSERVATION_V2) == 13
+
+
+def test_a_new_feature_set_is_selectable_by_name_without_a_second_list():
+    """The contract another author adds channels against.
+
+    Adding a feature set should be one field on ``ObservationFeatures``, one
+    entry in ``GRID_FEATURE_CHANNELS`` and the lines that fill it -- and then
+    ``--observation <name>`` works and ``v2`` contains it. If any of those were
+    a hand-maintained second copy, a set would be addable and silently
+    unselectable, or selectable and silently absent from "all of it".
+
+    That matters more than the tidiness. Two independent observation changes
+    landing as one undifferentiated "v2" makes it impossible to attribute
+    which of them moved a number, which is the mistake that already cost this
+    project a round of invalid comparisons.
+    """
+    from dataclasses import fields
+
+    from cr_sim.api.encoding import GRID_FEATURE_CHANNELS
+
+    names = {field.name for field in fields(ObservationFeatures)} - {"version"}
+    for flag in GRID_FEATURE_CHANNELS:
+        assert flag in names, f"{flag} adds channels but is not a feature field"
+
+    for flag in names:
+        parsed = parse_observation(flag)
+        assert getattr(parsed, flag) is True
+        assert sum(getattr(parsed, other) for other in names) == 1, (
+            f"selecting {flag} by name turned something else on too")
+        assert getattr(OBSERVATION_V2, flag) is True, (
+            f"{flag} is not part of v2, which is supposed to be all of them")
+
+    for flag, added in GRID_FEATURE_CHANNELS.items():
+        channels = grid_channels(parse_observation(flag))
+        for channel in added:
+            assert channel in channels
+        assert channels[-1] == "terrain"

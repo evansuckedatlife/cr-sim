@@ -59,7 +59,7 @@ permanent zero the network has to learn to ignore.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from functools import lru_cache
 from typing import Sequence
 
@@ -84,6 +84,7 @@ __all__ = [
     "OBSERVATION_V1",
     "OBSERVATION_V2",
     "grid_channels",
+    "GRID_FEATURE_CHANNELS",
     "parse_observation",
     "EncodingConfig",
     "build_encoding_config",
@@ -193,9 +194,14 @@ class ObservationFeatures:
 OBSERVATION_V1 = ObservationFeatures(version=1)
 #: Everything the reference spec called for at once. Each flag is separately
 #: switchable so the ablation can say which of them paid.
+#:
+#: Built by turning every flag on rather than by listing them, so a feature
+#: added later is in "v2" automatically and cannot be silently left out of the
+#: set that is supposed to mean "all of it".
 OBSERVATION_V2 = ObservationFeatures(
-    version=2, spells=True, swarm=True,
-    hide_enemy_hand=True, hide_enemy_elixir=True,
+    version=2,
+    **{field.name: True for field in fields(ObservationFeatures)
+       if field.name != "version"},
 )
 
 
@@ -211,7 +217,10 @@ def parse_observation(spec: str) -> ObservationFeatures:
         return OBSERVATION_V1
     if text in ("v2", "2", "all"):
         return OBSERVATION_V2
-    known = {"spells", "swarm", "hide_enemy_hand", "hide_enemy_elixir"}
+    # Derived from the dataclass, not listed here, so a feature added to
+    # ObservationFeatures is selectable by name without anyone remembering to
+    # update a second copy of the list.
+    known = {field.name for field in fields(ObservationFeatures)} - {"version"}
     flags = {name.strip() for name in text.split(",") if name.strip()}
     unknown = flags - known
     if unknown:
@@ -219,6 +228,22 @@ def parse_observation(spec: str) -> ObservationFeatures:
             f"unknown observation flag(s) {sorted(unknown)}; "
             f"expected 'v1', 'v2', or any of {sorted(known)}")
     return ObservationFeatures(version=2, **{name: True for name in flags})
+
+
+#: Which grid flag contributes which channels, in the order they are added.
+#:
+#: A registry rather than a chain of ``if``s, so adding a feature set is one
+#: entry here plus one field on :class:`ObservationFeatures` plus the lines
+#: that fill it in ``_encode_grid`` -- and :func:`parse_observation` picks it
+#: up on its own. That matters because more than one person adds channels:
+#: two independent observation changes landing as one undifferentiated "v2"
+#: makes it impossible to attribute which of them moved a number, which is
+#: the mistake that already cost this project a round of invalid
+#: comparisons.
+GRID_FEATURE_CHANNELS: dict[str, tuple[str, ...]] = {
+    "swarm": _COUNT_CHANNELS,
+    "spells": _SPELL_CHANNELS,
+}
 
 
 def grid_channels(features: ObservationFeatures = OBSERVATION_V1) -> tuple[str, ...]:
@@ -229,10 +254,9 @@ def grid_channels(features: ObservationFeatures = OBSERVATION_V1) -> tuple[str, 
     indices.
     """
     channels = list(_HP_CHANNELS)
-    if features.swarm:
-        channels.extend(_COUNT_CHANNELS)
-    if features.spells:
-        channels.extend(_SPELL_CHANNELS)
+    for flag, added in GRID_FEATURE_CHANNELS.items():
+        if getattr(features, flag, False):
+            channels.extend(added)
     channels.append("terrain")
     return tuple(channels)
 
