@@ -443,6 +443,12 @@ class ActorCritic(nn.Module):
         spends roughly half its time computing a value nothing is going to
         read. Every place that only chooses an action -- a frozen self-play
         opponent, the evaluator, the browser server -- was paying that.
+
+        Measured at batch 1 on one thread: 2393us for the whole forward
+        against 1334us for this, so 44% of every inference those three do was
+        a value nobody read. Waste rather than a bottleneck, though -- an
+        interleaved A/B over whole self-play battles came back at ~1.0x,
+        because a decision is ~118ms and this forward is ~1.1ms of it.
         """
         features, spatial = self.encode_spatial(grid, vector)
         head = self.policy_head
@@ -451,23 +457,6 @@ class ActorCritic(nn.Module):
         if isinstance(head, FactoredHead):
             return head(features, vector, mask)
         return _apply_mask(head(features), mask)
-
-    def policy_logits(
-        self, grid: torch.Tensor, vector: torch.Tensor, mask: torch.Tensor
-    ) -> torch.Tensor:
-        """Masked logits alone, for callers with no use for the value.
-
-        ``forward`` runs both encoders. With ``separate_critic`` -- the
-        default -- that is two full convolutional trunks, and the second one
-        exists only to produce a number that an opponent, an evaluation or the
-        play server immediately discards. Measured at batch 1 on one thread,
-        the whole forward is 2393us and this is 1334us, so the discarded half
-        was 44% of every inference the rollout workers do.
-
-        The returned tensor is the same one ``forward`` returns first, element
-        for element: this computes a strict subset of the same graph.
-        """
-        return _apply_mask(self.policy_head(self.encode(grid, vector)), mask)
 
     @torch.no_grad()
     def act(
