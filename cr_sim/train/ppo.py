@@ -225,7 +225,12 @@ def train(
         )
     ).to(device)
     if config.value_learning_rate is None:
-        optimiser = torch.optim.Adam(net.parameters(), lr=config.learning_rate, eps=1e-5)
+        # foreach batches the per-parameter updates into a handful of fused
+        # kernels rather than four to six per tensor. On CPU it is a modest
+        # win; on an accelerator it is the difference between about a hundred
+        # and fifty launches per step and about six.
+        optimiser = torch.optim.Adam(
+            net.parameters(), lr=config.learning_rate, eps=1e-5, foreach=True)
     else:
         # Two groups by identity, not by name: with a separate critic the two
         # sets are genuinely disjoint, and with a shared trunk this correctly
@@ -239,6 +244,7 @@ def train(
                 {"params": critic, "lr": config.value_learning_rate},
             ],
             eps=1e-5,
+            foreach=True,
         )
 
     resumed_steps = resumed_updates = 0
@@ -327,18 +333,12 @@ def train(
         stats = _update(net, optimiser, rollout, config, device)
         update_index += 1
 
-        # A NaN in the weights is unrecoverable and silent: every later
-        # rollout samples from a uniform distribution, every checkpoint saved
-        # after it is worthless, and the metrics look like an ordinary bad
-        # run. Caught at the update that produced it, where the cause is
-        # still nearby.
-        if not all(torch.isfinite(p).all() for p in net.parameters()):
-            raise RuntimeError(
-                f"weights became non-finite at update {update_index} "
-                f"(step {steps_done}) on device {device}. The last good "
-                "checkpoint is still on disk; resume from it, and on a "
-                "different device if this one is new."
-            )
+        # The non-finite check lives in _update, on the gradient norm that
+        # clip_grad_norm_ already computes. Sweeping every parameter here
+        # instead was thirty pairs of tiny kernels each followed by a
+        # blocking host readback, fired straight after the optimiser queued
+        # a few hundred more -- which is precisely what exhausts a Level Zero
+        # driver's handles, and it took down every GPU run attempted.
 
         if opponents and refresh_every and update_index % refresh_every == 0:
             # Fired before the opponents refresh, so a pool gains this
@@ -478,7 +478,18 @@ def _update(
 
             optimiser.zero_grad(set_to_none=True)
             loss.backward()
-            nn.utils.clip_grad_norm_(net.parameters(), config.max_grad_norm)
+            # The norm is returned, not just applied. Checking it is free and
+            # catches a non-finite gradient at the update that produced it --
+            # which is the cause of non-finite weights, one step earlier.
+            total_norm = nn.utils.clip_grad_norm_(net.parameters(), config.max_grad_norm)
+            if not torch.isfinite(total_norm):
+                raise RuntimeError(
+                    "gradients became non-finite. Weights after this step "
+                    "would be NaN, every later rollout would sample from a "
+                    "uniform distribution, and every checkpoint saved after "
+                    "it would be worthless -- so the run stops here, with the "
+                    "last good checkpoint still on disk."
+                )
             optimiser.step()
 
             policy_loss, value_loss, entropy_value = (

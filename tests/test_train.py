@@ -380,29 +380,30 @@ def test_resuming_without_a_checkpoint_fails_loudly(tmp_path):
     ]) == 1
 
 
-def test_a_run_stops_when_the_weights_go_non_finite(world, monkeypatch):
-    """NaN weights are unrecoverable and silent.
+def test_a_run_stops_when_the_gradients_go_non_finite(world, monkeypatch):
+    """A non-finite gradient is caught at the update that produced it.
 
-    Every rollout after one samples from a uniform distribution, every
-    checkpoint saved after it is worthless, and the metrics look like an
-    ordinary bad run rather than a broken one. This project spent a night
-    on a GPU backend that produced exactly that, so the trainer now stops at
-    the update that caused it.
+    The step after one leaves every weight NaN: rollouts then sample from a
+    uniform distribution, checkpoints saved afterwards are worthless, and the
+    metrics look like an ordinary bad run rather than a broken one.
+
+    Checked on the norm that clip_grad_norm_ already returns, which is free.
+    The obvious version -- sweeping every parameter with isfinite().all() --
+    is thirty pairs of tiny kernels each followed by a blocking host readback,
+    fired right after the optimiser queues a few hundred more, and that
+    pattern exhausted the Level Zero driver on every GPU run attempted here.
     """
+    import torch.nn as nn
+
     import cr_sim.train.ppo as ppo_module
 
-    real_update = ppo_module._update
-    calls = {"n": 0}
+    real_clip = nn.utils.clip_grad_norm_
 
-    def poisoned(net, optimiser, rollout, config, device):
-        stats = real_update(net, optimiser, rollout, config, device)
-        calls["n"] += 1
-        if calls["n"] == 1:
-            with torch.no_grad():
-                next(net.parameters()).fill_(float("nan"))
-        return stats
+    def poisoned(parameters, max_norm, *args, **kwargs):
+        real_clip(parameters, max_norm, *args, **kwargs)
+        return torch.tensor(float("nan"))
 
-    monkeypatch.setattr(ppo_module, "_update", poisoned)
+    monkeypatch.setattr(ppo_module.nn.utils, "clip_grad_norm_", poisoned)
     with pytest.raises(RuntimeError, match="non-finite"):
         ppo_module.train(
             lambda index: _env(world),

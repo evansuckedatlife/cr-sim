@@ -1,2 +1,21 @@
-network on xpu
 resuming from 30,720 steps (20 updates)
+update   21  steps     32256      51/s  return  +0.0098  win   7%  entropy  4.099  pass   1%  loss -0.0477/0.0672
+update   22  steps     33792      50/s  return  -0.0333  win   4%  entropy  4.035  pass   1%  loss -0.0294/0.0446
+update   23  steps     35328      50/s  return  -0.0316  win   5%  entropy  4.073  pass   1%  loss -0.0377/0.0481
+update   24  steps     36864      50/s  return  -0.0444  win   4%  entropy  4.077  pass   2%  loss -0.0333/0.0406
+update   25  steps     38400      49/s  return  -0.0427  win   3%  entropy  4.060  pass   2%  loss -0.0211/0.0635
+update   26  steps     39936      49/s  return  -0.0239  win   5%  entropy  4.012  pass   1%  loss -0.0327/0.0568
+update   27  steps     41472      49/s  return  -0.0081  win   5%  entropy  4.013  pass   2%  loss -0.0184/0.0306
+update   28  steps     43008      49/s  return  +0.0003  win   5%  entropy  4.056  pass   2%  loss -0.0290/0.0469
+update   29  steps     44544      48/s  return  -0.0013  win   4%  entropy  4.038  pass   1%  loss -0.0348/0.0345
+update   30  steps     46080      48/s  return  +0.0166  win   4%  entropy  4.021  pass   1%  loss -0.0249/0.0301
+update   31  steps     47616      48/s  return  -0.0164  win   5%  entropy  4.034  pass   1%  loss -0.0389/0.0629
+update   32  steps     49152      47/s  return  -0.0055  win   4%  entropy  3.961  pass   2%  loss -0.0275/0.0211
+update   33  steps     50688      47/s  return  -0.0461  win   4%  entropy  3.916  pass   1%  loss -0.0366/0.0357
+update   34  steps     52224      47/s  return  -0.0317  win   4%  entropy  3.947  pass   2%  loss -0.0322/0.0469
+update   35  steps     53760      47/s  return  -0.0462  win   3%  entropy  3.889  pass   2%  loss -0.0224/0.0251
+update   36  steps     55296      47/s  return  +0.0163  win   6%  entropy  3.834  pass   2%  loss -0.0396/0.0713
+update   37  steps     56832      47/s  return  +0.0431  win   8%  entropy  3.850  pass   2%  loss -0.0387/0.0510
+update   38  steps     58368      46/s  return  +0.0547  win   8%  entropy  3.850  pass   1%  loss -0.0330/0.0438
+update   39  steps     59904      46/s  return  +0.0330  win   6%  entropy  3.868  pass   1%  loss -0.0278/0.0195
+update   40  steps     61440      46/s  return  +0.0007  win   2%  entropy  3.905  pass   2%  loss -0.0224/0.0145
