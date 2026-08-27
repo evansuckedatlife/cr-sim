@@ -26,6 +26,7 @@ the tower, which is why it never stops walking.
 
 from __future__ import annotations
 
+from math import isqrt as _isqrt
 from typing import Iterable, Sequence
 
 from .entity import Entity, EntityKind, Team
@@ -35,6 +36,7 @@ from .specs import UnitSpec
 __all__ = [
     "can_target",
     "gap_between",
+    "within_gap",
     "in_attack_range",
     "in_sight_range",
     "acquire_target",
@@ -57,9 +59,38 @@ def gap_between(attacker: Entity, target: Entity) -> int:
     between units rather than between their centres. Clamped at zero: once
     hitboxes overlap the gap cannot go negative.
     """
-    centres = distance(attacker.x, attacker.y, target.x, target.y)
-    gap = centres - attacker.collision_radius - target.collision_radius
+    dx = attacker.x - target.x
+    dy = attacker.y - target.y
+    gap = (
+        _isqrt(dx * dx + dy * dy)
+        - attacker.collision_radius
+        - target.collision_radius
+    )
     return gap if gap > 0 else 0
+
+
+def within_gap(attacker: Entity, target: Entity, reach: int) -> bool:
+    """``gap_between(attacker, target) <= reach``, without the square root.
+
+    Every range question the tick loop asks is a comparison, not a measurement:
+    is this thing close enough to hold onto, to shoot at, to see. Only target
+    *ranking* needs the gap as a number. Taking an integer square root to answer
+    a yes/no costs more than the comparison it feeds, and the whole of it can be
+    done in squared space with no approximation:
+
+    ``gap <= reach``
+        The clamp at zero cannot change the answer, since ``reach`` is never
+        negative, so this is ``centres - ra - rt <= reach``
+    ``centres <= reach + ra + rt``
+        and ``centres`` is ``isqrt(d2)``, so with ``k = reach + ra + rt``
+    ``isqrt(d2) <= k`` which is exactly ``d2 < (k + 1) ** 2``
+        for integers -- ``floor(sqrt(d2)) <= k`` iff ``d2 < (k+1)^2``. Exact,
+        integer throughout, and identical on every machine.
+    """
+    limit = reach + attacker.collision_radius + target.collision_radius + 1
+    dx = attacker.x - target.x
+    dy = attacker.y - target.y
+    return dx * dx + dy * dy < limit * limit
 
 
 def can_target(spec: UnitSpec, attacker: Entity, target: Entity) -> bool:
@@ -98,14 +129,19 @@ def can_target(spec: UnitSpec, attacker: Entity, target: Entity) -> bool:
 
 
 def in_attack_range(spec: UnitSpec, attacker: Entity, target: Entity) -> bool:
+    minimum = spec.minimum_range
+    if not minimum:
+        # The overwhelmingly common case, and the only one that never needs the
+        # gap as a number.
+        return within_gap(attacker, target, spec.attack_range)
     gap = gap_between(attacker, target)
-    if spec.minimum_range and gap < spec.minimum_range:
+    if gap < minimum:
         return False
     return gap <= spec.attack_range
 
 
 def in_sight_range(spec: UnitSpec, attacker: Entity, target: Entity, *, bonus: int = 0) -> bool:
-    return gap_between(attacker, target) <= spec.sight_range + bonus
+    return within_gap(attacker, target, spec.sight_range + bonus)
 
 
 def acquire_target(
@@ -120,19 +156,50 @@ def acquire_target(
     Nearest-first by hitbox gap, with entity id as a tiebreak so two units in
     identical positions never disagree -- an arbitrary but *stable* choice,
     which is what determinism requires.
+
+    The candidate order is irrelevant to the answer: the keys are strictly
+    ordered and ``id`` is unique, so no two candidates can tie and there is
+    exactly one minimum whatever sequence they arrive in. That is what lets
+    the caller feed this the cheapest enumeration the spatial index can
+    produce rather than a positionally ordered one.
     """
     best: Entity | None = None
-    best_key: tuple[int, int] | None = None
+    best_gap = 0
+    best_id = 0
+    sight = spec.sight_range
+    ax = attacker.x
+    ay = attacker.y
+    radius_a = attacker.collision_radius
+    team = attacker.team
     for candidate in candidates:
+        # The two cheapest and most selective rejects, ahead of the range
+        # arithmetic: half the board is friendly, and a corpse is nobody's
+        # target. `can_target` repeats them, which costs nothing next to the
+        # calls it saves.
+        if candidate.team is team or candidate.dead:
+            continue
+        reach = sight
+        if candidate.kind is EntityKind.TOWER:
+            reach += sight_bonus_for_towers
+        radius_b = candidate.collision_radius
+        limit = reach + radius_a + radius_b + 1
+        dx = ax - candidate.x
+        dy = ay - candidate.y
+        squared = dx * dx + dy * dy
+        if squared >= limit * limit:
+            continue  # outside sight; see `within_gap` for why this is exact
         if not can_target(spec, attacker, candidate):
             continue
-        bonus = sight_bonus_for_towers if candidate.kind is EntityKind.TOWER else 0
-        gap = gap_between(attacker, candidate)
-        if gap > spec.sight_range + bonus:
-            continue
-        key = (gap, candidate.id)
-        if best_key is None or key < best_key:
-            best, best_key = candidate, key
+        gap = _isqrt(squared) - radius_a - radius_b
+        if gap < 0:
+            gap = 0
+        # Compared field by field rather than as a tuple: this runs for every
+        # candidate that is actually in sight, and the tuple existed only to
+        # be thrown away.
+        if best is None or gap < best_gap or (
+            gap == best_gap and candidate.id < best_id
+        ):
+            best, best_gap, best_id = candidate, gap, candidate.id
     return best
 
 
@@ -156,7 +223,7 @@ def should_keep_target(
         return False
     if not can_target(spec, attacker, target):
         return False
-    return gap_between(attacker, target) <= spec.sight_range + range_extension
+    return within_gap(attacker, target, spec.sight_range + range_extension)
 
 
 def nearest_structure(

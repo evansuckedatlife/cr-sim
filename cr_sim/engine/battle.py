@@ -93,6 +93,11 @@ __all__ = [
 #: as an anchor rather than presented as read.
 MIRROR_EXTRA_ELIXIR = 1
 
+#: The kinds that stand still and block a path. Named at module level because
+#: an inline tuple of enum members is *rebuilt on every evaluation*, and
+#: ``_refresh_occupancy`` tests one per entity per tick.
+_STRUCTURE_KINDS = (EntityKind.BUILDING, EntityKind.TOWER)
+
 #: A clone's hitpoints, read from the card's own displayed stat sheet:
 #: ``STATS.clone`` carries a literal ``Value = "1"`` row under
 #: ``TID_SPELL_ATTRIBUTE_CLONE_HEALTH``. See `clone-hitpoints` in
@@ -713,6 +718,24 @@ class Battle:
         stash = {name: getattr(self, name) for name in self._HISTORIES}
         for name in stash:
             setattr(self, name, [])
+        # The corpses go in the memo as themselves, so the branch's id map
+        # points at the same objects its graveyard list already does.
+        #
+        # Setting `graveyard` aside is not enough on its own: `_by_id_map`
+        # keeps every entity ever registered reachable by id, dead included
+        # (that is what makes a stale target reference resolve to a corpse
+        # rather than to nothing), so deepcopy was reaching the whole
+        # graveyard through the map and rebuilding every one of them. By the
+        # end of a match that is a couple of hundred entities copied per
+        # clone, none of which any phase ever touches -- and it left the
+        # branch with two different objects for one dead unit, the shared one
+        # in `graveyard` and a private one in the map. Sharing rests on
+        # exactly the invariant the histories already rest on: nothing rereads
+        # or mutates what is already in them. Dead entities are not in
+        # `entities`, so no phase iterates them, and every path that resolves
+        # one by id tests `.dead` before doing anything with it.
+        for corpse in stash["graveyard"]:
+            memo[id(corpse)] = corpse
         try:
             clone = _deepcopy(self, memo)
         finally:
@@ -1059,9 +1082,13 @@ class Battle:
         between equidistant enemies and would erase the cost of being
         distracted, which is a real tactical currency in this game.
         """
+        by_id = self._by_id_map
         for entity in self.entities:
             spec = entity.spec
-            if entity.dead or entity.is_deploying or spec is None:
+            # `deploy_ticks_left > 0` rather than the `is_deploying` property:
+            # this runs for every entity every tick, and the property is an
+            # interpreter-level call to read one integer.
+            if entity.dead or entity.deploy_ticks_left > 0 or spec is None:
                 continue
             if entity.kind is EntityKind.TOWER and not self._can_tower_fight(entity):
                 entity.target_id = 0
@@ -1069,8 +1096,12 @@ class Battle:
             if spec.hit_speed_ticks <= 0 and spec.damage <= 0:
                 continue
 
-            current = self._entity(entity.target_id)
-            if should_keep_target(
+            target_id = entity.target_id
+            current = by_id.get(target_id) if target_id else None
+            # ``should_keep_target(None)`` is False, so the call is only ever
+            # worth making for a unit that has a target -- and most of the ones
+            # this loop walks past on a quiet board do not.
+            if current is not None and should_keep_target(
                 spec, entity, current, range_extension=self._range_extension
             ):
                 continue
@@ -1078,11 +1109,18 @@ class Battle:
             # Only entities whose cells overlap the sight circle are even
             # considered; scanning the whole board here is what made a crowded
             # match take twenty seconds.
+            #
+            # ``in_reach`` rather than ``candidates`` because a sight circle is
+            # wide enough to make the row-major cell walk the slower of the two
+            # ways to answer it. That is only allowed because
+            # :func:`acquire_target` takes a strict minimum over
+            # ``(gap, id)`` keys, and ids are unique -- no two candidates can
+            # tie, so which order they arrive in cannot change which one wins.
             reach = spec.sight_range + self._tower_sight_bonus + entity.collision_radius
             found = acquire_target(
                 spec,
                 entity,
-                self._index.candidates(entity, reach),
+                self._index.in_reach(entity, reach),
                 sight_bonus_for_towers=self._tower_sight_bonus,
             )
             if found is None:
@@ -1933,7 +1971,7 @@ class Battle:
         standing = tuple(
             (e.id, e.x // half, e.y // half)
             for e in self.entities
-            if not e.dead and e.kind in (EntityKind.BUILDING, EntityKind.TOWER)
+            if not e.dead and e.kind in _STRUCTURE_KINDS
         )
         if standing == self._occupancy_signature:
             return
@@ -1942,7 +1980,7 @@ class Battle:
         cost = self.path_grid.costs["building"]
         occupied: dict[int, int] = {}
         for entity in self.entities:
-            if entity.dead or entity.kind not in (EntityKind.BUILDING, EntityKind.TOWER):
+            if entity.dead or entity.kind not in _STRUCTURE_KINDS:
                 continue
             radius = entity.collision_radius
             cx, cy = entity.x // half, entity.y // half
@@ -1955,9 +1993,14 @@ class Battle:
     def _phase_move_units(self) -> None:
         self._refresh_occupancy()
         for entity in self.entities:
-            if entity.dead or entity.is_deploying or entity.kind is not EntityKind.TROOP:
+            # Kind first: it rejects towers, buildings, shots and spell clouds
+            # in one identity comparison, and they are most of what this loop
+            # has to walk past. `deploy_ticks_left` rather than the
+            # `is_deploying` property, for the same reason as in
+            # ``_phase_acquire_targets``.
+            if entity.kind is not EntityKind.TROOP or entity.dead:
                 continue
-            if entity.hitpoints <= 0:
+            if entity.deploy_ticks_left > 0 or entity.hitpoints <= 0:
                 continue
             spec = entity.spec
             if spec is None or spec.speed_per_tick <= 0:

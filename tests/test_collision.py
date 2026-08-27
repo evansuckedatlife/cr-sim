@@ -328,3 +328,91 @@ def test_broad_phase_does_far_less_work_than_a_full_sweep(world):
     # Measured ratios are around a tenth: 0.077 at 40 units, 0.096 at 200. The
     # ratio drifts *up* slightly with density rather than down, which is the
     # honest shape -- a fuller board genuinely has more real neighbours.
+
+
+def _reference_sweep(index, arena, *, max_radius, passes=3):
+    """The collision sweep written the obvious way, as an oracle.
+
+    Straight ``SpatialIndex.pairs`` with the rejects applied to each pair it
+    yields, and no attempt to skip anything. The shipping version folds those
+    rejects into its own copy of the broad-phase walk and skips, in later
+    passes, whatever cannot have changed -- both worth real throughput, and
+    both exactly the kind of thing that drifts. This is what it has to agree
+    with.
+    """
+    from cr_sim.engine.movement import _INCORPOREAL, separate as _separate
+
+    moved = 0
+    for _ in range(passes):
+        touched = 0
+        for a, b in index.pairs(max_radius):
+            if a.dead or b.dead:
+                continue
+            if a.kind in _INCORPOREAL or b.kind in _INCORPOREAL:
+                continue
+            if a.flying != b.flying:
+                continue
+            if a.deploy_ticks_left > 0 or b.deploy_ticks_left > 0:
+                continue
+            reach = a.collision_radius + b.collision_radius
+            if reach <= 0:
+                continue
+            dx = b.x - a.x
+            dy = b.y - a.y
+            if dx * dx + dy * dy >= reach * reach:
+                continue
+            if _separate(a, b, arena):
+                touched += 1
+        moved += touched
+        if not touched:
+            break
+    return moved
+
+
+def test_the_collision_sweep_matches_the_obvious_implementation(world):
+    """The optimised sweep must land every unit exactly where the plain one does.
+
+    Two shortcuts are being pinned here. The sweep repeats the broad-phase walk
+    rather than consuming it, so that a candidate it is going to reject never
+    has to exist as a tuple; and its later relaxation passes skip any entity
+    whose whole search span has stood still, because a pair neither of whose
+    ends has moved must reach the verdict it reached last pass.
+
+    Compared by outcome rather than by call sequence, which is the claim that
+    actually matters: separating one pair moves the units the next pair is
+    measured against, so agreeing on the final positions means agreeing on the
+    order as well. Checked from several points in a match, because a shortcut
+    that only shows up on a crowded board is exactly the shortcut that would
+    slip through a single sparse fixture.
+    """
+    from cr_sim.engine.movement import resolve_collisions
+
+    battle = _battle(world, deck=("SkeletonArmy",) * 8)
+    for team in (Team.BLUE, Team.RED):
+        battle.players[team].elixir.add(10)
+    battle.play_card(Team.BLUE, "SkeletonArmy", tiles(9), tiles(15))
+    battle.play_card(Team.RED, "SkeletonArmy", tiles(9), tiles(17))
+
+    compared = 0
+    for tick in range(160):
+        battle.step()
+        if tick % 20 or tick < 40:
+            continue
+        # Two identical boards; one gets the oracle, the other the real thing.
+        plain, fast = battle.clone(), battle.clone()
+        plain._index.rebuild(plain.entities)
+        fast._index.rebuild(fast.entities)
+        expected = _reference_sweep(
+            plain._index, plain.arena, max_radius=plain._max_radius
+        )
+        actual = resolve_collisions(
+            fast._index, fast.arena, max_radius=fast._max_radius
+        )
+        assert actual == expected, f"tick {tick}: separation count differs"
+        assert [(e.id, e.x, e.y) for e in plain.entities] == [
+            (e.id, e.x, e.y) for e in fast.entities
+        ], f"tick {tick}: units ended up somewhere else"
+        if expected:
+            compared += 1
+
+    assert compared, "no fixture tick actually had anything overlapping"

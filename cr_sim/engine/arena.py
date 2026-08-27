@@ -186,12 +186,28 @@ class Arena:
         Flying units ignore terrain entirely -- that is the whole point of
         flight in this game, and it is why the river is a real strategic
         boundary only for ground troops.
+
+        Written out flat rather than as ``in_bounds`` plus ``flags_at`` --
+        which is ``cell_at`` plus ``cell``, four calls -- because every source
+        of movement funnels through here: a route step, a straight chase and
+        every shove out of a crowd each test one to three points, for every
+        unit, every tick. The bounds test that ``cell`` repeats is exactly the
+        one ``in_bounds`` has already done, so the flat form is the same
+        arithmetic with the call overhead removed. The named helpers remain
+        for everything that is not on the tick's critical path.
         """
-        if not self.in_bounds(x, y):
+        if x < 0 or y < 0:
+            return False
+        half_width = self.half_width
+        cx = x // _SUBTILES_PER_HALF_TILE
+        if cx >= half_width:
+            return False
+        cy = y // _SUBTILES_PER_HALF_TILE
+        if cy >= self.half_height:
             return False
         if flying:
             return True
-        return not (self.flags_at(x, y) & _WATER_OR_BLOCKED)
+        return not (self.cells[cy * half_width + cx] & _WATER_OR_BLOCKED)
 
     def is_road(self, x: int, y: int) -> bool:
         return bool(self.flags_at(x, y) & _LANE_MASK)
