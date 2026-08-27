@@ -654,10 +654,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--every", type=float, default=30.0)
     args = parser.parse_args(argv)
 
-    runs = list(args.runs) if args.runs else sorted(
-        d for d in (ROOT / "runs").iterdir()
-        if d.is_dir() and (d / "metrics.jsonl").is_file()
-    ) if (ROOT / "runs").is_dir() else []
+    def discover() -> list[Path]:
+        """Which runs to show, re-asked on every refresh.
+
+        Rescanned rather than listed once at startup: a run begun after the
+        watcher was already going would otherwise never appear, and the page
+        looks identical whether a run is missing or merely quiet. That is
+        exactly how two diagnostic runs went unnoticed for several minutes.
+        """
+        if args.runs:
+            return list(args.runs)
+        root = ROOT / "runs"
+        if not root.is_dir():
+            return []
+        return sorted(
+            d for d in root.iterdir()
+            if d.is_dir() and (d / "metrics.jsonl").is_file()
+        )
+
+    runs = discover()
     if not runs:
         print("no runs to watch", file=sys.stderr)
         return 1
@@ -669,7 +684,7 @@ def main(argv: list[str] | None = None) -> int:
     def once() -> int:
         now = time.time()
         collected = []
-        for run in runs:
+        for run in discover():
             metrics = run / "metrics.jsonl"
             rows = read_metrics(metrics)
             if not rows:
@@ -687,7 +702,7 @@ def main(argv: list[str] | None = None) -> int:
         return sum(len(rows) for _, rows, _ in collected)
 
     count = once()
-    print(f"{len(runs)} run(s), {count} updates -> {out}", flush=True)
+    print(f"{len(discover())} run(s), {count} updates -> {out}", flush=True)
     if args.open:
         import webbrowser
 
