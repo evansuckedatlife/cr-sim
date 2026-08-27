@@ -126,10 +126,17 @@ class OpponentPool:
         return len(self._members)
 
     def add(self, net: ActorCritic) -> None:
-        """Take a snapshot of the current policy."""
+        """Take a snapshot of the current policy.
+
+        Kept on the CPU whatever device the learner is on. These are only
+        ever read -- to score the ladder, or to have their weights shipped to
+        a worker -- and eight copies of a network sitting on an accelerator
+        exhausted its resources partway through a run, which surfaced as an
+        optimiser step failing rather than as anything pointing here.
+        """
         import copy
 
-        clone = copy.deepcopy(net)
+        clone = copy.deepcopy(net).to("cpu")
         clone.eval()
         for parameter in clone.parameters():
             parameter.requires_grad_(False)

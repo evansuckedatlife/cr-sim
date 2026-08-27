@@ -30,7 +30,9 @@ def _net(seed: int) -> ActorCritic:
 
 
 def _first_weight(net) -> float:
-    return float(next(net.parameters()).flatten()[0])
+    # detach first: pool members carry requires_grad=False, but the live
+    # networks handed in do not, and float() on a grad-tracking tensor warns.
+    return float(next(net.parameters()).detach().flatten()[0])
 
 
 def test_the_pool_keeps_its_oldest_member(pool_capacity=3):

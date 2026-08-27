@@ -299,7 +299,7 @@ def test_each_update_writes_exactly_one_metrics_row(tmp_path):
 
     code = main([
         "--steps", "128", "--horizon", "16", "--envs", "2",
-        "--match-seconds", "20", "--eval-every", "0", "--save-every", "1000",
+        "--match-seconds", "20", "--eval-every", "0", "--device", "cpu", "--save-every", "1000",
         "--opponent", "idle", "--out", str(tmp_path), "--name", "once",
     ])
     assert code == 0
@@ -333,7 +333,7 @@ def test_a_run_resumes_from_its_checkpoint_without_losing_progress(tmp_path):
 
     common = [
         "--horizon", "16", "--envs", "2", "--match-seconds", "20",
-        "--eval-every", "0", "--save-every", "1", "--opponent", "idle",
+        "--eval-every", "0", "--device", "cpu", "--save-every", "1", "--opponent", "idle",
         "--out", str(tmp_path), "--name", "resumed",
     ]
     assert main(["--steps", "128", *common]) == 0
@@ -375,6 +375,6 @@ def test_resuming_without_a_checkpoint_fails_loudly(tmp_path):
 
     assert main([
         "--steps", "64", "--horizon", "16", "--envs", "2",
-        "--match-seconds", "20", "--eval-every", "0", "--resume",
+        "--match-seconds", "20", "--eval-every", "0", "--device", "cpu", "--resume",
         "--out", str(tmp_path), "--name", "nothing-here",
     ]) == 1
