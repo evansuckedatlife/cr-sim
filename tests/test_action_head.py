@@ -259,11 +259,11 @@ def test_the_factored_head_can_be_trained_to_a_particular_placement(env):
         logits, _ = net(grid, vector, mask)
         loss = F.cross_entropy(logits, target)
         if first is None:
-            first = float(loss)
+            first = float(loss.detach())
         optimiser.zero_grad(set_to_none=True)
         loss.backward()
         optimiser.step()
-    assert float(loss) < first
+    assert float(loss.detach()) < first
     assert int(logits.argmax(dim=-1)[0]) == 3 * cells + 11
 
     moved = {name for name, p in net.policy_head.named_parameters()
