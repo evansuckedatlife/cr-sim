@@ -60,7 +60,13 @@ class FrozenOpponent:
         self._net = self._snapshot(net)
 
     def _snapshot(self, net: ActorCritic) -> ActorCritic:
-        clone = copy.deepcopy(net)
+        # On the CPU whatever device the learner is on. An opponent does
+        # batch-of-one inference, which an accelerator is bad at anyway, and
+        # it is fed observations built on the CPU -- mixing the two dispatches
+        # convolution to a kernel the XPU backend does not implement, which
+        # surfaces as "aten::_slow_conv2d_forward is not implemented" rather
+        # than as anything mentioning the opponent.
+        clone = copy.deepcopy(net).to("cpu")
         clone.eval()
         for parameter in clone.parameters():
             parameter.requires_grad_(False)

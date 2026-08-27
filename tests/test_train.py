@@ -378,3 +378,34 @@ def test_resuming_without_a_checkpoint_fails_loudly(tmp_path):
         "--match-seconds", "20", "--eval-every", "0", "--device", "cpu", "--resume",
         "--out", str(tmp_path), "--name", "nothing-here",
     ]) == 1
+
+
+def test_a_run_stops_when_the_weights_go_non_finite(world, monkeypatch):
+    """NaN weights are unrecoverable and silent.
+
+    Every rollout after one samples from a uniform distribution, every
+    checkpoint saved after it is worthless, and the metrics look like an
+    ordinary bad run rather than a broken one. This project spent a night
+    on a GPU backend that produced exactly that, so the trainer now stops at
+    the update that caused it.
+    """
+    import cr_sim.train.ppo as ppo_module
+
+    real_update = ppo_module._update
+    calls = {"n": 0}
+
+    def poisoned(net, optimiser, rollout, config, device):
+        stats = real_update(net, optimiser, rollout, config, device)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            with torch.no_grad():
+                next(net.parameters()).fill_(float("nan"))
+        return stats
+
+    monkeypatch.setattr(ppo_module, "_update", poisoned)
+    with pytest.raises(RuntimeError, match="non-finite"):
+        ppo_module.train(
+            lambda index: _env(world),
+            PPOConfig(total_steps=256, horizon=16, num_envs=2, epochs=1,
+                      minibatches=1, seed=0),
+        )

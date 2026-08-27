@@ -327,6 +327,19 @@ def train(
         stats = _update(net, optimiser, rollout, config, device)
         update_index += 1
 
+        # A NaN in the weights is unrecoverable and silent: every later
+        # rollout samples from a uniform distribution, every checkpoint saved
+        # after it is worthless, and the metrics look like an ordinary bad
+        # run. Caught at the update that produced it, where the cause is
+        # still nearby.
+        if not all(torch.isfinite(p).all() for p in net.parameters()):
+            raise RuntimeError(
+                f"weights became non-finite at update {update_index} "
+                f"(step {steps_done}) on device {device}. The last good "
+                "checkpoint is still on disk; resume from it, and on a "
+                "different device if this one is new."
+            )
+
         if opponents and refresh_every and update_index % refresh_every == 0:
             # Fired before the opponents refresh, so a pool gains this
             # generation and then the opponents draw from a pool that
