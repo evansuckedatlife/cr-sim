@@ -146,6 +146,38 @@ class UnitSpec:
     #: answer to an Inferno Tower.
     variable_damage: tuple[int, ...] = ()
     variable_damage_ticks: tuple[int, ...] = ()
+    #: Inferno ramp. Damage steps up the longer it holds one target, which is
+    #: why breaking line of sight (or a stun) resets it and is the only real
+    #: answer to an Inferno Tower.
+    variable_damage: tuple[int, ...] = ()
+    variable_damage_ticks: tuple[int, ...] = ()
+    #: Length of the unit's ``AttackSequence`` cycle. Monk's is 3, which is
+    #: what turns his ``VariableDamage2``/``VariableDamage3`` from a *time*
+    #: ladder (Inferno's, which the ticks above drive) into a *swing* ladder:
+    #: 55, 55, 165 repeating, i.e. every third hit for triple. Zero for
+    #: everything that has no sequence.
+    attack_sequence_length: int = 0
+    #: Distance the swing at each sequence index shoves its victim, in
+    #: subtiles, from ``MeleePushback``/``MeleePushback2``/``MeleePushback3``.
+    #: Only the third slot is ever populated in this build, and only for Monk
+    #: (1800) and the event Mega Monk (3000) -- the same swing that carries the
+    #: triple damage also clears the space around it.
+    melee_pushback: tuple[int, ...] = ()
+    #: Whether that shove reaches everything in range or only the unit hit,
+    #: from ``IsMeleePushbackAll``/``...2``/``...3``.
+    melee_pushback_all: tuple[bool, ...] = ()
+    #: How far the *attacker* is thrown backwards by its own attack, in
+    #: subtiles. Firecracker's 1.0-tile recoil is the visible one -- it is why
+    #: she backs away from the bridge as she fires -- and Sparky (0.75) and the
+    #: evolved Battle Ram (2.0, which is how it gets the room to charge again)
+    #: carry the same field. Distinct from ``PROJECTILE.Pushback``, which is
+    #: what shoves the *victim*; the two are separate columns and several
+    #: cards carry one without the other.
+    attack_push_back: int = 0
+    #: Cannot target anything that is not a troop. Ram Rider's rider is the
+    #: only reachable user: the ram charges buildings while the rider's bola
+    #: only ever goes at troops.
+    target_only_troops: bool = False
     #: Sparky: the windup is not restarted from zero when she retargets.
     load_first_hit: bool = False
 
@@ -327,7 +359,17 @@ def build_unit_spec(
 
     ref = str(raw.get("__ref__", name))
     if kind is None:
-        kind = EntityKind.BUILDING if ref.startswith("BUILDING.") else EntityKind.TROOP
+        # Namespace first, then the row's own ``IsBuilding`` flag. Four entries
+        # in this build sit in ``CHARACTER`` and declare themselves buildings
+        # anyway, and one of them is reachable from a standard card:
+        # ``BrokenCannon``, what a Cannon Cart becomes at half health. Read as
+        # a troop it keeps a troop's immunity to building-targeting units, so
+        # a Giant walks straight past the wreck it is supposed to stop and hit.
+        kind = (
+            EntityKind.BUILDING
+            if ref.startswith("BUILDING.") or _bool(raw.get("IsBuilding"))
+            else EntityKind.TROOP
+        )
 
     speed = _int(raw.get("Speed"))
     return UnitSpec(

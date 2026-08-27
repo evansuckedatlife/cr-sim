@@ -38,6 +38,7 @@ __all__ = [
     "advance_attack",
     "ramp_damage",
     "apply_hit",
+    "damage_for",
     "apply_area_damage",
 ]
 
@@ -130,7 +131,7 @@ class DamageEvent:
     lethal: bool = False
 
 
-def _damage_for(
+def damage_for(
     spec: UnitSpec,
     target: Entity,
     attacker: Entity | None = None,
@@ -157,10 +158,10 @@ def _damage_for(
 def ramp_damage(spec: UnitSpec, locked_ticks: int) -> int | None:
     """Where a ramping attacker is on its damage ladder, or None if it has none.
 
-    Inferno Tower reads 17 / 62 / 331 with two 2000ms steps between them: four
-    seconds from tickle to melting a Golem. The escalation is the card -- it is
-    why an Inferno answers a tank and is useless against a swarm, and why
-    resetting it is worth a whole card.
+    Inferno Tower reads 17 / 62 / 331 with two 2000ms steps between
+    them: four seconds from tickle to melting a Golem. The escalation is the
+    card -- it is why an Inferno answers a tank and is useless against a swarm,
+    and why resetting it is worth a whole card.
     """
     ladder = spec.variable_damage
     if not ladder:
@@ -234,7 +235,7 @@ def advance_attack(
 def apply_hit(hit: PendingHit, tick: int) -> DamageEvent | None:
     """Apply a decided hit. Its target may already have died this tick."""
     dealt = hit.target.apply_damage(
-        _damage_for(hit.spec, hit.target, hit.attacker, hit.damage)
+        damage_for(hit.spec, hit.target, hit.attacker, hit.damage)
     )
     if not dealt:
         return None
@@ -272,7 +273,7 @@ def apply_area_damage(
             continue
         if distance_squared(origin[0], origin[1], target.x, target.y) > radius_squared:
             continue
-        dealt = target.apply_damage(_damage_for(spec, target))
+        dealt = target.apply_damage(damage_for(spec, target))
         if dealt:
             events.append(
                 DamageEvent(

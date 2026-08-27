@@ -81,12 +81,14 @@ class AreaEffectSpec:
     def spawns_over_time(self) -> bool:
         return bool(self.spawn_character and self.spawn_interval_ticks > 0)
     #: Action fired once, where the effect lands. Graveyard's whole trickle.
-    on_start_action: str | None
+    #: Either a name to look up or the action written out inline -- see
+    #: :func:`_action`.
+    on_start_action: "str | Mapping[str, Any] | None"
     #: Action fired **per affected entity**, every time the effect applies.
     #: Clone's is here: the spell does not do something at a point, it does
     #: something to each friendly troop it touches, and running it once at the
     #: centre would duplicate nothing.
-    on_hit_action: str | None
+    on_hit_action: "str | Mapping[str, Any] | None"
 
     @property
     def is_instant(self) -> bool:
@@ -127,6 +129,29 @@ def _bool(value: Any) -> bool:
 
 def _str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _action(value: Any) -> "str | Mapping[str, Any] | None":
+    """An action field: a name to look up, or the action written out in place.
+
+    Both spellings are in the build and they are not interchangeable. Most
+    effects reference an ``ACTION`` by name (``Graveyard_rework_Group``), but
+    two write the whole graph inline instead: ``AEO.DarkMagicAOE`` and
+    ``AEO.dead_goblinstein`` both carry an ``ActionGroup`` dict under
+    ``OnStartingAction``.
+
+    Read through a string-only helper the dict is silently discarded, and Dark
+    Magic -- whose *entire* effect is that inline graph, since the row itself
+    declares ``HitsAir: false`` and ``HitsGround: false`` and so touches
+    nothing on its own -- becomes a 5-elixir spell that does nothing at all.
+    :meth:`cr_sim.engine.actions.ActionInterpreter.run` has always accepted an
+    inline row; nothing was ever reaching it.
+    """
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, Mapping):
+        return value
+    return None
 
 
 def _layers(raw: Mapping[str, Any]) -> dict[str, bool]:
@@ -193,8 +218,8 @@ def build_area_effect_spec(
         ),
         spawn_deploy_ticks=clock.ticks(raw.get("SpawnTime")),
         spawn_randomize=_bool(raw.get("SpawnRandomizeSequence")),
-        on_start_action=_str(raw.get("OnStartingAction")),
-        on_hit_action=_str(raw.get("OnHitAction")),
+        on_start_action=_action(raw.get("OnStartingAction")),
+        on_hit_action=_action(raw.get("OnHitAction")),
     )
 
 
