@@ -82,9 +82,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="processes to spread the environments over. 0 runs them in this "
              "process, one after another. About 90%% of a decision is "
              "simulating the battle, so this is most of the throughput "
-             "available -- but it cannot carry a self-play opponent, whose "
-             "weights would have to be shipped to every worker on each "
-             "refresh, so it applies to --opponent random or idle.",
+             "available. Self-play works here too: the opponent's shapes "
+             "travel in the worker config and its weights are sent on each "
+             "refresh, so a worker runs its own opponent rather than the "
+             "parent doing every forward pass.",
     )
     parser.add_argument("--horizon", type=int, default=256)
     parser.add_argument("--tps", type=int, default=20, help="engine tick rate")
@@ -252,10 +253,21 @@ def main(argv: list[str] | None = None) -> int:
     recent: list[float] = []
 
     probe_env = _env(None)
-    probe_env.reset(seed=0)
+    probe_obs, _ = probe_env.reset(seed=0)
     config_nvec = (
         int(probe_env.action_space.nvec[1]), int(probe_env.action_space.nvec[2])
     )
+    # Enough for a worker to rebuild the opponent network. Shapes travel in
+    # the config; weights arrive per refresh, which is what lets self-play run
+    # across processes instead of costing three and a half times the
+    # throughput to stay in one.
+    net_shape = {
+        "grid_channels": int(probe_obs["grid"].shape[0]),
+        "grid_height": int(probe_obs["grid"].shape[1]),
+        "grid_width": int(probe_obs["grid"].shape[2]),
+        "vector_size": int(probe_obs["vector"].shape[0]),
+        "num_actions": int(probe_env.action_space.nvec.prod()),
+    }
 
     # Appended when resuming: the point of a restart is to keep what the
     # run had already recorded, and "w" would delete the hours being
@@ -280,6 +292,17 @@ def main(argv: list[str] | None = None) -> int:
             if net is None:
                 _write(stats)
                 return
+            # The ladder: how the policy fares against the oldest version of
+            # itself still in the pool. More readable than lift against a
+            # random control, whose per-episode spread is wide enough that a
+            # +0.23 reading on this project turned out to be noise.
+            ancestor = probe_holder.get("ancestor")
+            if ancestor is not None and args.eval_every and stats["updates"] % args.eval_every == 0:
+                stats.update(ancestor(net))
+                if "ancestor_win" in stats:
+                    print(f"          ladder: {stats['ancestor_win']:.0%} vs its own "
+                          f"generation {stats['ancestor_age']}", flush=True)
+
             probe = probe_holder.get("probe")
             if probe is not None and args.eval_every and stats["updates"] % args.eval_every == 0:
                 stats.update(probe(net))
@@ -352,6 +375,19 @@ def main(argv: list[str] | None = None) -> int:
         snapshots: list = []
         pool = OpponentPool(capacity=args.pool_size, seed=args.seed)
 
+        def _on_refresh(net, update: int) -> None:
+            """Snapshot this generation, then hand an ancestor to the workers.
+
+            Added before the draw, so the pool contains this generation when
+            the opponents pick from it -- the other order leaves the pool a
+            generation behind for ever.
+            """
+            pool.add(net)
+            if parallel is not None:
+                drawn = pool.sample()
+                if drawn is not None:
+                    parallel.set_opponent(drawn.state_dict())
+
         def _on_net(built) -> None:
             net_holder["net"] = built
             if args.opponent == "self":
@@ -367,16 +403,17 @@ def main(argv: list[str] | None = None) -> int:
                 probe_holder["ancestor"] = ancestor_probe(
                     _env, pool, nvec, episodes=args.ancestor_episodes
                 )
+                # Seeded now rather than at the first refresh: without this the
+                # workers face an idle opponent for the opening stretch of the
+                # run, which is not self-play and not what the metrics claim.
+                if parallel is not None:
+                    parallel.set_opponent(built.state_dict())
             probe_holder["probe"] = evaluation_probe(
                 lambda: _env(None), episodes=args.eval_episodes
             )
 
         parallel = None
         if args.workers:
-            if args.opponent == "self":
-                print("--workers cannot carry a self-play opponent; "
-                      "use --opponent random, or drop --workers", file=sys.stderr)
-                return 1
             from ..api.vec import CRSimVecEnv, VecEnvConfig
 
             parallel = CRSimVecEnv(
@@ -387,6 +424,7 @@ def main(argv: list[str] | None = None) -> int:
                     reward_shaping_weight=args.shaping,
                     reward_weights=_reward_weights(args),
                     opponent_seed=(args.seed * 1000 if args.opponent == "random" else None),
+                    net_config=(net_shape if args.opponent == "self" else None),
                 ),
                 num_envs=args.envs,
                 workers=args.workers,
@@ -399,6 +437,10 @@ def main(argv: list[str] | None = None) -> int:
                 on_net=_on_net,
                 opponents=snapshots,
                 refresh_every=args.refresh_every,
+                # Without this the pool holds only the network it was seeded
+                # with -- the randomly initialised one -- and self-play would
+                # spend the entire run beating a policy that never improved.
+                on_refresh=_on_refresh,
                 # The optimiser itself, not its state at startup: a checkpoint
                 # needs the moment estimates as they are when it is written.
                 on_optimiser=lambda o: optimiser_holder.__setitem__("optimiser", o),

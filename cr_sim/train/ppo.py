@@ -158,6 +158,7 @@ def train(
     on_optimiser: "Callable[[Any], None] | None" = None,
     opponents: "Sequence[Any] | None" = None,
     refresh_every: int = 0,
+    on_refresh: "Callable[[ActorCritic, int], None] | None" = None,
     resume: "dict | None" = None,
     parallel: "Any | None" = None,
 ) -> ActorCritic:
@@ -327,6 +328,12 @@ def train(
         update_index += 1
 
         if opponents and refresh_every and update_index % refresh_every == 0:
+            # Fired before the opponents refresh, so a pool gains this
+            # generation and then the opponents draw from a pool that
+            # contains it. The other order leaves the pool one generation
+            # behind for ever.
+            if on_refresh is not None:
+                on_refresh(net, update_index)
             # Every snapshot moves at once. Staggering them would have the
             # learner facing several generations in one batch, and the
             # advantage estimates would be averaging across opponents of

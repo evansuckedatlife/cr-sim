@@ -51,6 +51,7 @@ from ..data.cards import build_card_registry
 from ..data.leveling import build_level_table
 from ..data.source import LogicData
 from ..engine.entity import Team
+from .encoding import NOOP_SLOT
 from .env import CRSimEnv
 
 __all__ = ["VecEnvConfig", "CRSimVecEnv"]
@@ -78,19 +79,25 @@ class VecEnvConfig:
     #: Which reward to build. A weights object rather than a tracker, because
     #: the tracker holds a battle and this has to survive pickling.
     reward_weights: Any = None
-    #: Seed for a random opponent, or ``None`` for an idle one. A trained
-    #: opponent cannot come through here -- its weights would have to be
-    #: shipped to every worker on every refresh, which is why self-play runs
-    #: stay single-process for now.
+    #: Seed for a random opponent, or ``None`` for an idle or network one.
     opponent_seed: int | None = None
+    #: Shapes for a network opponent, if one will be sent. Weights arrive
+    #: separately through ``set_opponent`` rather than living in the config:
+    #: they change every refresh, and a config is pickled once per worker.
+    net_config: dict | None = None
     #: Environments this worker owns. Sharding several onto one process keeps
     #: the number of pipes down and amortises the round trip.
     shard: int = 1
 
 
-def _build_env(config: VecEnvConfig, data, levels, registry, index: int) -> CRSimEnv:
+def _build_env(config: VecEnvConfig, data, levels, registry, index: int,
+               network_opponent=None) -> CRSimEnv:
     opponent = None
-    if config.opponent_seed is not None:
+    if config.net_config is not None:
+        # Self-play: the callable reads whichever generation the worker
+        # currently holds, so a refresh does not rebuild the environment.
+        opponent = network_opponent
+    elif config.opponent_seed is not None:
         from ..train.run import _random_opponent
 
         opponent = _random_opponent(config.opponent_seed + index)
@@ -127,11 +134,36 @@ def _worker(config: VecEnvConfig, conn) -> None:
     with the transition. Resetting in the parent would need another round trip
     at exactly the moment the parent has nothing else to do.
     """
+    # One compute thread per worker. Torch defaults to one thread per core,
+    # so six workers on eight cores spawn roughly forty-eight threads that
+    # then fight each other for the same cores -- and the work here is a
+    # batch-of-one forward pass, which does not parallelise anyway.
+    try:
+        import torch
+
+        torch.set_num_threads(1)
+    except ImportError:  # pragma: no cover - torch is optional for the engine
+        pass
+
     data = LogicData.load(config.build)
     levels = build_level_table(data)
     registry = build_card_registry(data)
-    envs = [_build_env(config, data, levels, registry, i) for i in range(config.shard)]
+    # A holder the opponent can be swapped inside, so a new generation of
+    # weights replaces the opponent without rebuilding the environments --
+    # which would throw away every battle in progress.
+    holder: list = []
+
+    def _current(observation, mask):
+        if not holder:
+            return (NOOP_SLOT, 0, 0)
+        return holder[0](observation, mask)
+
+    envs = [
+        _build_env(config, data, levels, registry, i, network_opponent=_current)
+        for i in range(config.shard)
+    ]
     rng = np.random.default_rng(config.opponent_seed or 0)
+    nvec = [int(v) for v in envs[0].action_space.nvec]
     try:
         while True:
             try:
@@ -158,6 +190,17 @@ def _worker(config: VecEnvConfig, conn) -> None:
                         obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
                     out.append((obs, float(reward), done, crowns, env.legal_action_mask()))
                 conn.send(out)
+            elif command == "set_opponent":
+                # The weights of one frozen generation. Rebuilt here rather
+                # than sent as a live object, because a torch module does not
+                # survive a pipe and a worker has its own device anyway.
+                from ..train.nets import ActorCritic, NetConfig
+                from ..train.selfplay import FrozenOpponent
+
+                net = ActorCritic(NetConfig(**config.net_config))
+                net.load_state_dict(payload)
+                holder[:] = [FrozenOpponent(net, nvec, seed=config.opponent_seed or 0)]
+                conn.send(True)
             elif command == "close":
                 return
             else:  # pragma: no cover - defensive; the parent never sends this
@@ -266,6 +309,20 @@ class CRSimVecEnv:
                 crowns[index] = c
                 index += 1
         return obs, rewards, dones, crowns, masks
+
+    def set_opponent(self, state_dict) -> None:
+        """Give every worker a new frozen opponent.
+
+        This is what lets self-play run in parallel at all. The alternative
+        was keeping self-play single-process, which cost roughly three and a
+        half times the throughput -- and the weights are a few megabytes sent
+        once per refresh, against millions of engine ticks between them.
+        """
+        payload = {k: v.detach().cpu().clone() for k, v in state_dict.items()}
+        for conn in self._conns:
+            conn.send(("set_opponent", payload))
+        for conn in self._conns:
+            conn.recv()
 
     def close(self) -> None:
         if self._closed:
