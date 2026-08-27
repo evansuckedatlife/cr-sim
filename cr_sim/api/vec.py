@@ -88,6 +88,11 @@ class VecEnvConfig:
     #: Environments this worker owns. Sharding several onto one process keeps
     #: the number of pipes down and amortises the round trip.
     shard: int = 1
+    #: Which observation the workers encode. A frozen dataclass of plain
+    #: fields, so it pickles. A worker building v1 observations while the
+    #: parent's network expects v2 is a shape error at the first forward
+    #: pass, which is at least loud -- but only because this field exists.
+    observation: Any = None
 
 
 def _build_env(config: VecEnvConfig, data, levels, registry, index: int,
@@ -116,6 +121,8 @@ def _build_env(config: VecEnvConfig, data, levels, registry, index: int,
         reward_weights=config.reward_weights,
         max_ticks=config.max_ticks,
         opponent_policy=opponent,
+        **({} if config.observation is None
+           else {"observation": config.observation}),
     )
 
 

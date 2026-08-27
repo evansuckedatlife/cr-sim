@@ -35,7 +35,9 @@ from .reward import (
 )
 from .encoding import (
     NUM_CARD_SLOTS,
+    OBSERVATION_V1,
     EncodingConfig,
+    ObservationFeatures,
     build_encoding_config,
     decode_action,
     encode_observation,
@@ -279,6 +281,7 @@ class CRSimEnv(_EnvBase):
         max_ticks: int | None = None,
         render_mode: str | None = None,
         skip_forced: bool = True,
+        observation: ObservationFeatures = OBSERVATION_V1,
     ) -> None:
         self.data = data
         self.levels = levels
@@ -314,7 +317,9 @@ class CRSimEnv(_EnvBase):
         # tilemap never changes within an env's lifetime, and re-parsing its
         # CSV on every reset() would be pure waste across a long training run.
         self._arena: Arena = load_arena(data)
-        self._config = build_encoding_config(self._arena, self.blue_deck, self.red_deck)
+        self.observation = observation
+        self._config = build_encoding_config(
+            self._arena, self.blue_deck, self.red_deck, observation)
         shapes = observation_shapes(self._config)
         self.observation_space = DictSpace(
             {
@@ -328,6 +333,16 @@ class CRSimEnv(_EnvBase):
 
         self.battle: Battle | None = None
         self._prev_value = 0.0
+
+    @property
+    def encoding(self) -> EncodingConfig:
+        """The encoder this environment's observations and actions are built
+        with. Public because a policy network's shapes -- and, for a
+        card-conditioned head, the layout of the hand inside the observation
+        vector -- are properties of the encoding, and every caller that builds
+        a network for this env needs them from one place rather than
+        restating them."""
+        return self._config
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         del options  # accepted for Gymnasium API compatibility; unused here
