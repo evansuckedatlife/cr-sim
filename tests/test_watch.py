@@ -856,21 +856,31 @@ def test_only_arms_from_one_stated_measurement_are_ranked_against_each_other():
 
     assert block is not None, "the one comparable measurement was not found"
     assert block["job"] == name
-    # Best-first, and computed rather than copied: the fixture is not in this
-    # order and beta appears twice under two different ways of playing.
-    assert [(a["arm"], a["lift"]) for a in block["arms"]] == [
-        ("beta, greedy", 0.55), ("alpha, greedy", 0.40), ("beta, sampled", 0.22)]
+    # Partitioned by play mode, best-first inside a partition, and computed
+    # rather than copied: the fixture is in none of these orders and beta
+    # appears twice under two different ways of playing.
+    assert [(g["mode"], [(a["arm"], a["lift"]) for a in g["arms"]])
+            for g in block["groups"]] == [
+        ("greedy", [("beta, greedy", 0.55), ("alpha, greedy", 0.40)]),
+        ("sampled", [("beta, sampled", 0.22)])]
     assert block["seeds"] == 150
 
-    ranked = [a["arm"] for a in block["arms"]]
-    assert not any("idler" in arm for arm in ranked), \
+    # The decoy is not on the ladder at all -- asserted on the lifts, because
+    # arm labels are built from the `arm` field and could never carry a run
+    # name whatever the implementation did.
+    assert 0.90 not in [a["lift"] for a in block["arms"]], \
         "an idle-scale lift was ranked against random-scale ones"
     # And it is not simply dropped -- the largest number on the machine is
     # shown, in the one place it cannot be mistaken for the record.
     assert payload["alltime"]["demoted"]["name"] == "idler"
     assert payload["alltime"]["demoted"]["lift"] == 0.90
-    assert payload["alltime"]["record"]["top"]["lift"] == 0.55, \
-        "the record was taken from the biggest number rather than the best comparable one"
+    # ... which is a different scale from the record's, and the payload says
+    # so rather than leaving the two headline numbers side by side.
+    assert payload["alltime"]["demoted"]["same_scale"] is False
+    record = payload["alltime"]["record"]
+    assert [(m["mode"], m["top"]["lift"]) for m in record["modes"]] == [
+        ("greedy", 0.55), ("sampled", 0.22)], \
+        "the record was taken from the biggest number rather than the best comparable one in each mode"
 
 
 def test_an_equal_control_rate_does_not_by_itself_license_a_ranking():
@@ -969,9 +979,15 @@ def test_greedy_and_sampled_readings_of_one_checkpoint_are_kept_apart():
     assert modes["with_mode"] == 3 and modes["lift_rows"] == 3
 
     record = payload["alltime"]["record"]
-    assert record["top"]["mode"] == "greedy" and record["twin"]["mode"] == "sampled", \
+    # One record per way of playing, each beside the same weights played the
+    # other way. A single record across both modes is `max(greedy, sampled)`,
+    # which is the operation the page condemns clone_policy for.
+    greedy, sampled = record["modes"]
+    assert greedy["mode"] == "greedy" and greedy["top"]["arm"] == "beta, greedy"
+    assert greedy["twin"]["mode"] == "sampled" and greedy["twin"]["lift"] == 0.22, \
         "the record is not a pair, so one of the two numbers can be quoted alone"
-    assert record["twin"]["lift"] == 0.22
+    assert sampled["mode"] == "sampled" and sampled["top"]["arm"] == "beta, sampled"
+    assert sampled["twin"]["lift"] == 0.55
 
 
 def test_an_unrecognised_arm_label_reads_as_unknown_rather_than_greedy():
@@ -1002,6 +1018,22 @@ def test_every_run_on_the_page_is_counted_once_in_the_census():
     runs = [(f"run{i}", [_row(1, 1000 * i)], False) for i in range(1, 6)]
     _page, payload = render_multi(runs)
     assert payload["alltime"]["census"] == len(payload["runs"]) == 5
+
+    # The collision this docstring is about, actually built. `body["runs"]`
+    # is keyed by label, so the duplicate collapses into one tab there; a
+    # census counted off the input list instead says 3 above two tabs, and
+    # every total the duplicate touches is counted twice. Passing the same
+    # run path twice on the command line produces exactly this.
+    doubled = [("dup", [_row(1, 1000, episodes=40)], False),
+               ("dup", [_row(1, 1000, episodes=40)], False),
+               ("solo", [_row(1, 500, episodes=10)], False)]
+    _page, payload = render_multi(doubled)
+    assert payload["alltime"]["census"] == len(payload["runs"]) == 2
+    assert payload["order"] == ["solo", "dup"], "one run, two tabs"
+    assert payload["alltime"]["ever"]["episodes"]["models"] == 50, \
+        "a label that arrived twice was counted twice in the totals"
+    assert payload["alltime"]["collisions"] == ["dup"], \
+        "the collision was absorbed without a word"
 
 
 def test_the_same_evaluation_written_twice_counts_once():
@@ -1056,7 +1088,10 @@ def test_a_resumed_run_is_totalled_by_its_segments_not_its_largest_row():
     assert ever["updates"]["models"] == 5
 
     assert ever["models"] == 2 and ever["jobs"] == 1
-    assert ever["episodes"]["jobs"] == 9000, "a job leaked into the model tally"
+    # 7 + 9000. A job row is not a running counter -- it is one independent
+    # quantity per row -- so the rows add, where the cumulative rule read the
+    # largest and reported 150 for a job that played 1,050 battles.
+    assert ever["episodes"]["jobs"] == 9007, "a job leaked into the model tally"
     assert ever["steps"]["models"] == 4500, "a batch size was counted as training steps"
     assert ever["runs"] == 3
 
@@ -1100,7 +1135,10 @@ def test_the_battle_ledger_names_its_sources_and_leaves_the_estimate_out():
 
     # One evaluation and one run that evaluated, at the 40-episode default.
     assert battles["estimated"]["n"] == 80
-    assert battles["estimated"]["n"] not in (battles["total"],), "the estimate was added in"
+    # Compares the estimate against what the total is actually made of. The
+    # old form compared 80 against 11,020 and could never fire.
+    assert battles["estimated"]["what"] not in counted, "the estimate was added in"
+    assert battles["total"] == sum(c["n"] for c in battles["counted"])
     assert battles["excluded"]["n"] == 8765
     assert battles["excluded"]["items"][0]["what"] == "engine vs community sheet"
     # Every line says how it was counted, or it does not belong on the page.
@@ -1139,13 +1177,20 @@ def test_a_verdict_is_read_by_its_fields_and_an_unknown_shape_says_so():
         "a shape nobody has seen was read as though it were understood"
 
     recorded = alltime["modes"]["recorded"]
-    assert len(recorded) == 1
+    assert [r["weight"] for r in recorded] == ["cloned", "baseline clone"], \
+        "the paired verdict was skipped, so the flat mirror's hidden half stays hidden"
+    # The paired file: both halves survive, so both are shown even though the
+    # flat block beside them would have handed a reader greedy alone.
+    paired = recorded[0]
+    assert (paired["greedy"]["lift"], paired["sampled"]["lift"]) == (1.623, 0.709)
+    assert paired["gap"] == pytest.approx(1.623 - 0.709)
+    assert paired["opponent"] is None, "an opponent was invented for a file that names none"
     # Renamed for the reader: "_diag" is a scratch directory, not an arm.
-    assert recorded[0]["weight"] == "baseline clone"
-    assert recorded[0]["opponent"] == "random", \
+    arms = recorded[1]
+    assert arms["opponent"] == "random", \
         "the one file that records its opponent was not read for it"
-    assert recorded[0]["gap"] == pytest.approx(1.623 - 0.734)
-    assert recorded[0]["straddles_zero"] is True
+    assert arms["gap"] == pytest.approx(1.623 - 0.734)
+    assert arms["straddles_zero"] is True
 
     # 150 greedy + 150 sampled for the clone, 40 for the expert, 300 for the
     # arms file -- and nothing at all from the shape that was not recognised.
@@ -1163,7 +1208,11 @@ def test_no_interval_is_invented_for_a_row_that_does_not_carry_one():
     above the ladder instead, which loses nothing.
     """
     name, rows, note = _block()
-    _page, payload = render_multi([(name, rows, False)],
+    # The expert's verdict has to belong to a run on the page, or nothing
+    # reaches it and the fixture proves nothing about intervals at all.
+    expert = [_row(1, 0, episodes=40, eval_lift_sd=2.7, eval_win=1.0,
+                   control_win=0.925)]
+    _page, payload = render_multi([("expert", expert, False), (name, rows, False)],
                                   notes={name: note}, kinds={name: "job"},
                                   extras={"verdicts": {
                                       "expert": {"episodes": 40, "lift": 2.7,
@@ -1174,6 +1223,9 @@ def test_no_interval_is_invented_for_a_row_that_does_not_carry_one():
         assert "ci" not in arm, "a ladder row grew an interval from nowhere"
     for pair in alltime["modes"]["pairs"]:
         assert pair["greedy"]["ci"] is None and pair["sampled"]["ci"] is None
+    # Where an interval is a field of an object it is read, and only there.
+    assert alltime["demoted"]["name"] == "expert"
+    assert alltime["demoted"]["ci"] == [2.4, 3.1]
     # The note is the interval channel, and it ships verbatim.
     assert alltime["block"]["note"] == note
 
@@ -1198,6 +1250,23 @@ def test_the_all_time_aggregate_is_inside_the_payload_fingerprint():
     assert after["alltime"]["ever"]["episodes"]["models"] == 90
     assert before["version"] != after["version"], \
         "the aggregate moved and the page would never have redrawn"
+
+    # The rows moving is not the test. Changing the rows moves `version`
+    # through `body["runs"]` wherever the aggregate is attached, so an
+    # aggregate computed after the hash passes on the fixture above. This
+    # moves something only the aggregate can see: the soak summary, which has
+    # no metrics file and therefore no run tab of its own.
+    extras = {"soak": {"matches": 10000, "mean_ticks": 1770.15}}
+    louder = {"soak": {"matches": 99999, "mean_ticks": 1770.15}}
+    _p, quiet = render_multi([("run", first, True)], extras=extras)
+    _p, loud = render_multi([("run", first, True)], extras=louder)
+
+    assert (quiet["alltime"]["ever"]["battles"]["total"]
+            != loud["alltime"]["ever"]["battles"]["total"])
+    assert quiet["version"] != loud["version"], \
+        "the ledger moved by 90,000 battles under an unchanged fingerprint"
+    assert quiet["runs"] == loud["runs"], \
+        "the fixture moved a run as well, so this proves nothing about the aggregate"
 
 
 def _multi_body(runs, **kwargs):
@@ -1255,9 +1324,26 @@ def test_the_way_into_the_all_time_view_is_never_hidden_by_a_media_query():
             hidden.append(block)
 
     assert hidden, "no media query hides anything, so this test proves nothing"
-    for block in hidden:
-        assert ".view-toggle" not in block, \
-            "the only way into the all-time view is hidden at some width"
+    # By class, by id, and by container -- matching the class name alone let
+    # three plausible ways of making the button unreachable at 390px through:
+    # hiding `#viewall`, hiding `.tabbar` around it, or `visibility:hidden`
+    # rather than `display:none`.
+    for start in [m.start() for m in re.finditer(r"@media", style)]:
+        depth, i = 0, style.index("{", start)
+        for j in range(i, len(style)):
+            if style[j] == "{":
+                depth += 1
+            elif style[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        block = style[start:j + 1].replace(" ", "")
+        if not ("display:none" in block or "visibility:hidden" in block
+                or "opacity:0" in block):
+            continue
+        for target in (".view-toggle", "#viewall", ".tabbar"):
+            assert target not in block, \
+                f"{target} is hidden at some width, and the all-time view goes with it"
 
 
 @needs_node
@@ -1280,6 +1366,10 @@ def test_the_ladder_draws_the_arms_it_ranked_and_not_the_one_it_refused_to():
     assert "+0.400" in drawn and "+0.220" in drawn
     assert "+0.900" not in drawn, \
         "an idle-scale lift was drawn onto a random-scale ladder"
+    # The provenance claim the header makes is checkable against its source,
+    # because the note that licensed the ranking is quoted whole beside it.
+    assert note.replace('"', "&quot;") in drawn, \
+        "the ladder asserts conditions without showing what stated them"
 
     # It is not suppressed either -- it is shown once, where it cannot be
     # mistaken for the best result.
@@ -1299,7 +1389,12 @@ def test_a_lift_and_the_scale_it_was_read_on_are_one_element():
     """
     name, ladder, note = _block()
     unknown = [_row(1, 1000, eval_lift_sd=0.61, eval_win=0.7, control_win=0.85)]
-    runs = [("mystery", unknown, False), (name, ladder, False)]
+    # A reading at the measured idle rate, so the naming machinery is live in
+    # the same payload: "vs idle" is absent below because 0.85 was withheld a
+    # name, not because nothing on this page could ever have earned one.
+    idler = [_row(1, 1000, eval_lift_sd=0.44, eval_win=0.6, control_win=0.925)]
+    runs = [("mystery", unknown, False), ("idler", idler, False),
+            (name, ladder, False)]
     kw = {"notes": {name: note}, "kinds": {name: "job"}}
 
     drawn = _call_multi(runs, "ladderMarkup(DATA.alltime)", **kw)
@@ -1308,7 +1403,10 @@ def test_a_lift_and_the_scale_it_was_read_on_are_one_element():
 
     groups = _call_multi(runs, "groupsMarkup(DATA.alltime)", **kw)
     assert '+0.610<span class="chip warn">scale unidentified (control 0.85)</span>' in groups
-    assert "vs idle" not in groups, "an unmatched control rate was given a name"
+    assert '+0.440<span class="chip dim">vs idle (inferred)</span>' in groups, \
+        "a rate that does match a measured control was not named"
+    assert "vs idle" not in groups.split("+0.610", 1)[0].rsplit("<details", 1)[-1], \
+        "an unmatched control rate was given a name"
 
 
 @needs_node
@@ -1328,6 +1426,17 @@ def test_with_nothing_comparable_the_view_says_so_instead_of_ranking():
     assert "No comparable ranking on disk" in out
     # The bigger number must not have been quietly crowned instead.
     assert out.index("No comparable ranking on disk") < out.index("+0.900")
+
+    # And the ladder section itself has to be the empty state. Both checks
+    # above are satisfiable from elsewhere on the page -- the phrase is also
+    # emitted by the record panel, and the demoted strip is always drawn
+    # before the ladder -- so a fallback that sorted every group's runs into
+    # one cross-scale ranking passed them both while rendering exactly the
+    # bug this test is named for.
+    ladder = out.split("The comparable ladder</h2>", 1)[1].split("<h2>", 1)[0]
+    assert "No comparable ranking on disk" in ladder
+    assert "+0.900" not in ladder and "+0.310" not in ladder, \
+        "an idle-scale reading was ranked against a random-scale one"
 
 
 @needs_node
@@ -1365,6 +1474,21 @@ def test_the_battle_ledger_on_the_page_adds_up_to_what_it_prints():
     out = _call_multi(runs, "everMarkup(DATA.alltime)", **kw)
     for figure in ("120", "10,000", "600", "10,720"):
         assert figure in out, f"{figure} is part of the total but never shown"
+
+    # Each figure has to be its own printed line item, and the printed line
+    # items have to add up to the printed total. Substring checks alone pass
+    # when the ledger stops printing its rows: 10,000 also appears in the
+    # soak panel, 600 in the excluded row, and the total in its own cell --
+    # so the "verifiable by eye" property was never being tested.
+    counted = out.split("Below the rule", 1)[0]
+    items = re.findall(r"<td>([^<]*)<div class=\"caption\">[^<]*"
+                       r"</div></td><td class=\"n\">([\d,]+)</td>", counted)
+    named = {what: int(n.replace(",", "")) for what, n in items}
+    assert named == {"training episodes": 120, "engine soak matches": 10000,
+                     "sim vs arithmetic winner": 600}, \
+        "the ledger printed a total with its own line items missing"
+    assert sum(named.values()) == 10720
+    assert ">10,720<" in out, "the total nothing sums to"
     # The soak run has no metrics file, so nothing else on the page knows it
     # happened -- which is exactly why it is counted here.
     assert "1770.15 ticks" in out
@@ -1426,3 +1550,867 @@ process.stdout.write(JSON.stringify({
     assert out["charts"] == 0, "a chart was registered on a view with no time axis"
     # The tab rail is still painted, because tapping a run is the way back.
     assert "2 runs" in out["foot"]
+
+
+# ------------------------------------------------- the licence to rank at all
+#
+# `_block_of` is the only thing on this page that produces an ordering, and
+# every clause of its gate is what stops that ordering being a cross-scale
+# ranking. Four of the five used to be deletable with the whole suite still
+# green, and deleting the shared-control clause produced exactly the failure
+# the view exists to prevent: an idle-scale lift crowned as the record and
+# stamped "vs random (stated)".
+
+
+def _gate_rows(**patch):
+    """Three arms of one job that qualify, before `patch` breaks one thing."""
+    rows = [
+        _row(1, 0, episodes=150, arm="alpha, greedy",
+             eval_lift_sd=0.55, eval_win=0.61, control_win=0.26),
+        _row(2, 0, episodes=150, arm="beta, greedy",
+             eval_lift_sd=0.40, eval_win=0.52, control_win=0.26),
+        _row(3, 0, episodes=150, arm="gamma, greedy",
+             eval_lift_sd=0.22, eval_win=0.44, control_win=0.26),
+    ]
+    for key, value in patch.items():
+        index, field = key.split("_", 1)
+        rows[int(index)][field] = value
+    return rows
+
+
+_GATE_NOTE = ("All three arms against the SAME random opponent on the SAME "
+              "150 paired seeds.")
+
+
+def _gate_block(rows, note=_GATE_NOTE, kind="job"):
+    _page, payload = render_multi([("j", rows, False)],
+                                  notes={"j": note},
+                                  kinds=({"j": kind} if kind else {}))
+    return payload["alltime"]["block"]
+
+
+def test_the_ranking_gate_needs_a_job():
+    """A training run's rows are a trajectory, not a table of arms.
+
+    Sorting them by value ranks a run against its own past selves and calls
+    the best moment the result.
+    """
+    assert _gate_block(_gate_rows()) is not None, "the fixture does not qualify"
+    assert _gate_block(_gate_rows(), kind=None) is None,         "a run that no config called a job was ranked as one"
+
+
+def test_the_ranking_gate_needs_every_row_to_name_its_arm():
+    """One unlabelled row and the ladder has a bar nobody can attribute."""
+    assert _gate_block(_gate_rows(**{"2_arm": ""})) is None
+    assert _gate_block(_gate_rows(**{"2_arm": "   "})) is None,         "whitespace was accepted as an arm name"
+
+
+def test_the_ranking_gate_needs_one_control_rate_across_every_arm():
+    """The clause whose removal reproduces the original disaster exactly.
+
+    A job with one arm read against a control that wins 92.5% of its own
+    matches and two read against one winning 26% is two measurements, and
+    ranking them puts an idle-scale number at the top of a random-scale
+    ladder wearing a "(stated)" chip.
+    """
+    mixed = _gate_rows(**{"0_control_win": 0.925, "0_eval_lift_sd": 2.90})
+    assert _gate_block(mixed) is None,         "arms on two different scales were ranked against each other"
+
+
+def test_the_ranking_gate_needs_a_control_that_was_actually_measured():
+    """A shared rate matching nothing measured is a shared unknown.
+
+    Three of the five rates on disk match neither the idle control nor the
+    random one, and a note claiming one opponent does not turn an
+    unidentified scale into an identified one.
+    """
+    unknown = _gate_rows(**{"0_control_win": 0.44, "1_control_win": 0.44,
+                            "2_control_win": 0.44})
+    assert _gate_block(unknown) is None
+    # Unless the rows say who they faced, which is evidence and not inference.
+    named = _gate_rows(**{"0_control_win": 0.44, "1_control_win": 0.44,
+                          "2_control_win": 0.44,
+                          "0_eval_opponent": "expert",
+                          "1_eval_opponent": "expert",
+                          "2_eval_opponent": "expert"})
+    block = _gate_block(named)
+    assert block is not None and block["scale"]["named"] == "expert"
+
+
+def test_the_ranking_gate_needs_the_arms_to_have_run_the_same_battles():
+    """Arms over different numbers of battles were not on one seed set.
+
+    Without this the block still built, and the record card printed "0 paired
+    seeds" above the words "one opponent, one seed set" -- fabricating the
+    provenance claim the page exists to protect.
+    """
+    assert _gate_block(_gate_rows(**{"2_episodes": 90})) is None,         "arms that ran different numbers of battles were called one seed set"
+    stripped = _gate_rows()
+    for row in stripped:
+        row.pop("episodes")
+    assert _gate_block(stripped) is None,         "a block with no seed count at all still claimed one"
+
+
+def test_the_ranking_gate_needs_the_note_to_state_the_conditions():
+    """Equal control rates do not license a ranking; a stated method does."""
+    assert _gate_block(_gate_rows(), note="Four arms, plotted best first.") is None
+    assert _gate_block(_gate_rows(), note="") is None
+
+
+def test_a_note_that_denies_its_conditions_is_not_a_licence_to_rank():
+    """The word SAME twice is not a claim, and counting it is not a gate.
+
+    "Arms did NOT face the SAME opponent and were NOT played on the SAME
+    seeds" says SAME twice and carries no caveat. A substring count read it
+    as a licence, and the page printed a record, a sorted ladder and a "vs
+    random (stated)" chip on top of a note denying every one of them.
+    """
+    from cr_sim.train.watch import _states_shared_conditions
+
+    denial = ("Arms did NOT face the SAME opponent and were NOT played on "
+              "the SAME seeds. Do not rank these against each other.")
+    assert _states_shared_conditions(denial) is False
+    assert _gate_block(_gate_rows(), note=denial) is None
+
+    # And the absence of the word CAVEAT is not the other half either: the
+    # claim has to be made, and has to name both things it is claiming.
+    assert _states_shared_conditions("Ran the sweep overnight.") is False
+    assert _states_shared_conditions("The SAME opponent throughout.") is False,         "one mention of one condition was read as both"
+    assert _states_shared_conditions(
+        "The SAME opponent, twice, on the SAME afternoon.") is False,         "a claim about one opponent alone licensed a ranking on seeds too"
+    assert _states_shared_conditions(
+        "The SAME 150 seeds, run on the SAME afternoon.") is False
+    assert _states_shared_conditions(
+        "Every arm met the SAME opponent on the SAME seeds.") is True
+    assert _states_shared_conditions(
+        "Every arm met the SAME opponent on the SAME seeds.\n"
+        "CAVEAT: the targets changed too.") is False
+
+
+def test_the_gate_that_is_open_produces_a_page_that_says_so_consistently():
+    """The record chip, the ladder header and the note must agree.
+
+    The "(stated)" chip and the seed count are claims about method. They are
+    only ever printed where the gate passed, and the gate's own note is
+    quoted underneath so the claim can be checked against its source.
+    """
+    block = _gate_block(_gate_rows())
+    assert block["scale"]["stated"] is True and block["seeds"] == 150
+    assert block["note"] == _GATE_NOTE
+
+
+# ------------------------------------------------------ reading what is there
+
+
+def test_an_opponent_written_on_the_row_is_read_off_the_row():
+    """`eval_opponent` is mandatory on every new lift row and was never read.
+
+    `selfplay.check_lift_is_named` refuses to write `eval_lift_sd` without it,
+    so a lift that names a third opponent is not hypothetical. Inferring
+    "idle" from a control rate that happens to sit at 92.5% puts a
+    confidently wrong opponent on a number that names its own.
+    """
+    rows = [_row(1, 1000, eval_lift_sd=1.4, eval_win=0.62, control_win=0.925,
+                 eval_opponent="expert")]
+    _page, payload = render_multi([("expert-probe", rows, False)])
+    alltime = payload["alltime"]
+
+    scale = alltime["demoted"]["scale"]
+    assert scale["named"] == "expert" and scale["source"] == "recorded"
+    assert scale["opponent"] == "expert", "a recorded opponent was overruled by a guess"
+    # The disagreement is carried rather than resolved: the rate does match
+    # the idle control, and that is worth saying and not worth acting on.
+    assert scale["anchor"] == "idle" and scale["conflict"] is True
+    # A row that names its opponent is not on an unidentified scale.
+    assert alltime["unidentified"] == 0
+    assert alltime["named_rows"] == 1
+    # And the group it lands in is headed by the name, not the inference.
+    assert alltime["groups"][0]["scale"]["named"] == "expert"
+
+
+@needs_node
+def test_a_page_whose_rows_name_their_opponents_stops_saying_none_of_them_do():
+    """Two sentences on the page assert that not one lift names its opponent.
+
+    They were hardcoded, and stayed on the page while every row in the
+    payload named one.
+    """
+    rows = [_row(1, 1000, eval_lift_sd=1.4, eval_win=0.62, control_win=0.925,
+                 eval_opponent="expert")]
+    runs = [("expert-probe", rows, False)]
+
+    out = _call_multi(runs, "allTimeMarkup(DATA.alltime)")
+    assert "Not one lift on disk names the opponent" not in out
+    assert "1 of 1 readings name the opponent" in out
+    assert "vs expert (recorded)" in out
+    assert "vs idle (inferred)" not in out,         "an opponent was inferred over the one the row records"
+
+
+def test_both_arms_of_a_row_that_holds_two_are_read():
+    """`rotating_probe` writes greedy and sampled on one row.
+
+    `eval_lift_sd` is the sampled arm by that function's own contract, and
+    `eval_lift_sd_greedy` is the argmax beside it. Selecting rows on
+    `"eval_lift_sd" in row` reads the sampled number, shows no mode and drops
+    the greedy arm off the page -- including out of the largest-number panel,
+    which is where it would have been.
+    """
+    rows = [_row(1, 1000, eval_lift_sd=-0.2, eval_win=0.3, control_win=0.26,
+                 eval_opponent="random", eval_lift_sd_greedy=2.9,
+                 eval_win_greedy=0.9)]
+    _page, payload = render_multi([("rotating-probe-run", rows, False)])
+    alltime = payload["alltime"]
+
+    assert alltime["lift_rows"] == 2, "one row holding two readings counted as one"
+    readings = sorted((r["mode"], r["best"]) for r in
+                      [{"mode": alltime["demoted"]["mode"],
+                        "best": alltime["demoted"]["lift"]}])
+    assert readings == [("greedy", 2.9)],         "the largest number in the payload never reached the page"
+    assert alltime["modes"]["with_mode"] == 2,         "neither arm was given the mode its writer recorded"
+    group = alltime["groups"][0]["runs"][0]
+    assert group["modes"] == ["greedy", "sampled"]
+
+
+def test_readings_that_record_no_control_at_all_are_not_one_group():
+    """`register_job.py` skips the naming guard, so such rows are reachable.
+
+    Bucketing every one of them under a single `None` key and then sorting
+    inside that card prints an idle-scale reading above a random-scale one
+    under identical "scale unidentified" chips -- a ranking across the widest
+    scale gap on the machine, drawn as though it were a card.
+    """
+    idle = [_row(1, 0, eval_lift_sd=2.5, eval_opponent="idle"),
+            _row(2, 0, eval_lift_sd=2.1, eval_opponent="idle")]
+    rand = [_row(1, 0, eval_lift_sd=0.9, eval_opponent="random")]
+    for row in idle + rand:
+        row.pop("control_win", None)
+
+    _page, payload = render_multi([("idle-probe-run", idle, False),
+                                   ("random-verdict-run", rand, False)])
+    groups = payload["alltime"]["groups"]
+
+    assert [g["scale"]["named"] for g in groups] == ["idle", "random"],         "two opponents were merged into one nameless card"
+    assert all(len(g["runs"]) == 1 for g in groups)
+
+    # And where nothing at all was recorded, the card is not ordered.
+    blank = [_row(1, 0, eval_lift_sd=2.5), _row(2, 0, eval_lift_sd=0.9)]
+    for row in blank:
+        row.pop("control_win", None)
+    _page, payload = render_multi([("b", blank[:1], False), ("a", blank[1:], False)])
+    group = payload["alltime"]["groups"][0]
+    assert group["rankable"] is False
+    assert [r["name"] for r in group["runs"]] == ["a", "b"],         "readings with no recorded scale were ordered by size"
+
+
+def test_a_half_transcribed_checkpoint_is_attributed_by_its_checkpoint_path():
+    """Two sweeps on this machine both call an arm "w0.5".
+
+    Joining a verdict record to a metrics row on the arm name alone
+    attributes one sweep's reading to the other, which is the mistake the
+    whole view exists to prevent -- and it named several runs while quoting
+    only the first one's number.
+    """
+    verdict = [
+        {"checkpoint": "runs/sweepA/w0.1/cloned.pt", "name": "w0.1",
+         "mode": "greedy", "lift": -1.3, "episodes": 150,
+         "eval_opponent": "random"},
+        {"checkpoint": "runs/sweepA/w0.1/cloned.pt", "name": "w0.1",
+         "mode": "sampled", "lift": 0.05, "episodes": 150,
+         "eval_opponent": "random"},
+    ]
+    other = [_row(1, 0, episodes=150, arm="w0.1 hard, greedy",
+                  eval_lift_sd=0.9, control_win=0.26)]
+    third = [_row(1, 0, episodes=150, arm="w0.1, greedy",
+                  eval_lift_sd=1.7, control_win=0.26)]
+
+    _page, payload = render_multi(
+        [("sweepB-sweep", other, False), ("sweepC-sweep", third, False)],
+        extras={"verdicts": {"sweepA_verdict": verdict}})
+    recorded = payload["alltime"]["modes"]["recorded"]
+
+    assert len(recorded) == 1
+    assert "half_transcribed" not in recorded[0],         "a checkpoint from one sweep was attributed to two unrelated runs"
+
+    # With the run that actually holds those weights on the page, the join is
+    # made -- and every run named is quoted with its own number.
+    mine = [_row(1, 0, episodes=150, arm="w0.1, greedy",
+                 eval_lift_sd=-1.3, control_win=0.26)]
+    _page, payload = render_multi(
+        [("sweepA/w0.1", mine, False), ("sweepC-sweep", third, False)],
+        extras={"verdicts": {"sweepA_verdict": verdict}})
+    half = payload["alltime"]["modes"]["recorded"][0]["half_transcribed"]
+    assert half["mode"] == "greedy"
+    assert half["runs"] == [{"run": "sweepA/w0.1", "lift": -1.3}]
+    assert half["hidden"] == 0.05
+
+
+def test_the_greedy_only_transcription_of_a_paired_verdict_is_caught():
+    """runs/cloned is the case the file's own docstring calls dangerous.
+
+    Its metrics rows carry no arm label and its verdict is paired, so the
+    guard that exists to stop a greedy-only number being read as the answer
+    never fired for it -- while the run tab reported +1.623 for a checkpoint
+    that reads +0.709 the other way.
+    """
+    rows = [_row(1, 0, episodes=150, eval_lift_sd=1.623, eval_win=0.83,
+                 control_win=0.26)]
+    extras = {"verdicts": {"cloned": {
+        "episodes": 150,
+        "greedy": {"lift": 1.623, "win": 0.83},
+        "sampled": {"lift": 0.709, "win": 0.55},
+        "lift": 1.623}}}
+
+    _page, payload = render_multi([("cloned", rows, False)], extras=extras)
+    recorded = payload["alltime"]["modes"]["recorded"]
+
+    assert [r["weight"] for r in recorded] == ["cloned"]
+    half = recorded[0]["half_transcribed"]
+    # Identified by an exact match against one of the two measured lifts, so
+    # the mode is read off the evidence rather than assumed.
+    assert half["mode"] == "greedy"
+    assert half["runs"] == [{"run": "cloned", "lift": 1.623}]
+    assert half["hidden"] == 0.709
+
+
+def test_a_gap_is_not_printed_across_two_different_opponents():
+    """The one place an opponent is on the object, and it was thrown away.
+
+    A greedy record measured against one opponent paired with a sampled
+    record measured against another was subtracted, printed in a column
+    headed Gap, chipped "sign flips", and labelled "opponent recorded"
+    without ever saying which.
+    """
+    verdict = [
+        {"checkpoint": "runs/x/cloned.pt", "name": "w0.1", "mode": "greedy",
+         "lift": -1.3, "episodes": 150, "eval_opponent": "random"},
+        {"checkpoint": "runs/x/cloned.pt", "name": "w0.1", "mode": "sampled",
+         "lift": 0.05, "episodes": 150, "eval_opponent": "idle"},
+    ]
+    _page, payload = render_multi([("x", [_row(1, 1000)], False)],
+                                  extras={"verdicts": {"v": verdict}})
+    item = payload["alltime"]["modes"]["recorded"][0]
+
+    assert item["opponent_mismatch"] is True
+    assert item["gap"] is None, "a 1.35 difference across two opponents was called a play-mode gap"
+    assert item["opponent"] is None
+    assert (item["opponent_greedy"], item["opponent_sampled"]) == ("random", "idle")
+
+
+@needs_node
+def test_the_modes_table_says_which_opponent_each_row_faced():
+    """"opponent recorded" without the name is not a provenance chip."""
+    verdict = [
+        {"checkpoint": "runs/x/cloned.pt", "name": "w0.1", "mode": "greedy",
+         "lift": -1.3, "episodes": 150, "eval_opponent": "random"},
+        {"checkpoint": "runs/x/cloned.pt", "name": "w0.1", "mode": "sampled",
+         "lift": 0.05, "episodes": 150, "eval_opponent": "random"},
+    ]
+    runs = [("x", [_row(1, 1000)], False)]
+    out = _call_multi(runs, "modesMarkup(DATA.alltime)",
+                      extras={"verdicts": {"v": verdict}})
+    assert "vs random" in out and "opponent recorded" not in out
+
+
+def test_two_measurements_are_only_the_same_measurement_on_the_same_weights():
+    """The exhibit about re-running a reading joined on the arm name alone.
+
+    Two verdicts holding an arm called "clone" at two different checkpoints
+    were called "the same weights", their unknown mode was bucketed under the
+    string "None", and the caption then asserted that mode was greedy and
+    therefore deterministic. Three collapses in one sentence.
+    """
+    def record(checkpoint, mode=None):
+        return [{"name": "clone", "checkpoint": checkpoint, "mode": mode,
+                 "lift": 1.2345678, "episodes": 150, "eval_opponent": "random"}]
+
+    _page, payload = render_multi(
+        [("a", [_row(1, 1000)], False)],
+        extras={"verdicts": {"v_one": record("runs/a/cloned.pt"),
+                             "v_two": record("runs/b/cloned.pt")}})
+    assert "resolution" not in payload["alltime"]["exhibits"],         "two checkpoints with one arm name were called the same weights"
+
+    # The same checkpoint in two files is the real case, and it keeps working.
+    _page, payload = render_multi(
+        [("a", [_row(1, 1000)], False)],
+        extras={"verdicts": {"v_one": record("runs/a/cloned.pt", "greedy"),
+                             "v_two": record("runs/a/cloned.pt", "greedy")}})
+    identical = payload["alltime"]["exhibits"]["resolution"]["identical"]
+    assert identical["mode"] == "greedy" and identical["deterministic"] is True
+    assert identical["checkpoint"] == "runs/a/cloned.pt"
+    assert identical["sources"] == ["v_one", "v_two"]
+
+    # The same checkpoint with no mode recorded is still not a re-run: only
+    # greedy play on fixed seeds is the deterministic thing this exhibit is
+    # about, and an unknown mode read as greedy is the assumption that hid a
+    # working fine-tune for a day.
+    _page, payload = render_multi(
+        [("a", [_row(1, 1000)], False)],
+        extras={"verdicts": {"v_one": record("runs/a/cloned.pt"),
+                             "v_two": record("runs/a/cloned.pt")}})
+    assert "resolution" not in payload["alltime"]["exhibits"],         "an unrecorded play mode was read as greedy and called deterministic"
+
+    # And a record that names no checkpoint at all identifies no weights.
+    def anonymous():
+        return [{"name": "clone", "mode": "greedy", "lift": 1.2345678,
+                 "episodes": 150}]
+
+    _page, payload = render_multi(
+        [("a", [_row(1, 1000)], False)],
+        extras={"verdicts": {"v_one": anonymous(), "v_two": anonymous()}})
+    assert "resolution" not in payload["alltime"]["exhibits"]
+
+
+def test_a_selected_peak_is_only_compared_with_a_replay_of_the_same_thing():
+    """Exhibit (b) attributed an opponent change to selection bias.
+
+    runs/poc-vs-random's in-run readings sit at control 0.30 and its verdict
+    reports 0.04, and the verdict measures final.pt while the peak came from
+    best.pt -- which the note says replays at -0.033, not the +0.141 the
+    panel printed. The payload knew about the control disagreement and
+    printed it in a card far below instead.
+    """
+    rows = [_row(1, 1000, eval_lift_sd=0.375, eval_win=0.5, control_win=0.30),
+            _row(2, 2000, eval_lift_sd=0.1, eval_win=0.4, control_win=0.30)]
+    extras = {"verdicts": {"poc": {
+        "episodes": 300, "checkpoint": "final.pt", "lift": 0.141,
+        "ci_low": -0.018, "ci_high": 0.299, "control_win": 0.04,
+        "control_draw": 0.913,
+        "note": "best.pt, the highest of 19 readings, evaluates at -0.033 over 300."}}}
+
+    _page, payload = render_multi([("poc", rows, False)], extras=extras)
+    selection = payload["alltime"]["exhibits"]["selection"]
+
+    assert selection["same_scale"] is False,         "0.30 and 0.04 were treated as one scale"
+    assert selection["verdict_checkpoint"] == "final.pt"
+    assert selection["same_checkpoint"] is None,         "two checkpoints were asserted to be the same weights"
+    assert selection["best_scale"]["control"] == 0.30
+    assert selection["verdict_scale"]["control"] == 0.04
+
+
+@needs_node
+def test_the_selection_exhibit_carries_its_scales_on_the_page():
+    """Both numbers were bare, in the one panel that subtracts two lifts."""
+    rows = [_row(1, 1000, eval_lift_sd=0.375, eval_win=0.5, control_win=0.30)]
+    extras = {"verdicts": {"poc": {
+        "episodes": 300, "checkpoint": "final.pt", "lift": 0.141,
+        "control_win": 0.04, "note": "the peak replays at -0.033."}}}
+    out = _call_multi([("poc", rows, False)], "exhibitsMarkup(DATA.alltime)",
+                      extras=extras)
+
+    assert '+0.375<span class="chip warn">scale unidentified (control 0.30)</span>' in out
+    assert '+0.141<span class="chip warn">scale unidentified (control 0.04)</span>' in out
+    assert "were not read against the same control" in out
+    assert "final.pt" in out
+
+
+# ------------------------------------------------------------- the ledger
+
+
+def test_an_evaluation_run_is_not_counted_as_training_and_as_a_verdict():
+    """runs/cloned and runs/search-expert have steps=0 and no gradients.
+
+    Their `episodes` are the battles of the evaluation their own verdict file
+    already counts, bit-identically, so adding them to the training line
+    counts 190 battles twice under a heading that says "counted exactly".
+    """
+    trained = [_row(1, 4096, episodes=200)]
+    cloned = [_row(1, 0, episodes=150, eval_lift_sd=1.623,
+                   eval_win=0.83, control_win=0.26)]
+    extras = {"verdicts": {"cloned": {"episodes": 150,
+                                      "greedy": {"lift": 1.623},
+                                      "sampled": {"lift": 0.709}}}}
+
+    _page, payload = render_multi([("trained", trained, False),
+                                   ("cloned", cloned, False)], extras=extras)
+    ever = payload["alltime"]["ever"]
+    counted = {c["what"]: c["n"] for c in ever["battles"]["counted"]}
+
+    assert counted["training episodes"] == 200,         "an evaluation run's battles were counted as training as well"
+    assert counted["paired verdict battles"] == 300
+    assert ever["battles"]["total"] == 500
+    # Not dropped: reported on its own, beside the runs it belongs to.
+    assert ever["episodes"]["untrained"] == 150
+    assert ever["untrained"] == ["cloned"]
+
+
+def test_a_job_row_is_its_own_quantity_and_the_rows_add():
+    """`_segment_total` is a cumulative-counter rule, and a job has no counter.
+
+    Seven arms of 150 battles each is 1,050 battles; the cumulative rule read
+    the largest row and reported 150, so the job the record is drawn from
+    contributed a seventh of itself to the excluded line.
+    """
+    job = [_row(i, 0, episodes=150) for i in range(1, 8)]
+    _page, payload = render_multi([("headtohead", job, False)],
+                                  kinds={"headtohead": "job"})
+    battles = payload["alltime"]["ever"]["battles"]
+
+    assert payload["alltime"]["ever"]["episodes"]["jobs"] == 1050
+    assert battles["excluded"]["n"] == 1050
+    # And rows with no `what` of their own are named rather than invisible.
+    assert battles["excluded"]["items"][0]["job"] == "headtohead"
+    assert battles["excluded"]["items"][0]["n"] == 1050
+
+
+def test_a_reading_that_records_its_own_size_is_counted_at_it():
+    """The estimate's rule text claimed every reading used the 40 default.
+
+    `rotating_probe` writes `eval_episodes`, and 14 rows on this machine
+    record 150 while being counted at 40.
+    """
+    recorded = [_row(1, 1000, eval_lift_sd=0.4, control_win=0.26,
+                     eval_episodes=150)]
+    plain = [_row(1, 1000, eval_lift_sd=0.4, control_win=0.26)]
+
+    _page, payload = render_multi([("a", recorded, False), ("b", plain, False)])
+    estimated = payload["alltime"]["ever"]["battles"]["estimated"]
+
+    # 150 recorded + 40 estimated + one control run per evaluating run.
+    assert estimated["n"] == 150 + 40 + 80
+    assert estimated["recorded"] == 1
+    assert "1 of 2 readings record their own eval_episodes" in estimated["rule"]
+
+
+def test_the_hours_tile_counts_the_same_population_it_sums():
+    """A job logging elapsed time would raise a denominator it cannot move."""
+    model = [_row(1, 1000, elapsed_seconds=600)]
+    job = [_row(1, 0, elapsed_seconds=99, what="a benchmark")]
+
+    _page, payload = render_multi([("m", model, False), ("j", job, False)],
+                                  kinds={"j": "job"})
+    ever = payload["alltime"]["ever"]
+
+    assert ever["seconds"] == 600, "a job's elapsed time entered the total"
+    assert ever["reporting_elapsed"] == 1,         "a job was counted as a run reporting elapsed time it does not contribute"
+    assert ever["models"] == 1
+
+
+@needs_node
+def test_the_page_states_no_fact_about_the_data_it_has_not_counted():
+    """Two sentences were prose about one afternoon's payload.
+
+    "it takes five values. Two match a control that was actually measured.
+    The other three do not" printed unchanged above six group cards, and
+    "two of which are one evaluation written twice" printed above a tile
+    whose own two numbers were equal.
+    """
+    runs = [("a", [_row(1, 1000, eval_lift_sd=0.5, control_win=0.44)], False),
+            ("b", [_row(1, 1000, eval_lift_sd=0.3, control_win=0.26)], False)]
+
+    out = _call_multi(runs, "groupsMarkup(DATA.alltime)+everMarkup(DATA.alltime)")
+    assert "it takes five values" not in out
+    assert "The other three do not" not in out
+    assert "2 groups" in out and "1 where the opponent can be put a name to" in out
+    assert "two of which are one evaluation written twice" not in out
+    assert "none of them a repeat of another" in out
+
+
+# ---------------------------------------------------- what reaches the page
+
+
+def test_a_verdict_and_a_soak_summary_are_read_off_the_disk(tmp_path):
+    """Nothing tested that the evidence layer reads anything at all.
+
+    Every other test injects `extras=` by hand, so `_extras_of` could return
+    an empty dict with the whole suite green -- and with it the intervals,
+    the only recorded opponents on the machine, and ten thousand matches.
+    """
+    from cr_sim.train.watch import _extras_of
+
+    runs = tmp_path / "runs"
+    (runs / "cloned").mkdir(parents=True)
+    (runs / "cloned" / "verdict.json").write_text(
+        json.dumps({"episodes": 150, "greedy": {"lift": 1.6},
+                    "sampled": {"lift": 0.7}}), encoding="utf-8")
+    (runs / "soak-spells").mkdir()
+    (runs / "soak-spells" / "summary.json").write_text(
+        json.dumps({"matches": 10000, "mean_ticks": 1770.15}), encoding="utf-8")
+    (runs / "half").mkdir()
+    (runs / "half" / "verdict.json").write_text("{\"episodes\":", encoding="utf-8")
+
+    extras = _extras_of([runs])
+    assert list(extras["verdicts"]) == ["cloned"],         "a half-written verdict took the reader down with it"
+    assert extras["verdicts"]["cloned"]["greedy"]["lift"] == 1.6
+    assert extras["soak"]["matches"] == 10000
+    assert extras["soak"]["run"] == "soak-spells"
+
+
+def test_one_verdict_reachable_through_two_roots_is_counted_once(tmp_path):
+    """A worktree holding a copy added a second set of battles for one file.
+
+    The duplicate also matched no run label, so its own disputed-control
+    check was skipped in silence.
+    """
+    from cr_sim.train.watch import _extras_of
+
+    payload = {"episodes": 150, "lift": 1.6}
+    roots = []
+    for where in ("main", "wt"):
+        root = tmp_path / where / "runs" / "cloned"
+        root.mkdir(parents=True)
+        (root / "verdict.json").write_text(json.dumps(payload), encoding="utf-8")
+        roots.append(tmp_path / where / "runs")
+
+    extras = _extras_of(roots)
+    assert list(extras["verdicts"]) == ["cloned"]
+    assert extras["duplicate_verdicts"] and "wt" in extras["duplicate_verdicts"][0]
+
+    # A genuinely different file under the same name is still kept, renamed.
+    (tmp_path / "wt" / "runs" / "cloned" / "verdict.json").write_text(
+        json.dumps({"episodes": 300, "lift": 0.4}), encoding="utf-8")
+    extras = _extras_of(roots)
+    assert sorted(extras["verdicts"]) == ["cloned", "cloned/verdict"]
+    assert extras["duplicate_verdicts"] == []
+
+
+def test_the_job_split_is_read_from_config_and_survives_a_bad_one(tmp_path):
+    """`_kind_of` gates the census, every counter and the ranking.
+
+    It also took the watcher down on a config that is valid JSON and not an
+    object, or that is not UTF-8 -- and the refresh loop catches only
+    KeyboardInterrupt, so the served page froze exactly as it did for the NaN
+    bug, with no sign it had stopped.
+    """
+    from cr_sim.train.watch import _kind_of, _note_of
+
+    run = tmp_path / "job"
+    run.mkdir()
+    (run / "config.json").write_text(json.dumps({"kind": "job", "note": "hi"}),
+                                     encoding="utf-8")
+    assert _kind_of(run) == "job" and _note_of(run) == "hi"
+
+    (run / "config.json").write_text(json.dumps({"note": "a model"}),
+                                     encoding="utf-8")
+    assert _kind_of(run) is None, "a trainer's config was called a job"
+
+    for bad in ("null", "[1,2,3]", '"job"', "42", "{not json"):
+        (run / "config.json").write_text(bad, encoding="utf-8")
+        assert _kind_of(run) is None and _note_of(run) == "", bad
+    (run / "config.json").write_bytes(
+        json.dumps({"kind": "job"}).encode("utf-16"))
+    assert _kind_of(run) is None and _note_of(run) == ""
+
+
+def test_the_watcher_writes_a_page_and_names_the_runs_it_could_not(tmp_path):
+    """End to end, through `main`, which no test had run before.
+
+    A run directory with a config and no rows contributes nothing to any
+    total and is exactly what a census is asked about, so it is named rather
+    than dropped without a word.
+    """
+    from cr_sim.train.watch import main
+
+    runs = tmp_path / "runs"
+    (runs / "real").mkdir(parents=True)
+    _write(runs / "real" / "metrics.jsonl", [_row(1, 1000, episodes=40)])
+    (runs / "real" / "config.json").write_text("{}", encoding="utf-8")
+    (runs / "empty").mkdir()
+    (runs / "empty" / "metrics.jsonl").write_text("", encoding="utf-8")
+    (runs / "empty" / "config.json").write_text(
+        json.dumps({"total_steps": 400000}), encoding="utf-8")
+
+    out = tmp_path / "progress.html"
+    assert main([str(runs / "real"), str(runs / "empty"),
+                 "--once", "--out", str(out)]) == 0
+    body = json.loads((tmp_path / "progress.json").read_text(encoding="utf-8"))
+
+    assert list(body["runs"]) == ["real"]
+    assert body["alltime"]["census"] == 1
+    assert body["alltime"]["skipped"] == ["empty"],         "a run that started and wrote nothing vanished from the census"
+
+
+def test_the_same_run_path_twice_is_still_one_run(tmp_path):
+    """The de-duplication was applied to discovery and not to the arguments.
+
+    Every model total doubled while `body["runs"]` collapsed to one key, so
+    the census identity the page prints in its own footer broke.
+    """
+    from cr_sim.train.watch import main
+
+    run = tmp_path / "runs" / "cloned"
+    run.mkdir(parents=True)
+    _write(run / "metrics.jsonl", [_row(1, 4096, episodes=150),
+                                   _row(2, 8192, episodes=150)])
+
+    out = tmp_path / "progress.html"
+    assert main([str(run), str(run), "--once", "--out", str(out)]) == 0
+    body = json.loads((tmp_path / "progress.json").read_text(encoding="utf-8"))
+
+    assert body["alltime"]["census"] == len(body["runs"]) == 1
+    assert body["alltime"]["ever"]["episodes"]["models"] == 150
+    assert body["alltime"]["lift_rows"] == 0
+    assert body["order"] == ["cloned"], "one run, two tabs"
+    # The duplicate never reaches the aggregate at all, rather than reaching
+    # it and being absorbed: the same path twice is one run, not a collision.
+    assert body["alltime"]["collisions"] == []
+
+
+def test_a_resume_that_replays_its_update_numbers_keeps_both_segments(tmp_path):
+    """The dedupe in `once()` deleted a whole pre-resume segment.
+
+    A resume replays the same update numbers with the counters reset, so a
+    dict keyed on `updates` across the whole file overwrites every pre-resume
+    row with its post-resume namesake. The two runs on disk that actually
+    resumed lost 816 real training battles and eleven minutes that way, under
+    a tile claiming resumes are added segment by segment.
+    """
+    from cr_sim.train.watch import main
+
+    run = tmp_path / "runs" / "resumed"
+    run.mkdir(parents=True)
+    _write(run / "metrics.jsonl", [
+        _row(1, 1000, episodes=100, elapsed_seconds=60),
+        _row(2, 2000, episodes=200, elapsed_seconds=120),
+        # The same evaluation written twice under one update number, which is
+        # what the dedupe is for and must keep doing.
+        _row(2, 2000, episodes=200, elapsed_seconds=120),
+        # Resumed: update numbers replay from 2 with the counters reset.
+        _row(2, 2100, episodes=50, elapsed_seconds=30),
+        _row(3, 3000, episodes=120, elapsed_seconds=75),
+    ])
+
+    out = tmp_path / "progress.html"
+    assert main([str(run), "--once", "--out", str(out)]) == 0
+    body = json.loads((tmp_path / "progress.json").read_text(encoding="utf-8"))
+    ever = body["alltime"]["ever"]
+
+    # 200 across the first segment plus 120 across the second. Keying on
+    # `updates` gives 120, and the largest row alone gives 200.
+    assert ever["episodes"]["models"] == 320
+    assert ever["seconds"] == 195
+    assert len(body["runs"]["resumed"]["series"]["steps"]) == 4,         "the adjacent double-write survived, or a real row was dropped"
+
+
+# -------------------------------------------------------- the page as read
+
+
+@needs_node
+def test_the_two_headline_panels_say_whether_they_are_on_one_scale():
+    """They sit one above the other, so the second has to answer it first.
+
+    An idle-anchored number printed under a random-scale record with no such
+    line rebuilds the 92%-vs-26% collapse in the page's own headline panels.
+    """
+    name, ladder, note = _block()
+    idler = [_row(1, 1000, eval_lift_sd=2.9, eval_win=0.97, control_win=0.925)]
+    runs = [("old-idle-run", idler, False), (name, ladder, False)]
+    kw = {"notes": {name: note}, "kinds": {name: "job"}}
+
+    out = _call_multi(runs, "demotedHeading(DATA.alltime)+'|'"
+                            "+demotedMarkup(DATA.alltime)", **kw)
+    heading, markup = out.split("|", 1)
+
+    assert "different scale" in heading,         "the heading still invites the comparison it exists to refuse"
+    assert "Not the record" in markup, "the panel never says they differ"
+    assert "26%" in markup and ("92%" in markup or "93%" in markup),         "the two control rates are never put side by side"
+    assert "cannot be compared at all" in markup
+
+
+@needs_node
+def test_the_ladder_never_puts_a_sampled_arm_above_a_greedy_one():
+    """A change can leave the argmax untouched and move the distribution.
+
+    Ranking both modes in one list orders checkpoints by how they were
+    played: greedy beats sampled for every paired checkpoint on this machine,
+    so the bars are driven by the mode more than by the weights.
+    """
+    rows = [
+        _row(1, 0, episodes=150, arm="A, greedy", eval_lift_sd=1.9,
+             eval_win=0.8, control_win=0.26),
+        _row(2, 0, episodes=150, arm="B, sampled", eval_lift_sd=2.4,
+             eval_win=0.85, control_win=0.26),
+        _row(3, 0, episodes=150, arm="B, greedy", eval_lift_sd=0.3,
+             eval_win=0.4, control_win=0.26),
+    ]
+    runs = [("sweep-x", rows, False)]
+    kw = {"notes": {"sweep-x": _GATE_NOTE}, "kinds": {"sweep-x": "job"}}
+
+    _page, payload = render_multi(runs, **kw)
+    assert [(g["mode"], [a["arm"] for a in g["arms"]])
+            for g in payload["alltime"]["block"]["groups"]] == [
+        ("greedy", ["A, greedy", "B, greedy"]),
+        ("sampled", ["B, sampled"])]
+    # And the record slot is not `max(greedy, sampled)` over the block.
+    assert [(m["mode"], m["top"]["arm"]) for m in payload["alltime"]["record"]["modes"]] == [
+        ("greedy", "A, greedy"), ("sampled", "B, sampled")]
+
+    drawn = _call_multi(runs, "ladderMarkup(DATA.alltime)", **kw)
+    assert drawn.index("+1.900") < drawn.index("+0.300") < drawn.index("+2.400"),         "one ranking over two play modes"
+    assert "greedy play" in drawn and "sampled play" in drawn
+
+
+def test_the_greedy_and_sampled_columns_are_both_readable_on_a_phone():
+    """The page is built for a 390px screen and is served to one.
+
+    Four columns in a 301px scroll box parked the sampled figure off the edge
+    and the gap fully off-screen, so the default state of the page's own
+    anti-greedy-bias table showed the greedy number alone -- including on the
+    rows flagged "sign flips", where the hidden half is the other sign.
+    """
+    page = render([_row(1, 1000)], "run")
+    style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+
+    assert 'class="ledger modes"' in page, "the table cannot be targeted"
+    stacked = [b for b in style.split("@media") if ".ledger.modes" in b]
+    assert stacked, "the modes table has no narrow-screen layout at all"
+    block = stacked[0].replace(" ", "").replace(chr(10), "")
+    assert "max-width:700px" in block
+    assert ".ledger.modestr{display:block" in block, "the rows do not stack"
+    assert "content:attr(data-h)" in block, "a stacked cell with no header"
+    for header in ("Greedy", "Sampled", "Gap"):
+        assert 'data-h="' + header + '"' in page,             header + " has no label once the table stacks"
+
+
+def test_the_page_asks_nothing_of_a_network_it_may_not_have():
+    """It is read over the LAN from a phone whose wifi often has no route out.
+
+    Three render-blocking requests to a font host buy nothing there, and
+    everything else in the file -- the manifest, the icon -- is already a
+    data: URI for exactly that reason.
+    """
+    page = render([_row(1, 1000, eval_lift_sd=0.4, control_win=0.26)], "run")
+    for host in ("fonts.googleapis.com", "fonts.gstatic.com"):
+        assert host not in page, host + " is fetched at render time"
+    # Every absolute URL in the file, except the SVG namespace, which names a
+    # namespace and is never fetched.
+    external = [u for u in re.findall(r"https?://[^\"' )]+", page)
+                if not u.startswith("http://www.w3.org/")]
+    assert external == [], "the page reaches outside itself: " + repr(external)
+    for attribute in ("src=", "href="):
+        for value in re.findall(attribute + r"\"([^\"]*)\"", page):
+            assert value.startswith(("data:", "#", ".")) or "://" not in value,                 "a remote " + attribute + value
+    # And every font it does ask for degrades to something the device has.
+    for declaration in re.findall(r"font-family:([^;}]+)", page):
+        assert any(g in declaration for g in ("sans-serif", "monospace", "ui-")),             "a font with no fallback: " + declaration
+
+
+@needs_node
+def test_the_run_tab_shows_both_arms_of_a_row_that_holds_two():
+    """The all-time view is not the only place the greedy arm went missing.
+
+    `rotating_probe` writes the sampled arm to `eval_lift_sd`, so a run using
+    it draws its distribution's trajectory under the unqualified heading
+    "lift vs control" while the argmax beside it appears nowhere.
+    """
+    rows = [_row(1, 1000, eval_lift_sd=0.4, eval_win=0.5, control_win=0.26,
+                 eval_lift_sd_greedy=1.2, eval_win_greedy=0.7),
+            _row(2, 2000, eval_lift_sd=0.6, eval_win=0.55, control_win=0.26,
+                 eval_lift_sd_greedy=1.25, eval_win_greedy=0.72)]
+    _page, payload = render_multi([("probe", rows, True)])
+    series = payload["runs"]["probe"]["series"]
+    summary = payload["runs"]["probe"]["summary"]
+
+    assert series["lift_greedy"] == [[1000, 1.2], [2000, 1.25]]
+    assert summary["latest_lift"] == 0.6 and summary["latest_lift_greedy"] == 1.25
+    assert summary["modes_recorded"] is True
+
+    drawn = _call_multi([("probe", rows, True)],
+                        "(function(){var o=[];var q=function(){return {innerHTML:''}};"
+                        "return JSON.stringify(DATA.runs.probe.series.lift_greedy);})()")
+    assert "1.25" in drawn
+
+    # A run whose probe records one arm says nothing about a second.
+    plain = [_row(1, 1000, eval_lift_sd=0.4, eval_win=0.5, control_win=0.26)]
+    _page, payload = render_multi([("probe", plain, True)])
+    assert payload["runs"]["probe"]["series"]["lift_greedy"] == []
+    assert payload["runs"]["probe"]["summary"]["modes_recorded"] is False
