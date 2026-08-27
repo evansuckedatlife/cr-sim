@@ -184,7 +184,14 @@ def test_every_metric_on_the_page_is_explained_somewhere_on_it():
     page = render([_row(1, 1000, eval_lift_sd=0.3, eval_win=0.4, control_win=0.3)], "run")
     for term in ("Lift vs control", "Beats its past self", "Explained variance",
                  "Entropy", "Value loss and return spread", "Rollout win rate",
-                 "Pass rate"):
+                 "Pass rate",
+                 # Every quantity the all-time view introduces. Each entry
+                 # states the rule it was computed under, not a definition --
+                 # a definition of "battles ever" would not tell anyone that
+                 # 8,765 of them are spreadsheet comparisons.
+                 "Control win", "Scale group", "Greedy vs sampled",
+                 "Paired seeds", "Job vs model", "Battles ever",
+                 "Recorded hours", "Distinct evaluations"):
         assert term in page, f"{term!r} is shown but never explained"
 
 
@@ -231,15 +238,32 @@ def _script_body(rows):
     return script.split("(function start()", 1)[0]
 
 
+def _node(source):
+    """Run `source` under node and return its stdout.
+
+    Through a file rather than `node -e`: the page's script outgrew the
+    Windows command-line limit the day the all-time view landed, and every
+    node-backed test here died with "the filename or extension is too long"
+    -- eight of the only genuinely non-vacuous tests in this file, all at
+    once, for a reason that has nothing to do with what they check.
+    """
+    import pathlib
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        script = pathlib.Path(tmp) / "page.js"
+        script.write_text(source, encoding="utf-8")
+        result = subprocess.run([node, str(script)], capture_output=True,
+                                text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
 def _call(rows, expression):
     """Evaluate `expression` against the page's own chart code."""
     body = _script_body(rows)
-    result = subprocess.run(
-        [node, "-e", body + chr(10) + "process.stdout.write(String(" + expression + "));"],
-        capture_output=True, text=True, timeout=60,
-    )
-    assert result.returncode == 0, result.stderr
-    return result.stdout
+    return _node(body + chr(10) + "process.stdout.write(String("
+                 + expression + "));")
 
 
 def _call_with_storage(rows, expression):
@@ -256,12 +280,8 @@ def _call_with_storage(rows, expression):
         "var localStorage={setItem:function(k,v){__store[k]=String(v);},"
         "getItem:function(k){return Object.prototype.hasOwnProperty.call(__store,k)?__store[k]:null;}};"
     )
-    result = subprocess.run(
-        [node, "-e", body + stub + chr(10) + "process.stdout.write(String(" + expression + "));"],
-        capture_output=True, text=True, timeout=60,
-    )
-    assert result.returncode == 0, result.stderr
-    return result.stdout
+    return _node(body + stub + chr(10) + "process.stdout.write(String("
+                 + expression + "));")
 
 
 def _run_js(rows, harness):
@@ -269,12 +289,7 @@ def _run_js(rows, harness):
     definitions, for tests that need more than one expression -- a scripted
     sequence, or a fake DOM/fetch/localStorage the page's functions call
     into. Returns whatever the harness wrote to stdout."""
-    body = _script_body(rows)
-    result = subprocess.run(
-        [node, "-e", body + harness], capture_output=True, text=True, timeout=60,
-    )
-    assert result.returncode == 0, result.stderr
-    return result.stdout
+    return _node(_script_body(rows) + harness)
 
 
 @needs_node
@@ -1183,3 +1198,231 @@ def test_the_all_time_aggregate_is_inside_the_payload_fingerprint():
     assert after["alltime"]["ever"]["episodes"]["models"] == 90
     assert before["version"] != after["version"], \
         "the aggregate moved and the page would never have redrawn"
+
+
+def _multi_body(runs, **kwargs):
+    """The page's function definitions for a multi-run payload."""
+    page = render_multi(runs, **kwargs)[0]
+    script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+    return script.split("(function start()", 1)[0]
+
+
+def _call_multi(runs, expression, stored=None, **kwargs):
+    """Evaluate `expression` against a multi-run page, with real localStorage.
+
+    The stub goes in front of the page's own code rather than after it,
+    because the view the page opens in is read out of storage as the script
+    loads -- put the stub after and every restore test passes without the
+    restore working.
+    """
+    stub = ("var __store=" + json.dumps(stored or {}) + ";"
+            "var localStorage={setItem:function(k,v){__store[k]=String(v);},"
+            "getItem:function(k){return Object.prototype.hasOwnProperty.call"
+            "(__store,k)?__store[k]:null;}};")
+    return _node(stub + _multi_body(runs, **kwargs) + chr(10)
+                 + "process.stdout.write(String(" + expression + "));")
+
+
+def test_the_way_into_the_all_time_view_is_never_hidden_by_a_media_query():
+    """The page exists to be read on a phone, and this button is the only door.
+
+    `--serve` prints the machine's addresses so a phone on the same wifi can
+    watch a run, and the split and expand buttons are hidden below 700px on
+    purpose -- the panes collapse to one column at 900px anyway, so those two
+    control nothing there. Putting the all-time button in that same class
+    made the entire view unreachable at 390px while looking perfectly fine on
+    the laptop it was built on.
+    """
+    page = render([_row(1, 1000)], "run")
+    style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+
+    assert ".view-toggle{" in style, "the button has no styling of its own"
+    assert 'class="view-toggle"' in page, "the button does not use it"
+
+    # Every @media block, brace-matched, so a nested rule cannot hide one.
+    hidden = []
+    for start in [m.start() for m in re.finditer(r"@media", style)]:
+        depth, i = 0, style.index("{", start)
+        for j in range(i, len(style)):
+            if style[j] == "{":
+                depth += 1
+            elif style[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        block = style[start:j + 1]
+        if "display:none" in block.replace(" ", ""):
+            hidden.append(block)
+
+    assert hidden, "no media query hides anything, so this test proves nothing"
+    for block in hidden:
+        assert ".view-toggle" not in block, \
+            "the only way into the all-time view is hidden at some width"
+
+
+@needs_node
+def test_the_ladder_draws_the_arms_it_ranked_and_not_the_one_it_refused_to():
+    """The excluded reading is the largest number on the page.
+
+    An implementation that sorted every lift it could find would put it at
+    the top of the ladder, and this asserts on the markup rather than the
+    payload so that a board computed correctly and drawn from the wrong list
+    still fails. The decoy's control rate says it faced an opponent that
+    never plays a card, where the ladder's arms faced a random one.
+    """
+    name, ladder, note = _block()
+    idler = [_row(1, 1000, eval_lift_sd=0.90, eval_win=0.95, control_win=0.925)]
+    runs = [("idler", idler, False), (name, ladder, False)]
+    kw = {"notes": {name: note}, "kinds": {name: "job"}}
+
+    drawn = _call_multi(runs, "ladderMarkup(DATA.alltime)", **kw)
+    assert "+0.550" in drawn, "the ranking is computed but never shown"
+    assert "+0.400" in drawn and "+0.220" in drawn
+    assert "+0.900" not in drawn, \
+        "an idle-scale lift was drawn onto a random-scale ladder"
+
+    # It is not suppressed either -- it is shown once, where it cannot be
+    # mistaken for the best result.
+    demoted = _call_multi(runs, "demotedMarkup(DATA.alltime)", **kw)
+    assert "+0.900" in demoted and "idler" in demoted
+
+
+@needs_node
+def test_a_lift_and_the_scale_it_was_read_on_are_one_element():
+    """A number screenshotted without its scale is how this went wrong before.
+
+    An idle-scale reading and a random-scale one differ by a factor the page
+    cannot recover, so the chip has to be inside the same element as the
+    figure -- not beside it in a neighbouring cell that a crop can remove.
+    Readings whose control matches nothing measured are dimmed and say so
+    rather than being given the nearer of the two known names.
+    """
+    name, ladder, note = _block()
+    unknown = [_row(1, 1000, eval_lift_sd=0.61, eval_win=0.7, control_win=0.85)]
+    runs = [("mystery", unknown, False), (name, ladder, False)]
+    kw = {"notes": {name: note}, "kinds": {name: "job"}}
+
+    drawn = _call_multi(runs, "ladderMarkup(DATA.alltime)", **kw)
+    assert '+0.550<span class="chip good">vs random (stated)</span>' in drawn, \
+        "the number and its scale are not in the same element"
+
+    groups = _call_multi(runs, "groupsMarkup(DATA.alltime)", **kw)
+    assert '+0.610<span class="chip warn">scale unidentified (control 0.85)</span>' in groups
+    assert "vs idle" not in groups, "an unmatched control rate was given a name"
+
+
+@needs_node
+def test_with_nothing_comparable_the_view_says_so_instead_of_ranking():
+    """Silence is the correct output, and a sorted list is not.
+
+    The ladder is one job directory deep and `register_job` writes with
+    `write_text`, so re-registering that job to update its status empties it.
+    The page then has two readings on two different scales and no licence to
+    order them, and must say that rather than fall back to whichever sort it
+    can still manage.
+    """
+    runs = [("idler", [_row(1, 1000, eval_lift_sd=0.90, control_win=0.925)], False),
+            ("cloned", [_row(1, 2000, eval_lift_sd=0.31, control_win=0.26)], False)]
+
+    out = _call_multi(runs, "allTimeMarkup(DATA.alltime)")
+    assert "No comparable ranking on disk" in out
+    # The bigger number must not have been quietly crowned instead.
+    assert out.index("No comparable ranking on disk") < out.index("+0.900")
+
+
+@needs_node
+def test_the_all_time_view_is_the_one_the_page_opens_in_next_time():
+    """Somebody reading the totals wants them again on the next look.
+
+    The two existing toggles both persist for the same reason, and this one
+    matters more: it is a whole view rather than a layout, and losing it on
+    every poll would send a reader back to a single run's curves without
+    their having asked to go.
+    """
+    runs = [("run", [_row(1, 1000)], False)]
+    assert _call_multi(runs, "view") == "runs", "opens somewhere nobody chose"
+    assert _call_multi(runs, "view", stored={"crsim-view": "alltime"}) == "alltime", \
+        "the chosen view was not restored"
+    # And an unrecognised stored value falls back rather than blanking the page.
+    assert _call_multi(runs, "view", stored={"crsim-view": "sideways"}) == "runs"
+
+
+@needs_node
+def test_the_battle_ledger_on_the_page_adds_up_to_what_it_prints():
+    """A total nobody can check is a total nobody should trust.
+
+    Every source is printed as its own line with the rule that produced it,
+    so the sum is verifiable by eye -- which matters because two of the
+    largest blocks of battles ever run here are invisible to the run list,
+    and one plausible-looking figure of 9,071 is not battles at all.
+    """
+    runs = [("trained", [_row(1, 1000, episodes=120)], False),
+            ("gate", [_row(1, 0, episodes=600, what="sim vs arithmetic winner")], False)]
+    kw = {"kinds": {"gate": "job"},
+          "extras": {"soak": {"matches": 10000, "mean_ticks": 1770.15,
+                              "reasons": [["tick limit", 9751]], "anomalies": []}}}
+
+    out = _call_multi(runs, "everMarkup(DATA.alltime)", **kw)
+    for figure in ("120", "10,000", "600", "10,720"):
+        assert figure in out, f"{figure} is part of the total but never shown"
+    # The soak run has no metrics file, so nothing else on the page knows it
+    # happened -- which is exactly why it is counted here.
+    assert "1770.15 ticks" in out
+
+
+@needs_node
+def test_draw_puts_the_all_time_view_where_the_per_run_panes_were():
+    """The view has to be drawn from inside `draw`, and nothing else will do.
+
+    `draw` clears CHARTS and overwrites the panes container unconditionally on
+    every poll. A view rendered anywhere else has its markup thrown away
+    fifteen seconds later with no error and no clue why, which is how the
+    expand button's first attempt was lost. This runs the real function
+    against a stub DOM instead of trusting that the branch exists.
+    """
+    name, ladder, note = _block()
+    runs = [("run", [_row(1, 1000, episodes=40)], True), (name, ladder, False)]
+    stub = """
+var __store={'crsim-view':'alltime'};
+var localStorage={setItem:function(k,v){__store[k]=String(v);},
+  getItem:function(k){return Object.prototype.hasOwnProperty.call(__store,k)?__store[k]:null;}};
+function El(){this.innerHTML='';this.textContent='';this.className='';this.hidden=null;
+  this.style={};this.dataset={};this.attrs={};
+  this.setAttribute=function(k,v){this.attrs[k]=v;};
+  this.addEventListener=function(){};
+  this.classList={toggle:function(){}};
+  this.querySelector=function(){return null;};}
+var NODES={};
+['panes','alltime','title','tabs','expand','viewall','foot','pulse','stamp','split','bell']
+  .forEach(function(id){NODES[id]=new El();});
+var document={getElementById:function(id){return NODES[id];},
+              querySelectorAll:function(){return [];}};
+"""
+    harness = """
+draw();
+process.stdout.write(JSON.stringify({
+  hidden:NODES.alltime.hidden,
+  panes:NODES.panes.innerHTML,
+  panesDisplay:NODES.panes.style.display,
+  title:NODES.title.textContent,
+  pressed:NODES.viewall.attrs['aria-pressed'],
+  foot:NODES.foot.textContent,
+  markup:NODES.alltime.innerHTML.length,
+  hasRecord:NODES.alltime.innerHTML.indexOf('+0.550')>=0,
+  charts:CHARTS.length
+}));
+"""
+    out = json.loads(_node(stub + _multi_body(runs, notes={name: note},
+                                              kinds={name: "job"}) + harness))
+
+    assert out["hidden"] is False, "the container was never revealed"
+    assert out["markup"] > 0 and out["hasRecord"], "the view drew nothing"
+    assert out["panes"] == "" and out["panesDisplay"] == "none", \
+        "the per-run panes are still in the document underneath"
+    assert out["pressed"] == "true", "the toggle does not show which view is on"
+    assert "all time" in out["title"]
+    # No chart registered: chart() plots x as steps, and every arm here has
+    # steps=0, so a curve would stack the whole ranking on one vertical line.
+    assert out["charts"] == 0, "a chart was registered on a view with no time axis"
+    # The tab rail is still painted, because tapping a run is the way back.
+    assert "2 runs" in out["foot"]

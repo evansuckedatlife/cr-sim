@@ -453,6 +453,7 @@ def _verdict_of(raw: Any) -> dict[str, Any]:
             # unmodified clone every other arm here is a variation on.
             "name": ("baseline clone" if r.get("name") == "_diag"
                      else str(r.get("name", ""))),
+            "checkpoint": str(r.get("checkpoint", "") or ""),
             "mode": r.get("mode"), "lift": r.get("lift"), "ci": _ci_of(r),
             "win": r.get("win"), "loss": r.get("loss"),
             "episodes": r.get("episodes"),
@@ -904,6 +905,7 @@ def _modes_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
                              and sampled["ci"][0] < 0 < sampled["ci"][1])
             recorded.append({
                 "source": source, "weight": key,
+                "checkpoint": greedy.get("checkpoint") or sampled.get("checkpoint"),
                 "greedy": {"lift": greedy["lift"], "win": greedy.get("win"),
                            "ci": greedy.get("ci")},
                 "sampled": {"lift": sampled["lift"], "win": sampled.get("win"),
@@ -914,23 +916,39 @@ def _modes_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
             })
     # Where a metrics file transcribed only one mode of a checkpoint whose
     # other mode was measured, the per-run dashboard is reporting a number
-    # that reverses when read the other way.
-    transcribed: dict[str, set] = {}
+    # that reverses when read the other way. Worth saying -- but only where
+    # the checkpoint can actually be identified. Two different sweeps on this
+    # machine both call an arm "w0.5", so a join on the name alone would
+    # attribute one sweep's reading to the other, which is the same class of
+    # mistake this whole view exists to prevent.
+    owners: dict[str, set] = {}
+    for item in recorded:
+        owners.setdefault(_weight_key(item["weight"]), set()).add(
+            item["checkpoint"] or item["source"])
+    transcribed: dict[str, list] = {}
     for entry in entries:
         for row in entry["evals"]:
             weight, mode = _mode_of(row.get("arm"))
             if mode:
-                transcribed.setdefault(_weight_key(weight), set()).add(
-                    (entry["name"], mode))
+                transcribed.setdefault(_weight_key(weight), []).append(
+                    {"run": entry["name"], "mode": mode,
+                     "lift": row["eval_lift_sd"]})
     for item in recorded:
-        seen = transcribed.get(_weight_key(item["weight"]), set())
-        modes = {mode for _, mode in seen}
-        if len(modes) == 1:
+        key = _weight_key(item["weight"])
+        if len(owners.get(key, ())) > 1:
+            # Same name, different checkpoints. Say so instead of guessing.
+            item["ambiguous"] = sorted(owners[key])
+            continue
+        seen = transcribed.get(key, [])
+        modes = {t["mode"] for t in seen}
+        if len(modes) == 1 and seen:
             only = sorted(modes)[0]
             item["half_transcribed"] = {
                 "mode": only,
-                "runs": sorted({name for name, _ in seen}),
-                "shown": item[only]["lift"],
+                "runs": sorted({t["run"] for t in seen}),
+                # The number the run tab is actually showing, read off that
+                # run's own row rather than off the verdict.
+                "shown": seen[0]["lift"],
                 "hidden": item["sampled" if only == "greedy" else "greedy"]["lift"],
             }
     return {
@@ -981,6 +999,11 @@ def _all_time(runs, notes, kinds, extras) -> dict[str, Any]:
     return {
         "census": len(entries),
         "lift_rows": lift_rows,
+        # Readings whose control rate matches neither control that has been
+        # measured. More than half of them, which is the single most
+        # important fact on the page.
+        "unidentified": sum(1 for e in entries for r in e["evals"]
+                            if _anchor_for(r.get("control_win")) is None),
         "distinct_evals": distinct,
         "block": block,
         "record": _record_of(block),
@@ -1148,12 +1171,73 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .split-toggle[aria-pressed="true"]{background:var(--accentw);color:var(--accent);border-color:var(--accent)}
 @media (max-width:700px){.split-toggle{display:none}}
 
+/* Its own class, deliberately not .split-toggle. That class is hidden below
+   700px -- correctly, since the split panes collapse to one column at 900px
+   anyway -- and this button is the only way into the all-time view. Sharing
+   the class made the entire view unreachable on the 390px phone this page
+   exists to be read on. It must stay visible at every width. */
+.view-toggle{appearance:none;background:var(--panel);border:1px solid var(--rule);border-radius:3px;
+  font-family:Archivo,sans-serif;font-size:11px;font-weight:600;color:var(--soft);
+  padding:6px 11px;cursor:pointer;margin-bottom:7px;white-space:nowrap}
+.view-toggle[aria-pressed="true"]{background:var(--accentw);color:var(--accent);border-color:var(--accent)}
+
+.at{margin-top:4px}
+.at .panel{background:var(--panel);border:1px solid var(--rule);border-radius:3px;
+  box-shadow:var(--shadow);padding:14px 16px;margin-top:10px}
+.at .seen{font-size:12.5px;color:var(--muted);padding:9px 12px;background:var(--panel2);
+  border-radius:3px;margin-top:14px}
+.lift{font-family:"JetBrains Mono",monospace;font-variant-numeric:tabular-nums;font-weight:700;
+  display:inline-flex;align-items:baseline;gap:6px;flex-wrap:wrap}
+.lift.unknown{color:var(--muted)}
+.lift.big{font-size:30px;letter-spacing:-.02em}
+.wl{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.at .rec{background:var(--panel);border:1px solid var(--rule);border-left:3px solid var(--good);
+  border-radius:3px;box-shadow:var(--shadow);padding:16px 18px;margin-top:10px}
+.at .rec.demote{border-left-color:var(--warn)}
+.at .twin{margin-top:12px;padding-top:12px;border-top:1px solid var(--hair)}
+.at .twin .lift.big{font-size:22px}
+.at .prov{margin-top:8px;font-size:12.5px;color:var(--muted)}
+.at ul.why{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--soft)}
+.at ul.why li{margin:3px 0}
+.at .caption{font-size:12px;color:var(--muted);margin-top:6px;line-height:1.45}
+.at .scroll{overflow-x:auto}
+.ladder{margin-top:10px}
+.lrow{padding:7px 0;border-top:1px solid var(--hair)}
+.lrow:first-child{border-top:0}
+.lrow .name{font-size:13px;display:flex;gap:7px;align-items:baseline;flex-wrap:wrap}
+.lrow .track{position:relative;height:7px;background:var(--panel2);border-radius:2px;margin-top:5px}
+.lrow .track i{position:absolute;top:0;bottom:0;background:var(--accent);border-radius:2px;min-width:1px}
+.lrow .track b{position:absolute;top:-2px;bottom:-2px;width:1px;background:var(--muted);opacity:.7}
+/* Two arms that are the same weights played two ways, tied together so the
+   pair cannot be read as two separate policies. */
+.lrow.bracket{border-left:2px solid var(--accent);padding-left:9px}
+.lrow.zero{border-top:1px solid var(--rule);margin-top:8px;padding-top:9px}
+.ledger{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
+.ledger th{text-align:left;font-family:Archivo,sans-serif;font-size:10.5px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--muted);font-weight:700;padding:4px 8px 4px 0}
+.ledger td{padding:6px 8px 6px 0;border-top:1px solid var(--hair);vertical-align:top}
+.ledger td.n{text-align:right;white-space:nowrap;font-family:"JetBrains Mono",monospace;
+  font-variant-numeric:tabular-nums}
+.tiles2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+.tile2{background:var(--panel);border:1px solid var(--rule);border-radius:3px;padding:11px 13px;
+  box-shadow:var(--shadow);min-width:0}
+.tile2 .v{font-family:"JetBrains Mono",monospace;font-size:18px;font-weight:700;display:block;
+  margin:3px 0;letter-spacing:-.02em;overflow-wrap:anywhere}
+.tile2 .rule{font-size:11px;color:var(--muted);line-height:1.35}
+.at details.card{background:var(--panel);border:1px solid var(--rule);border-radius:3px;
+  margin-top:8px;box-shadow:var(--shadow)}
+.at details.card summary{padding:11px 13px;cursor:pointer;font-size:13.5px;display:flex;
+  gap:8px;align-items:center;flex-wrap:wrap}
+.at details.card .body{padding:0 13px 13px}
+.at .panel.close{border-left:3px solid var(--crit)}
+
+
 .panes{display:grid;grid-template-columns:1fr;gap:18px;margin-top:16px}
 .panes.split{grid-template-columns:1fr 1fr}
 @media (max-width:900px){.panes.split{grid-template-columns:1fr}}
 .pane{min-width:0}
 .note{font-size:13.5px;line-height:1.5;color:var(--muted);margin:0 0 12px;padding:10px 12px;
-  border-left:2px solid var(--line);background:rgba(255,255,255,.02);border-radius:0 6px 6px 0;white-space:pre-wrap}
+  border-left:2px solid var(--rule);background:rgba(255,255,255,.02);border-radius:0 6px 6px 0;white-space:pre-wrap}
 .pane-head{display:flex;align-items:center;gap:9px;margin-bottom:10px}
 .pane-head select{font-family:Archivo,sans-serif;font-size:13px;font-weight:600;color:var(--ink);
   background:var(--panel);border:1px solid var(--rule);border-radius:3px;padding:5px 8px}
@@ -1225,11 +1309,13 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--rule);font-si
 
 <div class="tabbar">
   <div class="tabs" id="tabs" role="tablist"></div>
+  <button class="view-toggle" id="viewall" aria-pressed="false" title="Everything measured so far, across every run">All time</button>
   <button class="split-toggle" id="expand" aria-pressed="false" title="Show every run at once">All runs</button>
   <button class="split-toggle" id="split" aria-pressed="false">Split</button>
 </div>
 
 <div class="panes" id="panes"></div>
+<div class="at" id="alltime" hidden></div>
 
 <details class="gloss">
   <summary>What the numbers mean</summary>
@@ -1248,6 +1334,22 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--rule);font-si
     <dd>Measured while exploring, about eighteen points optimistic here. Do not steer by it.</dd>
     <dt>Pass rate</dt>
     <dd>How often it declined to play. Never punished, so a run can quietly collapse into it.</dd>
+    <dt>Control win</dt>
+    <dd>How often the control agent won its own half of the same battles. It stands in for the opponent that is missing: no lift row on disk records what it faced, and this is the only evidence in the file. A control that wins 92.5% never played a card; one that wins 26% played randomly. A rate matching neither is left unnamed.</dd>
+    <dt>Scale group</dt>
+    <dd>Every reading sharing one control win rate. Groups are ordered by that rate, which is a property of the measurement, so the order is not a ranking. Numbers are compared inside a group and never across two.</dd>
+    <dt>Greedy vs sampled</dt>
+    <dd>The same weights either always playing their best action or drawing from their distribution. Two different numbers for one checkpoint, and never averaged or collapsed: cloning wrote +1.623 greedy and +0.709 sampled for identical weights. Where only one is recorded, the other is unmeasured rather than equal.</dd>
+    <dt>Paired seeds</dt>
+    <dd>The policy and the control played the same battles from the same starts. Two lifts are comparable only if they used one opponent and one seed set, and only a job that says so in its own note is treated as having done that.</dd>
+    <dt>Job vs model</dt>
+    <dd>A model trained; a job recorded work someone did. Split on <code>kind=="job"</code> in config.json, which register_job writes and no trainer does. Never on the name &mdash; <code>bench-*</code> and <code>agent-*</code> are jobs while <code>probe-*</code> and <code>ab-*</code> are models. Jobs are out of every counter, because their rows park a batch size in steps and spreadsheet comparisons in episodes.</dd>
+    <dt>Battles ever</dt>
+    <dd>Counted from named sources only: training episodes, the engine soak, every arm of every verdict file, and job rows individually allowed in. The in-run probe figure is an estimate at the evaluation default and sits below the rule, outside the total.</dd>
+    <dt>Recorded hours</dt>
+    <dd>A floor and never a total. Fewer than half the runs write elapsed time at all, and five of the largest report zero, so the real figure is well above this one.</dd>
+    <dt>Distinct evaluations</dt>
+    <dd>Lift rows, less the ones that are the same measurement written twice. Two runs wrote one evaluation under both <code>updates</code> 1 and 2, and the de-duplication keys on <code>updates</code>, so both rows survive it and the row count overstates the evidence.</dd>
   </dl>
 </details>
 
@@ -1477,6 +1579,324 @@ function fillPane(pane,name,slot){
     +'</div>';
 }
 
+/* ------------------------------------------------------------------ all time
+
+   One page-wide view of everything measured so far. It draws no charts on
+   purpose: chart() plots x as `steps`, and every ladder row and every cloned
+   checkpoint has steps=0, so a curve here would stack eight separate
+   measurements on one vertical line and call it a trend. */
+
+function sd(v){return (v===null||v===undefined)?'--':((v>=0?'+':'-')+Math.abs(Number(v)).toFixed(3));}
+function mag(v){return (v===null||v===undefined)?'--':Math.abs(Number(v)).toFixed(3);}
+
+/* The scale a lift was read on, as a chip that travels in the same element as
+   the number. A figure with no scale beside it is how an idle-scale reading
+   gets screenshotted and quoted as a random-scale one. */
+function scaleChip(sc){
+  if(!sc) return {cls:'dim',text:'scale not recorded'};
+  if(sc.opponent) return {cls:sc.stated?'good':'dim',
+    text:'vs '+sc.opponent+(sc.stated?' (stated)':' (inferred)')};
+  return {cls:'warn',text:'scale unidentified (control '+num(sc.control)+')'};
+}
+
+function liftNode(v,sc,extra){
+  var c=scaleChip(sc);
+  return '<span class="lift'+(c.cls==='warn'?' unknown':'')+(extra?' '+extra:'')+'">'
+    +sd(v)+'<span class="chip '+c.cls+'">'+esc(c.text)+'</span></span>';
+}
+
+/* Never defaults to greedy. `arm` is free text with no validator, and reading
+   an unlabelled number as greedy is how a working fine-tune was written off:
+   its argmax had not moved while the distribution around it had. */
+function modeChip(m){
+  if(m==='greedy'||m==='sampled') return '<span class="chip dim">'+m+'</span>';
+  if(m===null||m===undefined) return '<span class="chip warn">mode unknown</span>';
+  return '<span class="chip warn">mode unknown</span>';
+}
+
+function winLoss(w,l){
+  if(w===null||w===undefined) return '';
+  return '<span class="wl">'+pct(w)+' w'+((l===null||l===undefined)?'':(' / '+pct(l)+' l'))+'</span>';
+}
+
+/* What has moved since this browser last opened the view. Compared on
+   evaluation counts and the record itself, never on row counts: a job that
+   re-registers rewrites its file from scratch, so rows can go down without
+   anything new having been measured. Kept in this browser, never in the
+   payload -- a per-viewer fact in the payload would change the fingerprint
+   and redraw the page for everybody. */
+var seenLine=null;
+function sinceLastLook(A){
+  /* Worked out once per page load and then held. Recomputing it on every
+     poll would answer "since the last fifteen seconds", which is a question
+     nobody has, and would wipe the answer to the one they did ask the moment
+     any run wrote a row. */
+  if(seenLine!==null) return seenLine;
+  var now={version:1,perRun:{},recordLift:(A.record&&A.record.top)?A.record.top.lift:null};
+  DATA.order.forEach(function(n){now.perRun[n]=DATA.runs[n].summary.evaluations||0;});
+  var prev=null;
+  try{prev=JSON.parse(recall('crsim-seen','')||'null');}catch(e){prev=null;}
+  remember('crsim-seen',JSON.stringify(now));
+  if(!prev||prev.version!==1){seenLine='First look on this device. Nothing to compare against yet.';return seenLine;}
+  var fresh=[],moved=[];
+  Object.keys(now.perRun).forEach(function(n){
+    if(!(n in prev.perRun)) fresh.push(n);
+    else if(now.perRun[n]>prev.perRun[n]) moved.push(n+' +'+(now.perRun[n]-prev.perRun[n]));
+  });
+  var bits=[];
+  if(fresh.length) bits.push(fresh.length+' new run'+(fresh.length>1?'s':'')+': '+fresh.join(', '));
+  if(moved.length) bits.push('new evaluations: '+moved.join(', '));
+  if(prev.recordLift!==now.recordLift) bits.push('the record changed, '+sd(prev.recordLift)+' to '+sd(now.recordLift));
+  seenLine=bits.length?bits.join(' &middot; '):'Nothing new since you last looked.';
+  return seenLine;
+}
+
+function recordMarkup(A){
+  var r=A.record;
+  if(!r) return '<div class="panel"><b>No comparable ranking on disk.</b><div class="caption">'
+    +'A record needs one job that measured several arms against one opponent on one seed set and said so. '
+    +'Nothing here does, so nothing is called best -- every reading is grouped by scale below instead.</div></div>';
+  var out='<div class="rec">';
+  out+='<div>'+liftNode(r.top.lift,r.top.scale,'big')+'</div>';
+  out+='<div class="prov"><b>'+esc(r.top.weight)+'</b> '+modeChip(r.top.mode)+' '
+    +winLoss(r.top.win)+' &middot; '+commas(r.seeds)+' paired seeds &middot; control '+pct(r.control)+' w</div>';
+  if(r.twin){
+    out+='<div class="twin"><div class="lbl">Same weights, '+esc(r.twin.mode)+'</div>'
+      +'<div>'+liftNode(r.twin.lift,r.twin.scale,'big')+'</div>'
+      +'<div class="prov">'+winLoss(r.twin.win)+' &middot; the same checkpoint, played the other way. '
+      +'Neither number is the checkpoint on its own.</div></div>';
+  }else{
+    out+='<div class="twin"><div class="prov">Only one way of playing these weights was recorded. '
+      +'clone_policy writes max(greedy, sampled) and discards the other, so the missing half is not zero, it is unmeasured.</div></div>';
+  }
+  out+='<div class="prov">'+esc(r.job)+', '+r.arms+' arms, one opponent, one seed set; intervals in the note below.</div>';
+  out+='</div>';
+  return out;
+}
+
+function demotedMarkup(A){
+  var d=A.demoted;
+  if(!d) return '';
+  var why=[];
+  if(d.verdict_note) why.push('Its own verdict says: &ldquo;'+esc(d.verdict_note)+'&rdquo;');
+  if(d.episodes&&d.compare_episodes&&d.episodes<d.compare_episodes)
+    why.push(commas(d.episodes)+' episodes, against '+commas(d.compare_episodes)+' for every comparable number.');
+  if(!d.anchored) why.push('Control win '+num(d.scale.control)+' matches neither control that has been measured, so the opponent is genuinely unknown.');
+  why.push('No opponent recorded on the row, like every other lift on disk.');
+  var out='<div class="rec demote">';
+  out+='<div>'+liftNode(d.lift,d.scale,'big')+(d.ci?(' <span class="prov">['+sd(d.ci[0])+', '+sd(d.ci[1])+']</span>'):'')+'</div>';
+  out+='<div class="prov"><b>'+esc(d.name)+'</b> '+winLoss(d.win)+'</div>';
+  out+='<ul class="why">'+why.map(function(w){return '<li>'+w+'</li>';}).join('')+'</ul>';
+  out+='<div class="caption">It is shown here, once, so it can never turn up in the record slot.</div>';
+  out+='</div>';
+  return out;
+}
+
+function ladderMarkup(A){
+  var b=A.block;
+  if(!b) return '';
+  var lifts=b.arms.map(function(a){return a.lift;}).concat([0]);
+  var lo=Math.min.apply(null,lifts),hi=Math.max.apply(null,lifts),span=(hi-lo)||1;
+  var zero=(0-lo)/span*100;
+  var weights={};
+  b.arms.forEach(function(a){weights[a.weight]=(weights[a.weight]||0)+1;});
+  var out='<div class="panel"><div class="lbl">'+b.count+' arms &middot; '+commas(b.seeds)
+    +' paired seeds &middot; one opponent, control '+pct(b.control)+' w &middot; conditions as stated below</div>';
+  out+='<div class="note">'+esc(b.note)+'</div>';
+  out+='<div class="ladder">';
+  b.arms.forEach(function(a){
+    var v=(a.lift-lo)/span*100;
+    var left=Math.min(zero,v),width=Math.abs(v-zero);
+    out+='<div class="lrow'+(weights[a.weight]>1?' bracket':'')+'">'
+      +'<div class="name">'+liftNode(a.lift,a.scale)+' '+modeChip(a.mode)+' <b>'+esc(a.weight)+'</b> '+winLoss(a.win)+'</div>'
+      +'<div class="track"><i style="left:'+left+'%;width:'+width+'%"></i><b style="left:'+zero+'%"></b></div>'
+      +'</div>';
+  });
+  out+='<div class="lrow zero"><div class="name"><span class="lift">0.000<span class="chip dim">the control itself</span></span> '
+    +'<b>random control</b> '+winLoss(b.control)+'</div></div>';
+  out+='</div>';
+  var res=A.exhibits&&A.exhibits.resolution;
+  if(res&&res.top&&res.top.gap!==null&&res.spread){
+    out+='<div class="caption">The top two arms are '+mag(res.top.gap)+' apart, and two runs of identical weights '
+      +'already move '+mag(res.spread.range)+'. Treat the leaders as tied.</div>';
+  }
+  out+='<div class="caption">No whiskers and no interval column: no lift row on disk carries one. '
+    +'The intervals are in the note above, printed as written.</div>';
+  out+='</div>';
+  return out;
+}
+
+function modesMarkup(A){
+  var m=A.modes,out='<div class="panel">';
+  out+='<div class="caption">Only '+m.with_mode+' of '+m.lift_rows+' readings record how the policy played at all. '
+    +'clone_policy keeps max(greedy, sampled) and discards the other half, so the rest are one number '
+    +'with no way back to the pair it came from.</div>';
+  out+='<div class="scroll"><table class="ledger"><thead><tr><th>Checkpoint</th><th class="n">Greedy</th>'
+    +'<th class="n">Sampled</th><th class="n">Gap</th></tr></thead><tbody>';
+  var rows=m.pairs.concat(m.recorded);
+  if(!rows.length) out+='<tr><td colspan="4">No checkpoint on disk was measured both ways.</td></tr>';
+  rows.forEach(function(p){
+    out+='<tr><td>'+esc(p.weight)
+      +(p.recorded?' <span class="chip good">opponent recorded</span>':'')
+      +(p.flips?' <span class="chip crit">sign flips</span>':'')
+      +'<div class="caption">'+esc(p.source)+'</div></td>'
+      +'<td class="n">'+sd(p.greedy.lift)+'</td>'
+      +'<td class="n">'+sd(p.sampled.lift)
+      +(p.straddles_zero?'<div class="caption">interval straddles zero</div>':'')+'</td>'
+      +'<td class="n">'+sd(p.gap)+'</td></tr>';
+    if(p.ambiguous) out+='<tr><td colspan="4" class="caption">Two different checkpoints are recorded under this name ('
+      +esc(p.ambiguous.join(', '))+'), so no metrics row can be attributed to either of them.</td></tr>';
+    if(p.half_transcribed) out+='<tr><td colspan="4" class="caption">Only the '+esc(p.half_transcribed.mode)
+      +' half of this checkpoint was written into metrics, so '+esc(p.half_transcribed.runs.join(', '))
+      +' reports '+sd(p.half_transcribed.shown)+' for a checkpoint that reads '+sd(p.half_transcribed.hidden)
+      +' the other way.</td></tr>';
+  });
+  out+='</tbody></table></div>';
+  out+='<div class="caption">The recorded rows come from the one file on this machine that puts a lift, '
+    +'a play mode and the opponent on the same object. Every future writer should copy its shape.</div>';
+  out+='</div>';
+  return out;
+}
+
+function exhibitsMarkup(A){
+  var x=A.exhibits||{},out='';
+  if(x.coincidence){
+    var c=x.coincidence;
+    out+='<div class="panel"><div class="lbl">The same number, twice, meaning different things</div>'
+      +'<div>'+liftNode(c.ladder.lift,c.ladder.scale)+' <span class="caption">'+esc(c.ladder.arm)+', in '+esc(c.ladder.job)+'</span></div>'
+      +'<div>'+liftNode(c.in_run.lift,c.in_run.scale)+' <span class="caption">'+esc(c.in_run.run)+', in-run at '+commas(c.in_run.steps)+' steps</span></div>'
+      +'<div class="caption">'+mag(c.gap)+' apart, different opponents and different measurement paths. '
+      +'This is why sorting every lift produces a confident lie -- and why those two numbers live on '
+      +'opposite sides of a labelled boundary on this page.</div></div>';
+  }
+  if(x.selection){
+    var s=x.selection;
+    out+='<div class="panel"><div class="lbl">Best of N is a selection, not a result</div>'
+      +'<div>'+sd(s.best_in_run)+' <span class="caption">'+esc(s.run)+', best of '+s.readings+' in-run readings</span></div>'
+      +'<div>'+sd(s.verdict_lift)+(s.verdict_ci?(' ['+sd(s.verdict_ci[0])+', '+sd(s.verdict_ci[1])+']'):'')
+      +' <span class="caption">replayed over '+commas(s.verdict_episodes)+' episodes</span></div>'
+      +'<div class="note">'+esc(s.note)+'</div></div>';
+  }
+  if(x.resolution){
+    var r=x.resolution,i=r.identical;
+    out+='<div class="panel"><div class="lbl">How much a reading moves when you simply run it again</div>'
+      +'<div class="caption">The same weights, '+esc(i.mode)+', on a fixed seed set, measured in '
+      +esc(i.sources.join(' and '))+': <span class="mono">'+esc(i.digits)+'</span> both times, identical to every digit. '
+      +'Greedy play on fixed seeds is deterministic, so that is not agreement between measurements, it is the same measurement.</div>';
+    if(r.spread) out+='<div class="caption">The same weights played '+esc(r.spread.mode)+' in those same two files: '
+      +r.spread.values.map(sd).join(' and ')+', a spread of '+mag(r.spread.range)+'.</div>';
+    if(r.top) out+='<div class="caption">And the same weights greedy in the ladder above read '+sd(r.top.lift)
+      +' -- a different tower level, not batch noise on one measurement. Do not read the '
+      +mag(r.top.gap)+' between '+esc(r.top.arm)+' and '+esc(r.top.runner_arm)+' as a difference.</div>';
+    out+='</div>';
+  }
+  return out;
+}
+
+function groupsMarkup(A){
+  var out='<div class="panel"><b>Grouped by what the reading was measured against, and never ranked across groups.</b>'
+    +'<div class="caption">The control&rsquo;s own win rate is the only evidence in the files of which opponent '
+    +'a reading faced, and it takes five values. Two match a control that was actually measured. The other three do not: '
+    +A.unidentified+' of '+A.lift_rows+' readings sit on a scale nobody has identified, and they are not rounded to '
+    +'whichever known scale is nearer. Sorting exists only inside a card.</div></div>';
+  A.groups.forEach(function(g){
+    var c=scaleChip(g.scale);
+    out+='<details class="card"><summary><span class="chip '+c.cls+'">'+esc(c.text)+'</span>'
+      +'<span class="caption">'+g.rows+' readings across '+g.runs.length+' run'+(g.runs.length>1?'s':'')+'</span></summary><div class="body">';
+    g.runs.forEach(function(r){
+      if(r.ranking){
+        out+='<div class="lbl" style="margin-top:10px">'+esc(r.name)+' &mdash; a table of arms, not a trajectory</div>';
+        if(DATA.runs[r.name]&&DATA.runs[r.name].note)
+          out+='<div class="note">'+esc(DATA.runs[r.name].note)+'</div>';
+        out+='<div class="scroll"><table class="ledger"><tbody>';
+        r.arms.forEach(function(a){
+          out+='<tr><td>'+esc(a.arm)+' '+modeChip(a.mode)+'</td><td class="n">'+sd(a.lift)+'</td>'
+            +'<td class="n">'+((a.win===null||a.win===undefined)?'':pct(a.win)+' w')+'</td></tr>';
+        });
+        out+='</tbody></table></div>';
+        out+='<div class="caption">Separate measurements, so this job has no current value and no best step. '
+          +'Its last row is simply its worst arm.</div>';
+      }else{
+        out+='<div class="lrow"><div class="name">'+liftNode(r.best,g.scale)+' <b>'+esc(r.name)+'</b> '
+          +'<span class="caption">best of '+r.evals+' reading'+(r.evals>1?'s':'')+' (optimistic)'
+          +(r.best_at_steps?(' at '+commas(r.best_at_steps)+' steps'):'')+'</span></div></div>';
+      }
+      if(r.disputed) out+='<div class="caption">Provisional: '+esc(r.name)+' reads control '+num(r.disputed.in_run)
+        +' in-run and '+num(r.disputed.verdict)+' in its own '+commas(r.disputed.episodes)
+        +'-episode verdict'+(r.disputed.verdict_draw?(', at '+pct(r.disputed.verdict_draw)+' draws'):'')
+        +'. The quantity this grouping rests on is not stable across measurement paths.</div>';
+    });
+    out+='</div></details>';
+  });
+  return out;
+}
+
+function everMarkup(A){
+  var e=A.ever,b=e.battles;
+  var tiles=[
+    ['Steps',commas(e.steps.models),'Training runs only. Jobs park a batch size here, so their '+commas(e.steps.jobs)+' is left out.'],
+    ['Episodes',commas(e.episodes.models),'Battles played while training, resumes added segment by segment rather than taking the largest row.'],
+    ['Updates',commas(e.updates.models),'Gradient updates. Counted off the same de-duplicated rows the run tabs show.'],
+    ['Distinct evaluations',commas(A.distinct_evals),commas(A.lift_rows)+' lift rows, two of which are one evaluation written twice under updates 1 and 2.'],
+    ['Runs',commas(e.models)+' models + '+commas(e.jobs)+' jobs','Split on config kind=="job", which register_job writes and no trainer does. Not on the name.'],
+    ['Hours',
+      'at least '+dur(e.seconds),
+      'A floor, not a total: only '+e.reporting_elapsed+' of '+e.runs+' runs record elapsed time at all.']
+  ];
+  var out='<div class="tiles2">'+tiles.map(function(t){
+    return '<div class="tile2"><div class="lbl">'+t[0]+'</div><span class="v">'+t[1]+'</span>'
+      +'<div class="rule">'+esc(t[2])+'</div></div>';}).join('')+'</div>';
+
+  out+='<div class="panel"><div class="lbl">Battles ever, as line items</div><div class="scroll"><table class="ledger"><tbody>';
+  b.counted.forEach(function(c){
+    out+='<tr><td>'+esc(c.what)+'<div class="caption">'+esc(c.rule)+'</div></td><td class="n">'+commas(c.n)+'</td></tr>';
+  });
+  out+='<tr><td><b>Counted exactly</b></td><td class="n"><b>'+commas(b.total)+'</b></td></tr>';
+  out+='</tbody></table></div>';
+  out+='<div class="scroll"><table class="ledger"><thead><tr><th>Below the rule, not added in</th><th class="n"></th></tr></thead><tbody>';
+  out+='<tr><td>'+esc(b.estimated.what)+'<div class="caption">'+esc(b.estimated.rule)+'</div></td>'
+    +'<td class="n">~'+commas(b.estimated.n)+'</td></tr>';
+  out+='<tr><td>Excluded: '+esc(b.excluded.what)+'<div class="caption">'+esc(b.excluded.rule)+'</div>'
+    +b.excluded.items.map(function(i){return '<div class="caption">'+commas(i.n)+' &mdash; '+esc(i.what)+', in '+esc(i.job)+'</div>';}).join('')
+    +'</td><td class="n">'+commas(b.excluded.n)+'</td></tr>';
+  out+='</tbody></table></div></div>';
+
+  if(e.soak){
+    var s=e.soak,reasons=(s.reasons||[]).map(function(r){return commas(r[1])+' '+esc(r[0]);}).join(', ');
+    out+='<div class="panel"><div class="lbl">Engine health, from the run this page cannot otherwise see</div>'
+      +'<div class="caption">'+esc(s.run)+': '+commas(s.matches)+' matches, '
+      +((s.anomalies||[]).length)+' anomalies, '+reasons+', mean '+num(s.mean_ticks,2)+' ticks. '
+      +'It has a summary and no metrics file, so it is invisible to the run list.</div></div>';
+  }
+  return out;
+}
+
+function closingMarkup(A){
+  return '<div class="panel close"><b>What this page cannot tell you.</b>'
+    +'<div class="caption">Not one lift on disk names the opponent it was measured against, so every scale here '
+    +'is read off the control&rsquo;s own win rate and '+A.unidentified+' of '+A.lift_rows+' readings match nothing that was measured. '
+    +'Greedy and sampled play are collapsed at the source outside the '+A.modes.with_mode+' rows that carry an arm label, '
+    +'and the half that was discarded is not zero, it is unmeasured. A peak picked from many short readings is a selection '
+    +'and not a skill, which is why every best on this page says so. Recorded time is a floor: most runs never wrote it down. '
+    +'And the one ranking here is one job directory deep &mdash; if that job is re-registered, the ladder goes away rather than '
+    +'quietly becoming a sort of whatever is left.</div></div>';
+}
+
+function allTimeMarkup(A){
+  if(!A) return '<div class="panel">No aggregate in this payload.</div>';
+  var out='<div class="seen">'+esc(sinceLastLook(A))+'</div>';
+  out+='<h2>The record</h2>'+recordMarkup(A);
+  out+='<h2>The highest number, and why it is not the record</h2>'+demotedMarkup(A);
+  out+='<h2>The comparable ladder</h2>'+(A.block?ladderMarkup(A)
+    :'<div class="panel">No comparable ranking on disk.<div class="caption">Nothing is sorted in its place.</div></div>');
+  out+='<h2>Greedy vs sampled, wherever both survive</h2>'+modesMarkup(A);
+  out+='<h2>Three exhibits</h2>'+exhibitsMarkup(A);
+  out+='<h2>Everything else, grouped by scale</h2>'+groupsMarkup(A);
+  out+='<h2>Ever, in numbers</h2>'+everMarkup(A);
+  out+=closingMarkup(A);
+  return out;
+}
+
 /* ------------------------------------------------------------ notifications */
 
 var seenEvals={};
@@ -1502,18 +1922,27 @@ function noticeNewEvaluations(){
 /* ------------------------------------------------------------------- shell */
 
 var split=false,picked=['',''];
+/* Which of the two views is showing. The tab rail stays rendered in both, so
+   tapping any run is the way back -- there is no second URL and no second
+   file, because a second page would have to be written, served and kept in
+   step with this one for a view that is derived from exactly the same rows. */
+var view=(recall('crsim-view','runs')==='alltime')?'alltime':'runs';
 
 function paintTabs(){
   document.getElementById('tabs').innerHTML=DATA.order.map(function(n){
     var r=DATA.runs[n],l=r.summary.latest_lift;
     var val=(l===null||l===undefined)?'':'<span class="val">'+(l>0?'+':'')+Number(l).toFixed(2)+'</span>';
-    var on=picked.slice(0,split?2:1).indexOf(n)>=0;
+    var on=view==='runs'&&picked.slice(0,split?2:1).indexOf(n)>=0;
     return '<button class="tab" role="tab" data-run="'+n+'" aria-selected="'+on+'">'
       +'<span class="pip'+(r.live?' on':'')+'"></span>'+n+val+'</button>';
   }).join('');
   Array.prototype.forEach.call(document.querySelectorAll('.tab'),function(t){
-    t.addEventListener('click',function(){picked[0]=t.dataset.run;remember('crsim-pane0',picked[0]);draw();});
+    t.addEventListener('click',function(){
+      picked[0]=t.dataset.run;remember('crsim-pane0',picked[0]);
+      view='runs';remember('crsim-view','runs');draw();});
   });
+  var vt=document.getElementById('viewall');
+  vt.setAttribute('aria-pressed',String(view==='alltime'));
   var ex=document.getElementById('expand');
   ex.textContent=expanded?'Collapse':'All '+DATA.order.length;
   ex.setAttribute('aria-pressed',String(expanded));
@@ -1535,7 +1964,28 @@ function wireExpand(){
 
 function draw(){
   var panesEl=document.getElementById('panes');
+  var allEl=document.getElementById('alltime');
   CHARTS=[];
+  /* Drawn from in here rather than beside it: this function clears CHARTS and
+     overwrites #panes unconditionally, so a view rendered anywhere else would
+     have its markup thrown away on the next poll. */
+  if(view==='alltime'){
+    document.getElementById('title').textContent='cr-sim, all time';
+    panesEl.innerHTML='';panesEl.style.display='none';
+    allEl.hidden=false;
+    allEl.innerHTML=allTimeMarkup(DATA.alltime);
+    paintTabs();
+    var A=DATA.alltime;
+    document.getElementById('foot').textContent=A
+      ? (A.census+' runs, '+A.lift_rows+' lift readings, '+A.unidentified+' on an unidentified scale')
+      : '';
+    var anyLive=DATA.order.some(function(n){return DATA.runs[n].live;});
+    document.getElementById('pulse').className='dot'+(anyLive?'':' stale');
+    document.getElementById('stamp').textContent=new Date().toLocaleTimeString();
+    return;
+  }
+  panesEl.style.display='';
+  allEl.hidden=true;allEl.innerHTML='';
   document.getElementById('title').textContent=split?'cr-sim':picked[0];
   panesEl.className='panes'+(split?' split':'');
   panesEl.innerHTML=paneMarkup(0)+(split?paneMarkup(1):'');
@@ -1595,6 +2045,11 @@ function poll(){
 
   wireExpand();
   if(DATA.order.length<3) document.getElementById('expand').style.display='none';
+
+  var viewBtn=document.getElementById('viewall');
+  viewBtn.addEventListener('click',function(){
+    view=(view==='alltime')?'runs':'alltime';
+    remember('crsim-view',view);draw();});
 
   var bell=document.getElementById('bell');
   function paintBell(){
