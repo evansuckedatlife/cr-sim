@@ -120,9 +120,10 @@ def test_the_page_embeds_the_series_it_draws():
     ]
     page = render(rows, "run")
     payload = json.loads(page.split("const DATA = ", 1)[1].split(";\n", 1)[0])
-    assert payload["series"]["lift"] == [[1000, 0.1], [2000, 0.4]]
-    assert payload["summary"]["best_lift"] == 0.4
-    assert payload["title"] == "run"
+    run = payload["runs"]["run"]
+    assert run["series"]["lift"] == [[1000, 0.1], [2000, 0.4]]
+    assert run["summary"]["best_lift"] == 0.4
+    assert payload["order"] == ["run"]
 
 
 def test_the_page_renders_before_any_evaluation_exists():
@@ -197,8 +198,9 @@ def test_the_page_carries_the_critic_series_it_now_leads_on():
     ]
     payload = json.loads(
         render(rows, "run").split("const DATA = ", 1)[1].split(";\n", 1)[0])
-    assert payload["series"]["explained_variance"] == [[1000, -0.02], [2000, 0.31]]
-    assert payload["series"]["ret_std"] == [[1000, 0.5], [2000, 0.6]]
+    series = payload["runs"]["run"]["series"]
+    assert series["explained_variance"] == [[1000, -0.02], [2000, 0.31]]
+    assert series["ret_std"] == [[1000, 0.5], [2000, 0.6]]
 
 
 # ---------------------------------------------------- charts with thin data
@@ -240,7 +242,7 @@ def test_one_evaluation_is_reported_rather_than_called_none():
     do, which is deny a measurement it is holding.
     """
     rows = [_row(1, 15360, eval_lift_sd=0.118, eval_win=0.32, control_win=0.30)]
-    out = _call(rows, "chart('t','n',[{name:'lift',color:'#000',points:DATA.series.lift}],{zero:true})")
+    out = _call(rows, "chart('t','n',[{name:'lift',color:'#000',points:DATA.runs['run'].series.lift}],{zero:true})")
     assert "no evaluations yet" not in out, "denied an evaluation it was given"
     assert "0.118" in out, "the single reading is not shown"
     assert "one reading so far" in out
@@ -248,7 +250,7 @@ def test_one_evaluation_is_reported_rather_than_called_none():
 
 @needs_node
 def test_no_evaluations_still_reads_as_none():
-    out = _call([_row(1, 1000)], "chart('t','n',[{name:'lift',color:'#000',points:DATA.series.lift}],{})")
+    out = _call([_row(1, 1000)], "chart('t','n',[{name:'lift',color:'#000',points:DATA.runs['run'].series.lift}],{})")
     assert "no evaluations yet" in out
 
 
@@ -256,7 +258,7 @@ def test_no_evaluations_still_reads_as_none():
 def test_two_readings_at_the_same_step_do_not_produce_a_degenerate_axis():
     """Identical endpoints rendered as "15k -> 15k", which reads as a bug."""
     rows = [_row(1, 15360, eval_lift_sd=0.1), _row(2, 15360, eval_lift_sd=0.2)]
-    out = _call(rows, "chart('t','n',[{name:'lift',color:'#000',points:DATA.series.lift}],{})")
+    out = _call(rows, "chart('t','n',[{name:'lift',color:'#000',points:DATA.runs['run'].series.lift}],{})")
     assert out.count("15k</text>") == 0
     assert "15k decisions" in out
 
@@ -265,9 +267,46 @@ def test_two_readings_at_the_same_step_do_not_produce_a_degenerate_axis():
 def test_the_legend_is_not_clipped_by_a_long_series_name():
     """Fixed right padding cut "rollout win" down to "rollout wc"."""
     rows = [_row(i, i * 1000, win_rate=0.2 + i / 100) for i in range(1, 5)]
-    out = _call(rows, "chart('t','n',[{name:'rollout win',color:'#000',points:DATA.series.rollout_win}],{})")
+    out = _call(rows, "chart('t','n',[{name:'rollout win',color:'#000',points:DATA.runs['run'].series.rollout_win}],{})")
     assert "rollout win</text>" in out, "series label truncated"
     # the label starts inside the viewBox and its text has room to the edge
     import re
     x = float(re.search(r'x="([0-9.]+)"[^>]*>rollout win</text>', out).group(1))
     assert x + len("rollout win") * 6.3 <= 640, "label runs past the right edge"
+
+
+# ------------------------------------------------------------ several at once
+
+
+def test_several_runs_are_carried_on_one_page():
+    """Comparing runs is the common case, and doing it across two files is
+    how a difference gets missed."""
+    from cr_sim.train.watch import render_multi
+
+    page = render_multi([
+        ("alpha", [_row(1, 1000, eval_lift_sd=0.4)], True),
+        ("beta", [_row(1, 1000, eval_lift_sd=-0.1)], False),
+    ])
+    payload = json.loads(page.split("const DATA = ", 1)[1].split(";\n", 1)[0])
+    assert payload["order"] == ["alpha", "beta"]
+    assert payload["runs"]["alpha"]["summary"]["latest_lift"] == 0.4
+    assert payload["runs"]["beta"]["summary"]["latest_lift"] == -0.1
+
+
+def test_a_finished_run_is_not_presented_as_moving():
+    """The pip beside a tab says whether that run is still writing. Showing a
+    run that stopped hours ago as live is how a dead watcher went unnoticed
+    for an hour on this project."""
+    from cr_sim.train.watch import render_multi
+
+    page = render_multi([("done", [_row(1, 1000)], False)])
+    payload = json.loads(page.split("const DATA = ", 1)[1].split(";\n", 1)[0])
+    assert payload["runs"]["done"]["live"] is False
+
+
+def test_the_page_offers_a_split_view_only_when_there_is_something_to_compare():
+    from cr_sim.train.watch import render_multi
+
+    page = render_multi([("only", [_row(1, 1000)], True)])
+    assert "split-toggle" in page
+    assert "order.length < 2" in page, "the toggle is never hidden for one run"

@@ -1,0 +1,18 @@
+update    1  steps      1536      59/s  return  +0.1126  win   9%  entropy  4.364  pass   1%  loss -0.0351/0.2528
+update    2  steps      3072      52/s  return  +0.2214  win   5%  entropy  4.392  pass   1%  loss -0.0343/0.4660
+update    3  steps      4608      49/s  return  +0.1248  win   5%  entropy  4.351  pass   1%  loss -0.0354/0.4763
+update    4  steps      6144      49/s  return  +0.1482  win   4%  entropy  4.311  pass   1%  loss -0.0308/0.3915
+update    5  steps      7680      49/s  return  +0.2152  win   4%  entropy  4.313  pass   1%  loss -0.0327/0.4486
+update    6  steps      9216      49/s  return  +0.1638  win   4%  entropy  4.278  pass   1%  loss -0.0317/0.4677
+update    7  steps     10752      49/s  return  +0.2200  win   4%  entropy  4.283  pass   0%  loss -0.0358/0.3303
+update    8  steps     12288      49/s  return  +0.0957  win   4%  entropy  4.312  pass   1%  loss -0.0245/0.3685
+update    9  steps     13824      48/s  return  +0.1147  win   4%  entropy  4.259  pass   0%  loss -0.0477/0.3924
+update   10  steps     15360      49/s  return  -0.0041  win   6%  entropy  4.204  pass   1%  loss -0.0201/0.2687
+          eval: return +2.5814 vs control +1.9901  win 90% vs 85%  lift +0.39 sd
+update   11  steps     16896      45/s  return  +0.0306  win   7%  entropy  4.211  pass   1%  loss -0.0236/0.3152
+update   12  steps     18432      46/s  return  +0.0539  win   7%  entropy  4.215  pass   1%  loss -0.0310/0.3754
+update   13  steps     19968      46/s  return  +0.0429  win   5%  entropy  4.195  pass   1%  loss -0.0361/0.5846
+update   14  steps     21504      46/s  return  +0.1189  win   5%  entropy  4.186  pass   0%  loss -0.0378/0.2718
+update   15  steps     23040      46/s  return  +0.0961  win   6%  entropy  4.188  pass   1%  loss -0.0314/0.3024
+update   16  steps     24576      46/s  return  +0.1288  win   5%  entropy  4.135  pass   1%  loss -0.0273/0.3043
+update   17  steps     26112      46/s  return  +0.1329  win   5%  entropy  4.123  pass   1%  loss -0.0166/0.2916

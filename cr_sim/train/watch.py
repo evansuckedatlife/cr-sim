@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -85,17 +86,11 @@ def summarise(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def render(rows: Sequence[dict[str, Any]], title: str,
-           back: str | None = None) -> str:
-    """The page. One file, no dependencies, no build step.
-
-    ``back`` is a relative link to an index, for when this page is one
-    of several rather than the whole report.
-    """
+def _series_of(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     def pair(key):
         return [(r.get("steps", 0), r[key]) for r in rows if key in r]
 
-    series = {
+    return {
         "steps": [r.get("steps", 0) for r in rows],
         "lift": [(r.get("steps", 0), r["eval_lift_sd"]) for r in rows if "eval_lift_sd" in r],
         "win": pair("eval_win"),
@@ -111,11 +106,42 @@ def render(rows: Sequence[dict[str, Any]], title: str,
         "ret_std": pair("ret_std"),
         "noop": pair("noop_fraction"),
     }
+
+
+def render_multi(
+    runs: "Sequence[tuple[str, Sequence[dict[str, Any]], bool]]",
+    back: str | None = None,
+) -> str:
+    """One page holding several runs, as ``(name, rows, live)`` triples.
+
+    Runs are compared far more often than they are watched alone -- the
+    question is almost always "is this one doing better than that one", and
+    answering it by opening two files and scrolling both is how a difference
+    gets missed. Tabs switch between them and a split view puts two
+    side by side against shared axes.
+
+    ``live`` marks a run whose metrics file was written recently, so a
+    finished run is not presented as though it were still moving.
+    """
     payload = json.dumps({
-        "series": series, "summary": summarise(rows),
-        "title": title, "back": back,
+        "runs": {
+            name: {
+                "series": _series_of(rows),
+                "summary": summarise(rows),
+                "live": bool(live),
+            }
+            for name, rows, live in runs
+        },
+        "order": [name for name, _, _ in runs],
+        "back": back,
     })
     return _PAGE.replace("__DATA__", payload)
+
+
+def render(rows: Sequence[dict[str, Any]], title: str,
+           back: str | None = None) -> str:
+    """The page for a single run. One file, no dependencies, no build step."""
+    return render_multi([(title, rows, True)], back=back)
 
 
 _PAGE = r"""<!doctype html>
@@ -232,6 +258,33 @@ dl.gloss dt{font-family:Archivo,sans-serif;font-weight:700;margin-top:20px;font-
 dl.gloss dd{margin:5px 0 0;color:var(--soft);font-size:14.5px;max-width:80ch}
 dl.gloss dd.read{margin-top:7px;font-size:13.5px;color:var(--muted);padding-left:13px;border-left:2px solid var(--hair)}
 code{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.87em;background:var(--accentw);color:var(--accent);padding:1px 5px;border-radius:2px}
+.tabbar{display:flex;align-items:flex-end;gap:12px;margin-top:30px;
+  border-bottom:1px solid var(--rule);flex-wrap:wrap}
+.tabs{display:flex;gap:2px;flex-wrap:wrap;flex:1}
+.tab{appearance:none;border:1px solid transparent;border-bottom:0;background:none;
+  font-family:Archivo,sans-serif;font-size:13.5px;font-weight:600;color:var(--muted);
+  padding:9px 14px;border-radius:3px 3px 0 0;cursor:pointer;display:flex;align-items:center;gap:8px}
+.tab:hover{color:var(--ink);background:var(--panel2)}
+.tab[aria-selected="true"]{background:var(--panel);border-color:var(--rule);color:var(--ink);
+  margin-bottom:-1px;padding-bottom:10px}
+.tab .pip{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:none}
+.tab .pip.on{background:var(--good);box-shadow:0 0 0 3px var(--goodw)}
+.tab .val{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:12px;font-variant-numeric:tabular-nums}
+.split-toggle{appearance:none;background:var(--panel);border:1px solid var(--rule);border-radius:3px;
+  font-family:Archivo,sans-serif;font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--soft);
+  padding:7px 13px;cursor:pointer;margin-bottom:8px}
+.split-toggle:hover{color:var(--ink);border-color:var(--accent)}
+.split-toggle[aria-pressed="true"]{background:var(--accentw);color:var(--accent);border-color:var(--accent)}
+.panes{display:grid;grid-template-columns:1fr;gap:20px;margin-top:22px}
+.panes.split{grid-template-columns:1fr 1fr}
+@media (max-width:900px){.panes.split{grid-template-columns:1fr}}
+.pane{min-width:0}
+.pane-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.pane-head select{font-family:Archivo,sans-serif;font-size:13.5px;font-weight:600;color:var(--ink);
+  background:var(--panel);border:1px solid var(--rule);border-radius:3px;padding:6px 9px}
+.panes.split .chart svg{max-height:170px}
+.panes.split .readout-grid{grid-template-columns:repeat(auto-fit,minmax(96px,1fr))}
+.panes.split .hero .v{font-size:34px}
 footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--rule);font-size:13px;color:var(--muted)}
 </style></head><body>
 <div class="wrap">
@@ -239,7 +292,7 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--rule);font-si
 <header>
   <div class="lbl"><a id="back" href="#" style="color:var(--accent);text-decoration:none;display:none">&larr; all runs</a><span id="eyebrow">cr-sim &middot; reinforcement learning</span></div>
   <h1 id="title">cr-sim training</h1>
-  <p class="dek">A PPO agent learning Clash Royale against frozen copies of itself, rewarded by the change in what the board is already worth.</p>
+  <p class="dek">A PPO agent learning Clash Royale, rewarded by the change in what the board is already worth.</p>
   <div class="meta">
     <span class="live"><span class="dot"></span> live</span>
     <span>reloads every 20s</span>
@@ -247,21 +300,12 @@ footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--rule);font-si
   </div>
 </header>
 
-<div class="readout">
-  <div class="readout-head"><span class="lbl" style="color:var(--ink)" id="runname">run</span></div>
-  <div class="bar"><i id="bar" style="width:0%"></i></div>
-  <div class="readout-grid" id="general"></div>
+<div class="tabbar">
+  <div class="tabs" id="tabs" role="tablist"></div>
+  <button class="split-toggle" id="split" aria-pressed="false">Split view</button>
 </div>
 
-<h2>Is it learning</h2>
-<p class="lede">One number decides this, and it is not the win rate. Everything else on the page explains or qualifies it.</p>
-<div id="hero"></div>
-<div class="tiles" id="tiles"></div>
-<div id="charts1"></div>
-
-<h2>Is the critic working</h2>
-<p class="lede">PPO learns from the gap between what happened and what the critic expected. A critic that predicts nothing turns that gap into noise, and the policy gets pushed in near-random directions &mdash; which is what stalled the previous run.</p>
-<div id="charts2"></div>
+<div class="panes" id="panes"></div>
 
 <h2>What each number means</h2>
 <p class="lede">Written out because most of these are easy to misread, and two of them were misread on this project already.</p>
@@ -317,9 +361,10 @@ function cell(v,k,sm){
   return '<div class="cell"><span class="kpi-n">'+v+(sm?' <small>'+sm+'</small>':'')+'</span><span class="lbl">'+k+'</span></div>';
 }
 
-function renderGeneral(s,S){
+function renderGeneral(s,S,pane){
   var doneFrac = s.total_steps ? Math.min(1, (s.steps||0)/s.total_steps) : 0;
-  document.getElementById('bar').style.width = (doneFrac*100).toFixed(1)+'%';
+  var bar = pane ? pane.querySelector('[data-role="bar"]') : null;
+  if (bar) bar.style.width = (doneFrac*100).toFixed(1)+'%';
   var remain = (s.total_steps && s.steps_per_second)
       ? (s.total_steps-s.steps)/s.steps_per_second : null;
   return [
@@ -448,38 +493,44 @@ function chart(title,note,series,opts){
     +'<svg viewBox="0 0 '+w+' '+h+'" role="img" aria-label="'+esc(title)+'">'+body+'</svg></div>';
 }
 
-(function start(){
-  var S=DATA.series, s=DATA.summary;
-  document.getElementById('title').textContent=DATA.title;
-  if (DATA.back) {
-    var b=document.getElementById('back');
-    b.href=DATA.back; b.style.display='inline';
-    document.getElementById('eyebrow').style.display='none';
-  }
-  document.getElementById('runname').textContent='run "'+DATA.title+'"';
-  document.getElementById('stamp').textContent='updated '+new Date().toLocaleTimeString();
-  document.getElementById('general').innerHTML=renderGeneral(s,S);
-  document.getElementById('hero').innerHTML=renderHero(s);
-  document.getElementById('tiles').innerHTML=renderTiles(s,S);
+function paneMarkup(id){
+  return '<div class="pane" data-pane="'+id+'">'
+    + '<div class="pane-head"><span class="lbl">showing</span>'
+    + '<select data-role="pick"></select></div>'
+    + '<div class="readout"><div class="readout-head"><span class="lbl" style="color:var(--ink)" data-role="name"></span></div>'
+    + '<div class="bar"><i data-role="bar" style="width:0%"></i></div>'
+    + '<div class="readout-grid" data-role="general"></div></div>'
+    + '<h2>Is it learning</h2><div data-role="hero"></div>'
+    + '<div class="tiles" data-role="tiles"></div><div data-role="charts1"></div>'
+    + '<h2>Is the critic working</h2><div data-role="charts2"></div></div>';
+}
+
+function fillPane(pane, name){
+  var run = DATA.runs[name];
+  if (!run) return;
+  var S = run.series, s = run.summary;
+  var q = function(role){ return pane.querySelector('[data-role="'+role+'"]'); };
+  q('name').textContent = 'run "'+name+'"'+(run.live ? '' : ' (finished)');
+  q('general').innerHTML = renderGeneral(s, S, pane);
+  q('hero').innerHTML = renderHero(s);
+  q('tiles').innerHTML = renderTiles(s, S);
 
   var A='#2E86AB', B='#8A6516', C='#A2352C', D='#26704F', G='#8695A4';
-
-  document.getElementById('charts1').innerHTML =
+  q('charts1').innerHTML =
       chart('Lift vs control',
         'Each point is 40 fixed battles against a random agent, paired so both sides play the same ones. Zero is the line that matters.',
         [{name:'lift',color:A,points:S.lift}], {zero:true, fill:true})
     + '<div class="grid2">'
     + chart('Win rate, agent against the random control',
-        'Both are low because most matches end 0-0, and a draw is not a win.',
+        'Draws are not wins, so the control&rsquo;s own rate is the bar.',
         [{name:'agent',color:A,points:S.win},{name:'random',color:G,points:S.control}], {asPct:true})
     + chart('Rollout win rate',
         'Measured while exploring, and about eighteen points optimistic on this project.',
         [{name:'rollout win',color:B,points:S.rollout_win}], {asPct:true, emptyText:'not enough updates yet'})
     + '</div>';
-
-  document.getElementById('charts2').innerHTML =
+  q('charts2').innerHTML =
       chart('Explained variance',
-        'Share of the outcome the critic can predict. 0 is no better than guessing the average; it sat near 0.06 on the last run.',
+        'Share of the outcome the critic can predict. 0 is no better than guessing the average.',
         [{name:'explained var',color:D,points:S.explained_variance}], {zero:true, fill:true, emptyText:'not enough updates yet'})
     + '<div class="grid2">'
     + chart('Critic error and what it is fitting',
@@ -491,16 +542,82 @@ function chart(title,note,series,opts){
         [{name:'entropy',color:B,points:S.entropy},{name:'pass',color:G,points:S.noop}],
         {emptyText:'not enough updates yet'})
     + '</div>';
+}
 
-  document.getElementById('foot').textContent = s.updates
-    ? s.updates+' updates recorded, '+s.evaluations+' evaluations. Every figure is read from the run’s own metrics file; none is estimated except the remaining-time figure, which assumes the current rate holds.'
-    : 'No updates recorded yet.';
+function remember(key, value){ try{ localStorage.setItem(key, value); }catch(e){} }
+function recall(key, fallback){
+  try{ var v = localStorage.getItem(key); return v === null ? fallback : v; }catch(e){ return fallback; }
+}
+
+(function start(){
+  var order = DATA.order, panesEl = document.getElementById('panes');
+  document.getElementById('stamp').textContent='updated '+new Date().toLocaleTimeString();
+  if (DATA.back) {
+    var b=document.getElementById('back');
+    b.href=DATA.back; b.style.display='inline';
+    document.getElementById('eyebrow').style.display='none';
+  }
+
+  var split = recall('crsim-split','0') === '1' && order.length > 1;
+  var picked = [
+    recall('crsim-pane0', order[0]),
+    recall('crsim-pane1', order[Math.min(1, order.length-1)])
+  ].map(function(n){ return DATA.runs[n] ? n : order[0]; });
+
+  function paintTabs(){
+    document.getElementById('tabs').innerHTML = order.map(function(n){
+      var r = DATA.runs[n], lift = r.summary.latest_lift;
+      var val = (lift === null || lift === undefined) ? '' :
+        '<span class="val">'+(lift>0?'+':'')+Number(lift).toFixed(2)+'</span>';
+      var on = picked.slice(0, split ? 2 : 1).indexOf(n) >= 0;
+      return '<button class="tab" role="tab" data-run="'+n+'" aria-selected="'+on+'">'
+        + '<span class="pip'+(r.live?' on':'')+'"></span>'+n+val+'</button>';
+    }).join('');
+    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function(t){
+      t.addEventListener('click', function(){
+        picked[0] = t.dataset.run; remember('crsim-pane0', picked[0]); draw();
+      });
+    });
+  }
+
+  function draw(){
+    document.getElementById('title').textContent = split ? 'cr-sim training' : picked[0];
+    panesEl.className = 'panes' + (split ? ' split' : '');
+    panesEl.innerHTML = paneMarkup(0) + (split ? paneMarkup(1) : '');
+    for (var i = 0; i < (split ? 2 : 1); i++) {
+      (function(i){
+        var pane = panesEl.querySelector('[data-pane="'+i+'"]');
+        var pick = pane.querySelector('[data-role="pick"]');
+        pick.innerHTML = order.map(function(n){
+          return '<option value="'+n+'"'+(n===picked[i]?' selected':'')+'>'+n+'</option>';
+        }).join('');
+        pick.addEventListener('change', function(){
+          picked[i] = pick.value; remember('crsim-pane'+i, pick.value);
+          fillPane(pane, picked[i]); paintTabs();
+        });
+        pane.querySelector('.pane-head').style.display = split ? 'flex' : 'none';
+        fillPane(pane, picked[i]);
+      })(i);
+    }
+    paintTabs();
+  }
+
+  var toggle = document.getElementById('split');
+  toggle.setAttribute('aria-pressed', String(split));
+  if (order.length < 2) toggle.style.display = 'none';
+  toggle.addEventListener('click', function(){
+    split = !split; remember('crsim-split', split ? '1' : '0');
+    toggle.setAttribute('aria-pressed', String(split));
+    draw();
+  });
+
+  draw();
 
   try{
-    var y=sessionStorage.getItem('crsim-scroll');
+    var y=localStorage.getItem('crsim-scroll');
     if(y) window.scrollTo(0, parseInt(y,10));
     window.addEventListener('beforeunload', function(){
-      try{ sessionStorage.setItem('crsim-scroll', String(window.scrollY)); }catch(e){}
+      try{ localStorage.setItem('crsim-scroll', String(window.scrollY)); }catch(e){}
     });
   }catch(e){}
 })();
@@ -512,27 +629,65 @@ function chart(title,note,series,opts){
 
 
 
+#: A run whose metrics file has not been touched this recently is shown as
+#: finished. Generous on purpose: an update at the slowest cadence measured
+#: here takes a couple of minutes, and calling a live run dead is worse than
+#: being slow to notice a finished one.
+_LIVE_SECONDS = 300.0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cr-sim-watch")
-    parser.add_argument("run", nargs="?", type=Path, default=DEFAULT_RUN)
+    parser.add_argument(
+        "runs", nargs="*", type=Path, default=None,
+        help="run directories to watch. Several are shown as tabs on one "
+             "page, with a split view for comparing two at once -- the "
+             "question is almost always whether this run is beating that "
+             "one, and answering it across two files is how a difference "
+             "gets missed. Defaults to every run under runs/.",
+    )
     parser.add_argument("--out", type=Path, default=None,
-                        help="where to write the page (default: <run>/progress.html)")
+                        help="where to write the page (default: progress.html)")
     parser.add_argument("--open", action="store_true", help="open it in a browser")
     parser.add_argument("--once", action="store_true",
                         help="write once and exit rather than refreshing")
     parser.add_argument("--every", type=float, default=30.0)
     args = parser.parse_args(argv)
 
-    metrics = args.run / "metrics.jsonl"
-    out = args.out or (args.run / "progress.html")
+    runs = list(args.runs) if args.runs else sorted(
+        d for d in (ROOT / "runs").iterdir()
+        if d.is_dir() and (d / "metrics.jsonl").is_file()
+    ) if (ROOT / "runs").is_dir() else []
+    if not runs:
+        print("no runs to watch", file=sys.stderr)
+        return 1
 
-    def write() -> int:
-        rows = read_metrics(metrics)
-        out.write_text(render(rows, args.run.name), encoding="utf-8")
-        return len(rows)
+    out = args.out or (runs[0] / "progress.html" if len(runs) == 1
+                       else ROOT / "progress.html")
+    out.parent.mkdir(parents=True, exist_ok=True)
 
-    count = write()
-    print(f"{count} updates -> {out}")
+    def once() -> int:
+        now = time.time()
+        collected = []
+        for run in runs:
+            metrics = run / "metrics.jsonl"
+            rows = read_metrics(metrics)
+            if not rows:
+                continue
+            # Deduplicated by update: the files written before the
+            # double-write fix are still on disk, and counting each update
+            # twice is what once made a stalled run look busy.
+            by_update = {r.get("updates", i): r for i, r in enumerate(rows)}
+            rows = [by_update[k] for k in sorted(by_update)]
+            live = metrics.is_file() and (now - metrics.stat().st_mtime) < _LIVE_SECONDS
+            collected.append((run.name, rows, live))
+        if not collected:
+            return 0
+        out.write_text(render_multi(collected), encoding="utf-8")
+        return sum(len(rows) for _, rows, _ in collected)
+
+    count = once()
+    print(f"{len(runs)} run(s), {count} updates -> {out}", flush=True)
     if args.open:
         import webbrowser
 
@@ -540,19 +695,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.once:
         return 0
 
-    # The page reloads itself, so this only has to keep it current. Polling a
-    # file rather than watching it: the run appends every minute or so, and a
+    # Polled rather than watched. The page refreshes on a timer anyway, so
+    # reacting within a second of a write buys nothing, and a filesystem
     # watcher would be more machinery than the interval deserves.
-    import time
-
     try:
         while True:
-            time.sleep(args.every)
-            count = write()
-            print(f"  {count} updates", flush=True)
+            time.sleep(max(1.0, args.every))
+            once()
     except KeyboardInterrupt:
-        print("\nstopped")
-    return 0
+        return 0
 
 
 if __name__ == "__main__":
