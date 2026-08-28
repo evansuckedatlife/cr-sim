@@ -60,7 +60,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="evaluate-vs-expert")
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("--episodes", type=int, default=60)
-    parser.add_argument("--tower-level", type=int, default=5)
+    parser.add_argument(
+        "--tower-level", type=int, default=11,
+        help="Crown Tower level. 11, agreeing with cr_sim.train.evaluate's "
+             "CLI and with cr_sim.train.run -- this defaulted to 5 while both "
+             "of those defaulted to 11, which is two evaluation entry points "
+             "quietly playing in different arenas. That class of mismatch "
+             "already trained a whole run at level 11 while config.json "
+             "recorded 5. Pass --tower-level 5 explicitly for the arena the "
+             "clones were measured in.")
     parser.add_argument("--tps", type=int, default=20)
     parser.add_argument("--frame-skip", type=int, default=30)
     parser.add_argument("--match-seconds", type=int, default=120)
@@ -90,6 +98,11 @@ def main(argv: list[str] | None = None) -> int:
         help="which observation to build the environment with. Defaults to "
              "whatever the checkpoint says it was trained on, which is the "
              "only choice that can be right.")
+    parser.add_argument(
+        "--modes", nargs="+", default=["greedy", "sampled"],
+        choices=("greedy", "sampled"),
+        help="which arms to play. Both by default: they are two different "
+             "policies and neither substitutes for the other.")
     parser.add_argument("--out", type=Path, default=None,
                         help="run directory to write. Defaults to "
                              "runs/vs-<opponent>-<checkpoint's run name>.")
@@ -125,7 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     faced = opponent_name(make_env())
     print(f"{args.episodes} paired battles against the {faced} opponent, "
           f"seed block {args.block}", flush=True)
-    verdict = evaluate_paired(make_env, net, episodes=args.episodes, seeds=seeds)
+    verdict = evaluate_paired(make_env, net, episodes=args.episodes,
+                              seeds=seeds, modes=tuple(args.modes))
     verdict["block"] = int(args.block)
     verdict["checkpoint"] = str(args.checkpoint)
     verdict["head"] = str(payload.get("head", "flat"))
@@ -139,8 +153,13 @@ def main(argv: list[str] | None = None) -> int:
     control = verdict["control"]
     print(f"{'random control':<20}{control['win']:>8.0%}{control['loss']:>8.0%}"
           f"{control['draw']:>8.0%}{'--':>10}{'--':>22}")
+    # Guarded, the way cr_sim.train.evaluate's own CLI guards it. `modes` is
+    # optional in evaluate_paired, so a --modes greedy caller used to get a
+    # KeyError here -- *after* paying for every battle.
     for mode in ("greedy", "sampled"):
-        arm = verdict[mode]
+        arm = verdict.get(mode)
+        if arm is None:
+            continue
         print(f"{'trained, ' + mode:<20}{arm['win']:>8.0%}{arm['loss']:>8.0%}"
               f"{arm['draw']:>8.0%}{arm['lift']:>+10.3f}"
               f"   [{arm['ci_low']:+.3f}, {arm['ci_high']:+.3f}]", flush=True)
@@ -164,8 +183,10 @@ def main(argv: list[str] | None = None) -> int:
         "num_envs": 0, "horizon": 0,
         "note": (f"{args.checkpoint} scored over {args.episodes} paired "
                  f"battles against the {faced} opponent on seed block "
-                 f"{args.block}. Greedy {verdict['greedy']['lift']:+.3f} sd, "
-                 f"sampled {verdict['sampled']['lift']:+.3f} sd. The random "
+                 f"{args.block}. "
+                 + ", ".join(f"{m} {verdict[m]['lift']:+.3f} sd"
+                             for m in ("greedy", "sampled") if m in verdict)
+                 + ". The random "
                  "control faces the same opponent on the same seeds, so the "
                  "lift is on a different scale from every lift measured "
                  "against a random opponent -- not a better or worse number, "
@@ -181,10 +202,12 @@ def main(argv: list[str] | None = None) -> int:
         "control_win": control["win"],
         "eval_return": verdict[verdict["mode"]]["return"],
         "control_return": control["return"],
-        # Both arms on the row, because the headline is one of them and a
-        # reader cannot tell which way a change moved without the other.
-        "eval_lift_sd_greedy": verdict["greedy"]["lift"],
-        "eval_lift_sd_sampled": verdict["sampled"]["lift"],
+        # Both arms on the row where both were played, because the headline
+        # is one of them and a reader cannot tell which way a change moved
+        # without the other. Absent rather than invented where an arm was not
+        # played at all.
+        **{f"eval_lift_sd_{m}": verdict[m]["lift"]
+           for m in ("greedy", "sampled") if m in verdict},
         "eval_mode": verdict["mode"],
         "eval_block": int(args.block),
         # Named, because a lift compared against one measured on a different

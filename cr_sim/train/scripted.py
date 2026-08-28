@@ -248,4 +248,9 @@ def scripted_opponent(team: Team, config: SearchBotConfig | None = None):
 
     policy.wants_battle = True  # type: ignore[attr-defined]
     policy.bot = bot  # type: ignore[attr-defined]
+    # Named, the way cr_sim.train.evaluate.search_opponent already names its
+    # own. Without it an environment built from here reported "unknown" and
+    # any lift measured in it could not be written down at all -- the bot is
+    # not weaker for being built through a different helper.
+    policy.opponent_name = "search"  # type: ignore[attr-defined]
     return policy

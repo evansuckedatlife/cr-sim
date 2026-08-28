@@ -211,7 +211,19 @@ def evaluate(
             if terminated or truncated:
                 break
         returns.append(total)
-        crowns.append(info["blue_crowns"] - info["red_crowns"])
+        # The agent's own crown difference, not blue's. ``returns`` is
+        # already team-relative -- it comes from _shaped_value(battle,
+        # self.team, ...) -- and this line was not, so an env built with
+        # team=RED reported the *opponent's* crowns beside the agent's own
+        # return, with opposite signs and no error at all. Measured on twelve
+        # seeds before the fix: mean return -0.083 against mean crowns +0.083,
+        # and the two agreed in sign on 0% of the battles. Every existing
+        # number is unaffected: they were all measured on team=BLUE envs,
+        # where this is the same subtraction.
+        mine = env.team
+        theirs = mine.opponent
+        crowns.append(info[f"{mine.name.lower()}_crowns"]
+                      - info[f"{theirs.name.lower()}_crowns"])
 
     return Result(returns=returns, crowns=crowns)
 

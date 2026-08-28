@@ -69,9 +69,23 @@ for path in args.checkpoints:
     net = ActorCritic(net_config_for(env, head=payload.get("head", "flat")))
     net.load_state_dict(payload["state_dict"])
     net.eval()
-    for mode in ("greedy", "sampled"):
+    for index, mode in enumerate(("greedy", "sampled")):
+        # The sampled arm's own stream. Without it the draw comes off torch's
+        # global generator, which nothing here seeds -- so every sampled
+        # number this script has ever written, including the ones in
+        # runs/_anchor/*.json and in HANDOFF's table, is unreproducible. The
+        # greedy arm takes an argmax and is untouched by this, which is why
+        # the +2.167 greedy anchor still replays bit-identically.
+        #
+        # Derived arithmetically from the seeds, never from hash(): string
+        # hashing is salted per process, so a hash-derived stream is
+        # reproducible within a run and not between two. Same rule as
+        # cr_sim.train.evaluate.evaluate_paired.
+        stream = torch.Generator().manual_seed(
+            (seeds[0] + 7919 * index) % (2 ** 31 - 1))
         result = evaluate(make_env(observation), net, episodes=args.episodes,
-                          seeds=seeds, greedy=(mode == "greedy"))
+                          seeds=seeds, greedy=(mode == "greedy"),
+                          generator=stream)
         crowns = np.asarray(result["crowns"])
         difference = np.asarray(result["returns"]) - control_returns
         error = difference.std(ddof=1) / np.sqrt(len(difference))

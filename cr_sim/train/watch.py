@@ -652,6 +652,78 @@ def _states_shared_conditions(note: str) -> bool:
     return "opponent" in joined and "seed" in joined
 
 
+def read_ladder(run: Path) -> "dict[str, Any] | None":
+    """``ladder.json`` as a table this page could draw. Nothing calls it yet.
+
+    **Landed dark, deliberately, and this note is the point of it.** Rendering
+    a ladder needs a new shape beside "flat", "paired" and "arms" and a block
+    in the record card to put it in. The watcher serving port 8899 holds the
+    module it was started with -- python does not reload an edited file in a
+    running process -- and it must not be restarted, so an edit here changes
+    nothing on the live page today. A future reader who restarts it gets the
+    reader ready-made; a reader who does not gets told, by the ladder run's
+    own ``config.json`` note, that the page is showing the arms and the Elo
+    table is in the file.
+
+    Kept separate from ``_verdict_of`` on purpose. A ladder's verdict already
+    reads as the "flat" shape and renders correctly as one -- its ``lift`` is
+    a genuine lift against the random control, exactly as the field claims --
+    so teaching the shape detector a fifth answer would change how an
+    existing file renders in exchange for nothing. This adds a reader; it
+    does not reroute one.
+
+    **The rating and the lift are different scales and this returns them
+    under different names.** ``elo`` is an Elo; ``lift`` stays a lift. Putting
+    a rating in a field called "lift" is the scale conflation that has cost
+    this project three rounds of invalid comparisons, and the fact that both
+    numbers rank the same players the same way is exactly what makes the
+    mistake survivable long enough to matter.
+    """
+    path = Path(run) / "ladder.json"
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("ratings"), list):
+        return None
+    ratings = []
+    for row in raw["ratings"]:
+        if not isinstance(row, dict) or not _plottable(row.get("elo")):
+            continue
+        ratings.append({
+            "name": str(row.get("name", "")),
+            "elo": row["elo"],
+            # The interval, only where both ends are really on the object --
+            # the same rule _ci_of applies to a lift.
+            "ci": ([row["ci_low"], row["ci_high"]]
+                   if _plottable(row.get("ci_low"))
+                   and _plottable(row.get("ci_high")) else None),
+            "games": row.get("games"),
+            # An anchor held at its offline value is not a measurement this
+            # run made, and a page that draws it as one implies a precision
+            # that was never paid for.
+            "pinned": bool(row.get("pinned")),
+        })
+    return {
+        "mode": raw.get("mode"),
+        "episodes": raw.get("episodes"),
+        "observation": raw.get("observation"),
+        "anchor": raw.get("anchor"),
+        "prior_sd": raw.get("prior_sd"),
+        "ratings": sorted(ratings, key=lambda r: -r["elo"]),
+        "pairings": [
+            {"a": r.get("a"), "b": r.get("b"), "score": r.get("score"),
+             "games": r.get("games"),
+             # Reported, never quietly assumed to be zero. The battle-count
+             # table treats the two directions on one seed as perfectly
+             # correlated because nobody has measured whether they are.
+             "seed_correlation": r.get("seed_correlation")}
+            for r in raw.get("pairings", []) if isinstance(r, dict)],
+    }
+
+
 def _ci_of(raw: dict[str, Any]) -> "list[float] | None":
     """An interval, only where both ends are fields of the object.
 

@@ -92,6 +92,30 @@ def build_parser() -> argparse.ArgumentParser:
              "refresh, so a worker runs its own opponent rather than the "
              "parent doing every forward pass.",
     )
+    parser.add_argument(
+        "--probe", choices=("fixed", "rotating", "ladder"), default="fixed",
+        help="what the in-run measurement is. 'fixed' -- the default, and "
+             "unchanged -- is lift over a random control on one fixed seed "
+             "list, which every existing run was steered by. 'rotating' is "
+             "the same lift on a different seed block each reading, so the "
+             "three-reading promotion window stops re-selecting one seed "
+             "set's luck. 'ladder' rates the policy against named anchors "
+             "and promotes on Elo instead: the lift is saturated -- every "
+             "result this project has lands in a band 0.024 sd wide -- while "
+             "the rating spreads the same battles over about 300 points. "
+             "Defaulted to 'fixed' so an old command still means what it "
+             "meant.")
+    parser.add_argument(
+        "--ladder-anchor", action="append", default=[],
+        help="who the ladder probe rates against: 'random', "
+             "'search-c6h8', or a checkpoint. Repeatable. Defaults to "
+             "random alone, which is one rung and not a scale.")
+    parser.add_argument(
+        "--ladder-ratings", type=Path, default=None,
+        help="a ladder.json whose fitted ratings pin this run's anchors. "
+             "Without it the anchors sit at 0 and ladder_elo is only "
+             "relative to them; with it the probe reports "
+             "ladder_elo_vs_expert without ever playing the expert.")
     parser.add_argument("--horizon", type=int, default=256)
     parser.add_argument("--tps", type=int, default=20, help="engine tick rate")
     parser.add_argument("--frame-skip", type=int, default=10, help="ticks per decision")
@@ -421,9 +445,23 @@ def main(argv: list[str] | None = None) -> int:
                     # A run's own lift series is only comparable to another
                     # run's when these agree.
                     "eval_opponent": opponent_name(_eval_env()),
+                    # One new key, not four: watch.py pairs two runs for A/B
+                    # only while their config key sets differ by at most four,
+                    # so every field added here is spent out of that budget.
+                    "probe": args.probe,
                     "eval_episodes": args.eval_episodes}, indent=2),
         encoding="utf-8",
     )
+
+    # The anchors' fitted ratings, read once. Without them a ladder probe
+    # still rates the policy against its anchors, but every anchor sits at 0
+    # and the rating is only relative to them -- ladder_elo_vs_expert needs a
+    # rating for the expert, which is what the offline ladder produced.
+    offline_ratings: dict[str, float] = {}
+    if args.ladder_ratings is not None:
+        loaded = json.loads(args.ladder_ratings.read_text(encoding="utf-8"))
+        offline_ratings = {str(r["name"]): float(r["elo"])
+                           for r in loaded.get("ratings", [])}
 
     started = time.perf_counter()
     resume_state = None
@@ -466,8 +504,12 @@ def main(argv: list[str] | None = None) -> int:
     optimiser_holder: dict[str, Any] = {}
     net_holder: dict[str, torch.nn.Module] = {}
     probe_holder: dict[str, Any] = {}
-    best = {"lift": float("-inf")}
-    #: Recent lift readings, for promoting on their mean.
+    #: The best rolling value of whatever statistic is steering promotion --
+    #: a lift, or the ladder's rating. Not called "lift": under --probe
+    #: ladder it holds an Elo, and one name over two scales is what this
+    #: project has already paid three rounds of invalid comparisons for.
+    best = {"score": float("-inf")}
+    #: Recent readings of that statistic, for promoting on their mean.
     recent: list[float] = []
 
     probe_env = _env(None)
@@ -521,12 +563,22 @@ def main(argv: list[str] | None = None) -> int:
             probe = probe_holder.get("probe")
             if probe is not None and args.eval_every and stats["updates"] % args.eval_every == 0:
                 stats.update(probe(net))
-                print(
-                    f"          eval: return {stats['eval_return']:+.4f} vs control "
-                    f"{stats['control_return']:+.4f}  win {stats['eval_win']:.0%} vs "
-                    f"{stats['control_win']:.0%}  lift {stats['eval_lift_sd']:+.2f} sd",
-                    flush=True,
-                )
+                if "eval_lift_sd" in stats:
+                    print(
+                        f"          eval: return {stats['eval_return']:+.4f} vs control "
+                        f"{stats['control_return']:+.4f}  win {stats['eval_win']:.0%} vs "
+                        f"{stats['control_win']:.0%}  lift {stats['eval_lift_sd']:+.2f} sd",
+                        flush=True,
+                    )
+                if "ladder_elo" in stats:
+                    scores = "  ".join(
+                        f"{key[len('ladder_score_'):]} {value:.3f}"
+                        for key, value in sorted(stats.items())
+                        if key.startswith("ladder_score_"))
+                    versus = (f"  ({stats['ladder_elo_vs_expert']:+.0f} vs expert)"
+                              if "ladder_elo_vs_expert" in stats else "")
+                    print(f"          ladder: {stats['ladder_elo']:+.0f} Elo"
+                          f"{versus}  {scores}", flush=True)
                 # Promoted on a rolling mean, never on a single reading.
                 #
                 # This used to keep whichever checkpoint scored the highest
@@ -540,13 +592,32 @@ def main(argv: list[str] | None = None) -> int:
                 # A mean over several consecutive evaluations cannot be
                 # carried by one lucky draw, and the window is what makes the
                 # comparison worth anything.
-                recent.append(stats["eval_lift_sd"])
+                #
+                # And what it promotes *on* is the ladder's rating where
+                # there is one. eval_lift_sd is the sampled arm at forty
+                # battles, where a single reading's standard error is about
+                # 0.12 sd -- the noisiest number in the run -- and it is then
+                # selected on by a maximum. ladder_elo is greedy, which
+                # reproduces bit-identically, and it is named. The lift keeps
+                # being written either way, because it is the bridge to every
+                # historical number; it just stops steering.
+                promoted_on = ("ladder_elo" if "ladder_elo" in stats
+                               else "eval_lift_sd")
+                if promoted_on in stats:
+                    recent.append(float(stats[promoted_on]))
                 del recent[:-_BEST_WINDOW]
                 if len(recent) >= _BEST_WINDOW:
                     rolling = sum(recent) / len(recent)
-                    stats["rolling_lift"] = rolling
-                    if rolling > best["lift"]:
-                        best["lift"] = rolling
+                    # Never in a field called "lift". An Elo and a lift are
+                    # unrelated scales, and this project has already paid
+                    # three rounds of invalid comparisons for putting two
+                    # scales under one name.
+                    rolling_key = ("rolling_ladder_elo"
+                                   if promoted_on == "ladder_elo"
+                                   else "rolling_lift")
+                    stats[rolling_key] = rolling
+                    if rolling > best["score"]:
+                        best["score"] = rolling
                         torch.save(
                             {
                                 "state_dict": net.state_dict(),
@@ -555,7 +626,12 @@ def main(argv: list[str] | None = None) -> int:
                                 "head": args.head,
                                 "observation": args.observation,
                                 "stats": stats,
-                                "rolling_lift": rolling,
+                                rolling_key: rolling,
+                                # Which statistic chose these weights. A
+                                # checkpoint promoted on Elo and one promoted
+                                # on lift are not comparable, and the file
+                                # used to say "rolling_lift" whichever it was.
+                                "promoted_on": promoted_on,
                                 "window": _BEST_WINDOW,
                             },
                             out / "best.pt",
@@ -633,9 +709,25 @@ def main(argv: list[str] | None = None) -> int:
                     parallel.set_opponent(built.state_dict())
             # See _eval_env: a random opponent, not an idle one, and the
             # probe records which it was on every row it produces.
-            probe_holder["probe"] = evaluation_probe(
-                _eval_env, episodes=args.eval_episodes,
-            )
+            if args.probe == "ladder":
+                from .ladder import ladder_probe, parse_player
+
+                anchors = [parse_player(spec) for spec
+                           in (args.ladder_anchor or ["random"])]
+                probe_holder["probe"] = ladder_probe(
+                    _env, anchors, episodes=args.eval_episodes,
+                    ratings=offline_ratings, mode="greedy",
+                )
+            elif args.probe == "rotating":
+                from .evaluate import rotating_probe
+
+                probe_holder["probe"] = rotating_probe(
+                    _eval_env, episodes=args.eval_episodes,
+                )
+            else:
+                probe_holder["probe"] = evaluation_probe(
+                    _eval_env, episodes=args.eval_episodes,
+                )
 
         parallel = None
         if args.workers:

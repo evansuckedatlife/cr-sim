@@ -39,7 +39,7 @@ from cr_sim.data.leveling import build_level_table
 from cr_sim.data.source import LogicData
 from cr_sim.engine.entity import Team
 from cr_sim.train.clone import CloneConfig, Demonstrations, clone
-from cr_sim.train.evaluate import evaluate
+from cr_sim.train.evaluate import evaluate, write_verdict
 from cr_sim.train.nets import POLICY_HEADS, ActorCritic, net_config_for
 from cr_sim.train.run import DEFAULT_BUILD, DEFAULT_DECK, _random_opponent
 from cr_sim.train.selfplay import check_lift_is_named, opponent_name
@@ -324,6 +324,17 @@ def main(argv: list[str] | None = None) -> int:
     greedy_stats = line("cloned, greedy", greedy)
     best = greedy_stats if greedy_stats["lift"] >= sampled_stats["lift"] else sampled_stats
     verdict = {"episodes": args.episodes,
+               # Read off the environment the control actually played in.
+               # This file used to go around write_verdict with a bare
+               # write_text and no eval_opponent at all, so the clone's
+               # +2.167 -- the number half this project is quoted against --
+               # renders in report.py as "beats an unnamed opponent". Not one
+               # verdict.json on this machine carries the field; all seven
+               # would be refused today, which is the guard working.
+               "eval_opponent": opponent_name(make_env()),
+               "eval_episodes": args.episodes,
+               "seeds": seeds,
+               "mode": "greedy" if best is greedy_stats else "sampled",
                "sampled": sampled_stats, "greedy": greedy_stats,
                # Flattened as well as nested: the report reads these keys, and
                # the honest headline is whichever way of playing scored better.
@@ -331,8 +342,7 @@ def main(argv: list[str] | None = None) -> int:
                "ci_high": best["ci_high"], "win": best["win"],
                "loss": best["loss"],
                "clone": history[-1] if history else {}}
-    (args.out / "verdict.json").write_text(json.dumps(verdict, indent=2),
-                                           encoding="utf-8")
+    write_verdict(args.out / "verdict.json", verdict)
 
     # Registered as a run so it appears beside the training runs it is meant
     # to be compared against. A flat series, because a clone does not learn
