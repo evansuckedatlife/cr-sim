@@ -186,90 +186,93 @@ Clash Royale APK and run `python scripts/extract_apk.py <apk>`.
 
 ## What is running now
 
-- **`runs/learn-1m-flat`** and **`runs/learn-1m-factored`** — a matched pair,
-  1M steps each, clone-initialised, KL-anchored at 0.5, `--elixir-weight 0`,
-  tower level 5, observation v1. Roughly 17½ hours each while they share the
-  eight cores.
-- **`runs/learn-1m-aborted`** — dead, kept for its metrics. It ran ten updates
-  from `runs/cloned/cloned.pt`, then a restart passed `--resume` together with
-  `--init-from` and it refused to start. **Do not resume it** — see below.
-
-The pair differ **only** in the action head. Getting there took two corrections
-to how the A/B was first set up, and both matter to anyone rebuilding it.
-
-- The aborted flat run initialised from `runs/cloned/cloned.pt`, which stores
-  **no `observation`, `targets`, `pass_weight` or `head` at all** — it predates
-  those fields. Pairing that against a documented head-ablation clone would
-  have made the head one of two variables. Both arms now start from the matched
-  ablation pair (v1, hard targets, `pass_weight` 0.1, same demonstrations, same
-  recipe), copied into `checkpoints/` so a worktree cleanup cannot take them.
-- The head is **not** "the one lever nobody has measured". It is measured at
-  clone scale, in `docs/training.md`: factored **+2.167** [+1.962, +2.372]
-  against flat **+1.705** [+1.446, +1.965] greedy, intervals not overlapping,
-  at 57,141 head parameters against 185,040. These runs ask something narrower
-  and more interesting — whether that advantage survives PPO.
-
-That clone-scale comparison also carries the most useful methodological finding
-on this project: flat and factored reproduce the expert's exact tile on
-held-out states **4.8% and 5.1%** of the time — a difference of nothing — while
-their greedy win rates are 85% and 96%. **Held-out agreement cannot rank these
-policies.** Any comparison scored on it calls this a tie.
+- **`runs/learn-lvl5-kl01`** -- 1M steps, factored head, self-play, clone
+  initialised, **at tower level 5 for the first time** (see the trap below),
+  with the KL anchor dropped 0.5 -> 0.1. Four updates in, its statistics moved
+  into the level-5 band exactly as predicted, and rollout win rate went
+  **4% -> 28%**.
+- **`data_cache/demos_v1v3`** -- 420 episodes over four shards, recording v1
+  (9 channels) and v3 (17) off the *same* playthroughs under the projected
+  reward. This is the corpus the observation question has been blocked on.
+- **`runs/learn-1m-factored-lvl11`** -- dead, kept for the evidence. 557,056
+  steps entirely at level 11. The policy never moved: entropy 3.5489 -> 3.5500
+  and `reference_kl` pinned at 0.021-0.023 across 244 updates. Its one real
+  gain came early and then stopped -- sampled eval lift ~+0.70 to ~+1.20, first
+  half +1.171, second half +1.229. **No number in it may be differenced against
+  a post-fix run:** level 5 and level 11 are different games.
+- **`runs/learn-1m-flat`** -- stopped at update 24, a partial arm of the head
+  A/B, also at level 11.
 
 ## Recently landed
 
-All of this was uncommitted when the previous handoff was written. It is now on
-`main` — it had been sitting in the working tree with no session left to commit
-it, which is how work went invisible after the last restart.
+- **`--tower-level` now reaches the workers** (`eabf733`). It never had. See
+  the traps.
+- **A demonstration set states what it is** (`7ecf3a1`). Shards record the
+  encoding and reward they were written under, `clone_policy` verifies
+  `--observation` against that instead of trusting it, and shards that disagree
+  are refused rather than merged. `make_demos` gained `--reward`,
+  `--elixir-weight` and `--reward-horizon-seconds`: it had built its
+  environment with *no* reward at all, so every demonstration set this project
+  ever collected carried value targets from the simple shaped reward while
+  every fine-tune ran `projected`.
+- **A run records its own opponent and origin** (`c654151`): `pool_size`,
+  `refresh_every`, `opponent_temperature`, `init_from`, `resumed`. Confirming
+  that `learn-1m-factored` was really self-play previously meant reading the
+  source.
+- **The all-time page grew five graphs** (`7711ef9`, `505b830`), each built to
+  refuse rather than mislead when two numbers do not share a control.
+- **`CLAUDE.md` exists** (`4966a92`): every living python process belongs on
+  the progress page, and the rules that had been living only in conversation.
+- **The anchor number was corrected** (`e8f0464`): the clone's greedy lift is
+  +1.623, not the +1.813 this file used to carry.
 
-- **`threat` observation set** (`aae0532`) — reach and damage-per-second grid
-  channels, as a named variant. **v2 was frozen at 13 channels and v3 added at
-  17**, because a self-updating "v2" silently redefined what old checkpoints
-  meant and let them sail past `check_observation` into a raw shape mismatch. A
-  named version must mean the same thing forever.
-- **Measurement fixes** (`e19e41b`) — `write_verdict` now refuses a lift with
-  no `eval_opponent`, and `report.py`/`bot.py` name the opponent instead of
-  labelling every positive result "beats random". `rotating_probe` cycles eight
-  seed blocks, so a rolling window of three covers 120 distinct battles rather
-  than three readings of the same forty. `clone.py` value targets are indexed
-  by their own decision, not by even striding. Both scripts are tracked.
-- **The all-time page** (`852b030`, `dce8338`) — lifetime model performance and
-  games played, with every number carrying the control it was read against.
-
-Suite is **852 passed, 1 skipped** on that tree.
-
-A `reward-gamma` fix was written and **reverted**: the shaping really is
-`φ(s') − φ(s)` where policy invariance needs `γφ(s') − φ(s)`, but `env.py`
-scores the potential 2× per decision (9.23× for five-term), so charging the
-discount per score over-corrects — measured as a net regression on 6/6 seeds,
-with sign flips on 2. Re-land it *with* the `env.py` change that charges once
-per recorded transition, or not at all.
+Suite is **900 passed, 1 skipped**.
 
 ## Open threads, in the order the numbers point
 
-1. **Regenerate a full-size fixed demonstration set.** The pass-target defect
-   is fixed but the corrected set is 40% the size and clones badly. Everything
-   downstream inherits the clone's quality.
-2. **Finish the flat-vs-factored A/B**, now running as `learn-1m-flat` and
-   `learn-1m-factored` from the matched ablation clones.
-3. **Re-score `ppo-from-clone` with a recorded opponent**, so the table above
-   can be trusted end to end rather than in the four rows carrying a ✔.
-4. **Measure the `threat` channels** — but not for the reason previously given
-   here. The argument was that the clone matches the expert's placement on only
-   5.4% of the expert's own states, so the grid must be too coarse. That
-   argument is dead: the head ablation put two policies at **4.8% and 5.1%**
-   agreement with **85% and 96%** greedy win rates. Agreement with the expert
-   does not track winning, and cannot be used to indict the observation — or to
-   compare anything else. Measure the channels by win rate, on demonstrations
-   recorded under the encoding, or not at all.
+1. **Clone from `demos_v1v3` and compare v3 against v1.** The corpus is being
+   collected now and the two encodings are paired off one playthrough, so this
+   is a single experiment rather than two. It is the measurement everything
+   else waits on: ridge over all 754 v1 features gives out-of-fold R-squared at
+   or below zero at every penalty, so the critic cannot reach the signal from
+   hitpoint mass, while 0.290 of return variance is knowable at level 5.
+2. **Re-score `ppo-from-clone` with a recorded opponent**, so the table above
+   can be trusted in the rows that carry no tick.
+3. **Watch `reference_kl` and `noop_fraction` on `learn-lvl5-kl01`.** At 0.5
+   the anchor pinned the policy outright. 0.1 should let it move; if
+   `noop_fraction` climbs toward the expert's 44.2% and past it, the anchor was
+   load-bearing and 0.1 is too loose.
+4. **DAgger, not more episodes.** Behavioural cloning fails on states the
+   expert never visits, and the cloned policy visits different ones. The expert
+   is a search over a deterministic engine that clones in 0.69 ms, so it can
+   label any state at any time with no human in the loop.
 5. **Let the policy propose the search's candidates.** The expert samples ~14
    placements uniformly at random and never benefits from anything the policy
-   learns. Sampling from the clone closes that loop and denoises the labels at
-   the same time. Cheapest change with the largest expected effect.
-6. **Evaluate against the expert, not random.** The control is beaten 100–0, so
+   learns. Sampling from the clone closes that loop and denoises the labels.
+6. **Evaluate against the expert, not random.** The control is beaten 100-0, so
    the metric is saturated and a better policy cannot register.
+7. **Clip the actor and critic gradient norms separately.** `ppo.py:528` clips
+   over all parameters, and the actor's norm is 30-100x the critic's, so the
+   actor sets the critic's step size. Measured upside is small (~+0.05 on a
+   synthetic 25%-signal target) and it is *not* why explained variance is zero.
 
 ## Traps
 
+- **A flag that reaches one code path may not reach the other.**
+  `--tower-level` was passed to the evaluation probe and dropped from the
+  `VecEnvConfig`, which defaults it to 11 -- so every run with `--workers`
+  trained at level 11 while recording and evaluating at 5, for the entire
+  history of this project. Nothing in `tests/` mentioned `tower_level`, and the
+  one `main()` test runs without `--workers`, so it took the in-process path.
+  Fixed, with a test that asserts the worker config agrees with the probe env
+  field for field. When adding a knob, check *both* environments receive it.
+- **Do not name a parameter after something a loop already binds.**
+  `collect`'s step loop does `observation, reward, terminated, truncated, _ =
+  env.step(choice)`, so parameters called `observation` and `reward` are
+  overwritten before they are read. A provenance field shipped storing `0.0`
+  and an observation dict; the dict became a numpy object array that would not
+  load without `allow_pickle`, breaking a round-trip test that had passed for
+  months.
 - **The watcher runs stale code.** Python does not reload an edited module in a
   running process — restart it after every `watch.py` change. This has already
   bitten once for real: two watchers from before the all-time page landed kept
