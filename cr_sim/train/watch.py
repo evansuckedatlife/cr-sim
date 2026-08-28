@@ -449,6 +449,12 @@ def _readings_of(rows: Sequence[dict[str, Any]],
         base = {
             "lift": row["eval_lift_sd"], "win": row.get("eval_win"),
             "control": row.get("control_win"),
+            # Which update produced it. The only join key two runs share:
+            # they were evaluated at the same update index, never at the same
+            # wall clock, and a resume replays the index rather than the
+            # clock. Carried on the reading so a consumer that wants to pair
+            # two runs does not have to go back to the rows.
+            "updates": row.get("updates"),
             "arm": row.get("arm"), "mode": mode,
             "weight": weight or default_weight,
             "opponent": row.get("eval_opponent"),
@@ -514,6 +520,80 @@ def _repeats(previous: dict[str, Any], row: dict[str, Any]) -> bool:
         if _plottable(before) and _plottable(after) and after < before:
             return False
     return True
+
+
+def _resumed(rows: Sequence[dict[str, Any]]) -> bool:
+    """Whether this run restarted its counters and replayed update numbers.
+
+    The same test ``_repeats`` uses to tell a re-write from a resume, asked of
+    a whole file rather than of two adjacent rows: a counter that falls is a
+    fresh process picking the run back up, and everything after it repeats
+    update indices and step counts that are already in the file.
+
+    This is why nothing here is ever drawn against steps. ``learn-1m-factored``
+    writes 43,008 and 49,152 twice with different lifts; a step axis folds the
+    two readings onto one vertical line and paints the fold as a cliff.
+
+    Only the two counters a chart could be drawn against are asked. A job row
+    parks unrelated quantities in ``episodes`` -- a count of spreadsheet
+    comparisons, in one case -- so a fall there is not evidence of anything.
+    """
+    for key in ("steps", "updates"):
+        seen = None
+        for row in rows:
+            value = row.get(key)
+            if not _plottable(value):
+                continue
+            if seen is not None and value < seen:
+                return True
+            seen = value
+    return False
+
+
+def _noise_of(values: Sequence[float]) -> "float | None":
+    """How far one reading moves when nothing has changed, from the readings.
+
+    The spread of consecutive differences, halved back out of the difference
+    of two readings by the root of two, at 95%. It is deliberately not the
+    spread of the readings themselves: a run that is genuinely improving has
+    a large spread and almost no noise, and quoting the former as the latter
+    would say a real climb was within error.
+
+    ``None`` under four readings, because three differences do not measure a
+    spread and a number that pretends to is worse than a missing one.
+    """
+    numbers = [v for v in values if _plottable(v)]
+    if len(numbers) < 4:
+        return None
+    diffs = [numbers[i + 1] - numbers[i] for i in range(len(numbers) - 1)]
+    mean = sum(diffs) / len(diffs)
+    var = sum((d - mean) ** 2 for d in diffs) / (len(diffs) - 1)
+    out = 1.96 * math.sqrt(var) / math.sqrt(2.0)
+    return out if math.isfinite(out) else None
+
+
+#: What one probe reading is worth, in words, beside every number computed by
+#: ``_noise_of``. A figure with no rule beside it is a figure nobody can argue
+#: with.
+_NOISE_RULE = ("half the spread of consecutive readings, x1.96 - what one "
+               "probe moves when nothing has changed")
+
+
+def _stats_of(values: Sequence[float]) -> "dict[str, Any] | None":
+    """Mean, spread and standard error of a list of paired differences."""
+    numbers = [v for v in values if _plottable(v)]
+    if not numbers:
+        return None
+    n = len(numbers)
+    mean = sum(numbers) / n
+    var = (sum((v - mean) ** 2 for v in numbers) / (n - 1)) if n > 1 else 0.0
+    spread = math.sqrt(var)
+    error = spread / math.sqrt(n)
+    if not (math.isfinite(mean) and math.isfinite(spread)
+            and math.isfinite(error)):
+        return None
+    return {"mean": mean, "sd": spread, "se": error, "n": n,
+            "wins": sum(1 for v in numbers if v > 0)}
 
 
 def _verdict_shape(raw: Any) -> str:
@@ -822,6 +902,31 @@ def _groups_of(entries: list[dict[str, Any]],
                 # is the largest of two scales, so it is reported per mode.
                 "modes": sorted({str(r.get("mode")) for r in rows}),
             }
+            # This run's lift against the reading number, for the sparkline
+            # inside the card. The x is the reading's ordinal in write order
+            # and never the step count: three runs on this page replayed
+            # their step counter after a resume, and a step axis folds those
+            # readings on top of each other and calls the fold a cliff.
+            #
+            # A reading identical to one already counted is dropped -- the
+            # same key `distinct_evals` de-duplicates on, less the run name,
+            # which is already fixed inside this loop. `overnight-selfplay`
+            # wrote all 134 of its rows twice with identical values, and
+            # drawing both paints a run that took twice as many readings as
+            # it did. A resume's replayed readings are kept, because +1.308
+            # and +0.940 at the same update are two measurements.
+            series: list[list[Any]] = []
+            already: set = set()
+            for reading in rows:
+                key = (reading["lift"], reading.get("win"),
+                       reading.get("control"), reading.get("mode"))
+                if key in already:
+                    continue
+                already.add(key)
+                series.append([len(series) + 1, reading["lift"]])
+            entry["series"] = series
+            entry["noise"] = _noise_of([point[1] for point in series])
+            entry["noise_rule"] = _NOISE_RULE
             if ranking:
                 entry["arms"] = [
                     {"arm": str(a.get("arm")), "lift": a["lift"],
@@ -1305,6 +1410,15 @@ def _modes_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
                 "opponent_source": "recorded",
                 "opponent_greedy": left, "opponent_sampled": right,
                 "opponent_mismatch": mismatch,
+                # How many battles each arm played, and the scale object that
+                # goes with the pair. Both are needed by anything that draws
+                # these records together: a checkpoint measured over 150
+                # battles and one measured over 40 are two populations, and
+                # putting them on one picture is the same collapse as putting
+                # two opponents on one axis.
+                "episodes": verdict.get("episodes"),
+                "scale": _scale_of(None,
+                                   opponent=(None if mismatch else (left or right))),
                 "recorded": bool(left or right),
                 "flips": (greedy["lift"] < 0) != (sampled["lift"] < 0),
                 "straddles_zero": bool(
@@ -1353,6 +1467,10 @@ def _modes_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
                 "opponent_source": "recorded",
                 "opponent_greedy": left, "opponent_sampled": right,
                 "opponent_mismatch": mismatch,
+                "episodes": (greedy.get("episodes")
+                             or sampled.get("episodes")),
+                "scale": _scale_of(None,
+                                   opponent=(None if mismatch else (left or right))),
                 "recorded": bool(left or right), "flips": flips,
                 "straddles_zero": straddles,
             })
@@ -1415,7 +1533,420 @@ def _modes_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
     }
 
 
-def _all_time(runs, notes, kinds, extras) -> dict[str, Any]:
+#: How many configuration keys two runs may differ in and still be one A/B.
+#: Four rather than one, because a head change drags its own KL reference and
+#: a free-text note along with it, and a single-difference rule would refuse
+#: the only matched pair this project has actually run.
+_AB_MAX_DIFF = 4
+
+#: The fewest shared update indices a paired difference may be drawn from.
+#: Three, which makes the one- and two-point states unreachable by
+#: construction: nothing downstream needs a fallback for a paired mean over
+#: two updates, because there is never one.
+_AB_MIN_SHARED = 3
+
+
+def _config_diff(one: Any, two: Any) -> list[str]:
+    """The names of the configuration keys two runs disagree about.
+
+    Names only, and never values. ``kl_reference`` holds an absolute Windows
+    path; ``_all_time`` may not vary with the path or the machine, so shipping
+    the value would move the payload fingerprint on a different checkout and
+    re-render the page for a difference nobody made.
+    """
+    one = one if isinstance(one, dict) else {}
+    two = two if isinstance(two, dict) else {}
+    return sorted(str(k) for k in set(one) | set(two) if one.get(k) != two.get(k))
+
+
+def _by_update(evals: Sequence[dict[str, Any]]) -> "tuple[dict, dict]":
+    """A run's readings keyed by update index: first writes, and replays.
+
+    A resume replays update numbers with the counters reset, so one index can
+    hold two genuinely different readings -- ``learn-1m-factored`` measured
+    +1.308 and then +0.940 at update 21. Both are kept and told apart by
+    write order, which is the only thing on disk that distinguishes them.
+    """
+    first: dict[Any, float] = {}
+    replay: dict[Any, float] = {}
+    for row in evals:
+        index = row.get("updates")
+        if not _plottable(index):
+            continue
+        if index not in first:
+            first[index] = row["lift"]
+        elif index not in replay:
+            replay[index] = row["lift"]
+    return first, replay
+
+
+def _ab_of(entries: list[dict[str, Any]],
+           configs: "dict[str, Any] | None") -> "dict[str, Any] | None":
+    """The one pair of runs whose difference is a difference in the runs.
+
+    Two lifts subtracted from each other is the page's founding mistake in its
+    shortest form, so the gate is the same shape as ``_block_of``'s and every
+    clause has to hold at once: both sides are models rather than jobs, each
+    carries one control rate and the two rates agree, ``_same_scale`` returns
+    a literal ``True`` -- ``None`` is refused, because two runs that both
+    record nothing are not thereby comparable -- both ran the same positive
+    number of evaluation battles on every reading, both played the same way,
+    they share at least three update indices, and their configuration files
+    differ in at most a handful of keys. Fail any one and there is no object,
+    so the refusal is structural rather than something the page decides.
+
+    Paired at equal update index, never at equal wall clock: one arm here is
+    at update 102 and the other stopped at 24, and pairing on time would
+    subtract a run's first hour from another run's third.
+    """
+    configs = configs or {}
+    candidates = []
+    for entry in entries:
+        if entry["job"]:
+            continue
+        evals = [r for r in entry["evals"] if _plottable(r.get("updates"))]
+        if len(evals) < _AB_MIN_SHARED:
+            continue
+        controls = {r.get("control") for r in evals}
+        if len(controls) != 1:
+            continue
+        # One rate across the run, which may be no rate at all. A run that
+        # recorded none is not rejected here, because it may still name its
+        # opponent -- it is rejected below, by `_same_scale` answering None.
+        control = controls.pop()
+        opponents = {str(r.get("opponent") or "").strip() for r in evals}
+        if len(opponents) != 1:
+            continue
+        opponent = opponents.pop() or None
+        sizes = {r.get("eval_episodes") for r in evals}
+        if len(sizes) != 1:
+            continue
+        episodes = sizes.pop()
+        if not _plottable(episodes) or episodes <= 0:
+            continue
+        modes = {r.get("mode") for r in evals}
+        if len(modes) != 1:
+            continue
+        candidates.append({
+            "name": entry["name"], "live": entry["live"], "evals": evals,
+            "control": control, "episodes": int(episodes), "mode": modes.pop(),
+            "scale": _scale_of(control, opponent=opponent),
+        })
+
+    best = None
+    for index, one in enumerate(candidates):
+        for two in candidates[index + 1:]:
+            if _plottable(one["control"]) and _plottable(two["control"]):
+                if abs(one["control"] - two["control"]) > _ANCHOR_TOLERANCE:
+                    continue
+            elif one["control"] != two["control"]:
+                continue
+            # The literal three-valued answer, branched on all three ways:
+            # True draws, False refuses, and None refuses too -- two runs that
+            # both record nothing about their opponent are not thereby
+            # comparable, and the difference of two numbers on unknown scales
+            # is not a smaller finding, it is a different quantity.
+            if _same_scale(one["scale"], two["scale"]) is not True:
+                continue
+            if one["episodes"] != two["episodes"]:
+                continue
+            if one["mode"] != two["mode"]:
+                continue
+            left, right = configs.get(one["name"]), configs.get(two["name"])
+            # Two runs with no configuration on disk are not thereby
+            # identically configured. An empty diff between two empty dicts
+            # reads as "these differ in nothing", which is a claim about
+            # something nobody wrote down.
+            if not (isinstance(left, dict) and left) and \
+               not (isinstance(right, dict) and right):
+                continue
+            diff = _config_diff(left, right)
+            if len(diff) > _AB_MAX_DIFF:
+                continue
+            first_one, replay_one = _by_update(one["evals"])
+            first_two, replay_two = _by_update(two["evals"])
+            shared = sorted(set(first_one) & set(first_two))
+            if len(shared) < _AB_MIN_SHARED:
+                continue
+            # Most shared updates wins, and the names break the tie, so the
+            # choice does not move between two polls that measured nothing.
+            key = (len(shared), one["name"], two["name"])
+            if best is None or key > best[0]:
+                best = (key, one, two, shared,
+                        first_one, replay_one, first_two, replay_two, diff)
+    if best is None:
+        return None
+    _key, one, two, shared, first_a, replay_a, first_b, replay_b, diff = best
+
+    if sum(first_a[u] - first_b[u] for u in shared) < 0:
+        one, two = two, one
+        first_a, first_b = first_b, first_a
+        replay_a, replay_b = replay_b, replay_a
+
+    firsts = [first_a[u] - first_b[u] for u in shared]
+    stats = _stats_of(firsts)
+    if stats is None:
+        return None
+    replayed = [u for u in shared if u in replay_a or u in replay_b]
+    alt = _stats_of([replay_a.get(u, first_a[u]) - replay_b.get(u, first_b[u])
+                     for u in shared]) if replayed else None
+
+    last_a = max(first_a)
+    last_b = max(first_b)
+    keys = set(configs.get(one["name"]) or {}) | set(configs.get(two["name"]) or {})
+    out = {
+        "a": {"name": one["name"], "live": bool(one["live"])},
+        "b": {"name": two["name"], "live": bool(two["live"])},
+        "scale": one["scale"],
+        "episodes": one["episodes"],
+        "mode": one["mode"],
+        "diff_keys": diff,
+        "config_keys": len(keys),
+        "points": [{"update": u, "a": first_a[u], "b": first_b[u],
+                    "d": first_a[u] - first_b[u],
+                    "replay_a": replay_a.get(u), "replay_b": replay_b.get(u)}
+                   for u in shared],
+        "replayed": replayed,
+        "alt": alt,
+        "a_readings": len(one["evals"]), "b_readings": len(two["evals"]),
+        "a_last_update": last_a, "b_last_update": last_b,
+        # What the longer run did after the shorter one stopped writing. Drawn
+        # faded past the rule, so "stopped" and "losing" cannot be confused.
+        "tail": [[u, first_a[u]] for u in sorted(first_a) if u > last_b],
+        "rule": "paired at equal update index, never at equal wall clock",
+    }
+    out.update(stats)
+    return out
+
+
+def _sweep_family(checkpoint: Any) -> "tuple[str | None, str | None]":
+    """The sweep a checkpoint belongs to, and its arm within that sweep.
+
+    Read off the path and nothing else: ``runs/headablate/flat/cloned.pt`` is
+    the ``flat`` arm of ``headablate``. That partition is what keeps
+    ``headablate/flat`` (+1.705 greedy) off one bar scale with
+    ``obsablate/v1`` (-1.598 greedy) -- two records with identical stated
+    configuration, opposite signs and 3.3 standard deviations between them,
+    which no control-based guard can separate because their controls genuinely
+    match. The only thing on disk that says what was held fixed is which
+    sweep the checkpoint came out of.
+
+    A path with no arm level -- ``runs/_diag/cloned.pt`` -- belongs to no
+    sweep and is counted as a singleton rather than ranked against one.
+    """
+    text = str(checkpoint or "").replace(chr(92), "/").strip()
+    if not text:
+        return None, None
+    parts = [part for part in text.split("/") if part and part != ".."]
+    if "runs" in parts:
+        parts = parts[parts.index("runs") + 1:]
+    if len(parts) < 3:
+        return None, None
+    return parts[0], "/".join(parts[1:-1])
+
+
+def _sweeps_of(verdicts: dict[str, Any]) -> dict[str, Any]:
+    """Every verdict record, ranked only inside the sweep it came out of.
+
+    Twelve checkpoints across four sweeps are ranked nowhere else here: the
+    metrics ladder can only ever draw the single job that states its own
+    conditions. These carry a recorded opponent, a recorded battle count and
+    a recorded interval on every arm, which is more provenance than any
+    metrics row on this machine has -- but only within a family, so nothing
+    is ordered across two.
+    """
+    records = []
+    for source, verdict in sorted(verdicts.items()):
+        shape = verdict.get("shape")
+        if shape == "arms":
+            for record in verdict["records"]:
+                records.append({
+                    "source": source, "checkpoint": record.get("checkpoint") or "",
+                    "mode": record.get("mode"), "lift": record.get("lift"),
+                    "ci": record.get("ci"), "win": record.get("win"),
+                    "episodes": record.get("episodes"),
+                    "opponent": record.get("opponent"),
+                    "name": record.get("name")})
+        elif shape == "paired":
+            for mode in ("greedy", "sampled"):
+                sub = verdict[mode]
+                records.append({
+                    "source": source, "checkpoint": verdict.get("checkpoint") or "",
+                    "mode": mode, "lift": sub.get("lift"), "ci": sub.get("ci"),
+                    "win": sub.get("win"), "episodes": verdict.get("episodes"),
+                    "opponent": sub.get("opponent"), "name": source})
+
+    placed: dict[str, dict[str, list]] = {}
+    singles: set = set()
+    dropped: set = set()
+    for record in records:
+        if not _plottable(record.get("lift")):
+            continue
+        # Keyed by the weights, or by the file where the weights are not even
+        # named -- so a verdict that records no checkpoint is counted once
+        # rather than twice for its two arms.
+        key = record["checkpoint"] or record["source"]
+        if not str(record.get("opponent") or "").strip():
+            dropped.add(key)
+            continue
+        family, arm = _sweep_family(record["checkpoint"])
+        if not family:
+            singles.add(key)
+            continue
+        placed.setdefault(family, {}).setdefault(
+            record["checkpoint"], []).append(dict(record, arm=arm))
+
+    families = []
+    for family in sorted(placed):
+        checkpoints = placed[family]
+        rows = [r for group in checkpoints.values() for r in group]
+        if len(checkpoints) < 2:
+            # One arm is not a sweep. Named as a singleton rather than drawn
+            # as a ladder of one, which would rank a checkpoint against
+            # nothing and give it a full-length bar for doing it.
+            singles.update(checkpoints)
+            continue
+        opponents = {str(r["opponent"]).strip() for r in rows}
+        sizes = {r.get("episodes") for r in rows}
+        if len(opponents) != 1 or len(sizes) != 1:
+            dropped.update(checkpoints)
+            continue
+        episodes = sizes.pop()
+        if not _plottable(episodes) or episodes <= 0:
+            dropped.update(checkpoints)
+            continue
+        scale = _scale_of(None, opponent=opponents.pop())
+        sections = []
+        for mode in _MODE_ORDER:
+            arms = sorted([r for r in rows if r.get("mode") == mode],
+                          key=lambda r: r["lift"], reverse=True)
+            if not arms:
+                continue
+            sections.append({"mode": mode, "arms": [{
+                "arm": a["arm"], "weight": a["arm"], "mode": a["mode"],
+                "lift": a["lift"], "win": a.get("win"), "ci": a.get("ci"),
+                "checkpoint": a["checkpoint"], "scale": scale} for a in arms]})
+        families.append({"family": family, "scale": scale,
+                         "episodes": int(episodes),
+                         "checkpoints": len(checkpoints),
+                         "sections": sections})
+    return {"families": families,
+            "singletons": len(singles), "excluded": len(dropped)}
+
+
+def _precision_of(recorded: list[dict[str, Any]],
+                  readings: list[dict[str, Any]]) -> dict[str, Any]:
+    """What a reading on this project is worth, from the intervals on disk.
+
+    Every number panel on this page gives a value and nothing anywhere gives a
+    precision, so a reader has no way to tell a real move from a re-run. The
+    intervals in the verdict files are the only ones that exist here; the
+    probe figure is those scaled by the root of the battle count and is
+    labelled as derived rather than measured.
+
+    One opponent and one battle count, or it is not one population. A second
+    ``(opponent, episodes)`` population is counted and named, never merged
+    into the strip -- an interval from 300 battles laid beside one from 150
+    is the battle count being read as precision.
+    """
+    populations: dict[Any, list[float]] = {}
+    scales: dict[Any, Any] = {}
+    for item in recorded:
+        if not item.get("opponent") or item.get("opponent_mismatch"):
+            continue
+        episodes = item.get("episodes")
+        if not _plottable(episodes) or episodes <= 0:
+            continue
+        key = (str(item["opponent"]), int(episodes))
+        for mode in ("greedy", "sampled"):
+            interval = (item.get(mode) or {}).get("ci")
+            if not interval or not (_plottable(interval[0])
+                                    and _plottable(interval[1])):
+                continue
+            half = (interval[1] - interval[0]) / 2.0
+            if not _plottable(half):
+                continue
+            populations.setdefault(key, []).append(half)
+            scales.setdefault(key, item.get("scale")
+                              or _scale_of(None, opponent=item["opponent"]))
+    # The largest population is drawn; the rest are counted and named. Ties by
+    # the key, so the choice does not move between polls.
+    order = sorted(populations, key=lambda k: (-len(populations[k]), k))
+    drawn = order[0] if order else None
+    half = sorted(populations[drawn]) if drawn else []
+
+    probes = sum(1 for r in readings
+                 if (r.get("eval_episodes") or _PROBE_EPISODES) == _PROBE_EPISODES)
+    median = None
+    if half:
+        middle = len(half) // 2
+        median = (half[middle] if len(half) % 2
+                  else (half[middle - 1] + half[middle]) / 2.0)
+
+    # The same weights measured twice. Joined on a bit-equal greedy lift and
+    # nothing else: greedy play on fixed seeds is deterministic, so identical
+    # to sixteen digits is evidence of identical weights in a way a rounded
+    # figure or an arm name never is -- two sweeps here both call an arm
+    # "w0.5".
+    by_greedy: dict[str, list] = {}
+    for item in recorded:
+        value = (item.get("greedy") or {}).get("lift")
+        if not _plottable(value):
+            continue
+        by_greedy.setdefault(repr(float(value)), []).append(item)
+    replicates = []
+    for value in sorted(by_greedy):
+        items = by_greedy[value]
+        sources = sorted({i["source"] for i in items})
+        if len(items) < 2 or len(sources) < 2:
+            continue
+        values = [i["sampled"]["lift"] for i in items
+                  if _plottable((i.get("sampled") or {}).get("lift"))]
+        if len(values) < 2:
+            continue
+        agree: "bool | None" = True
+        for other in items[1:]:
+            answer = _same_scale(items[0].get("scale"), other.get("scale"))
+            if answer is False:
+                agree = False
+                break
+            if answer is None and agree is not False:
+                agree = None
+        replicates.append({
+            "greedy": items[0]["greedy"]["lift"],
+            "mode": "sampled",
+            "values": values,
+            "spread": max(values) - min(values),
+            "sources": sources,
+            "scales_agree": agree,
+        })
+
+    return {
+        "population": ({"opponent": drawn[0], "episodes": drawn[1],
+                        "scale": scales.get(drawn), "n": len(half)}
+                       if drawn else None),
+        "half": half,
+        "median": median,
+        "min": half[0] if half else None,
+        "max": half[-1] if half else None,
+        "probes": {
+            "episodes": _PROBE_EPISODES,
+            "count": probes,
+            "derived_half": (median * math.sqrt(drawn[1] / _PROBE_EPISODES)
+                             if (median is not None and drawn) else None),
+            "rule": ("the median recorded interval, scaled by the square root "
+                     "of the battle count"),
+        },
+        # No lift row on disk carries an interval, so this is every reading.
+        "without_interval": len(readings),
+        "replicates": replicates,
+        "populations_not_drawn": [
+            {"opponent": key[0], "episodes": key[1], "n": len(populations[key])}
+            for key in order[1:]],
+    }
+
+
+def _all_time(runs, notes, kinds, extras, configs=None) -> dict[str, Any]:
     """Everything the all-time view shows, computed from the same rows.
 
     Nothing in here may vary with the clock, the path or the machine. The
@@ -1442,7 +1973,7 @@ def _all_time(runs, notes, kinds, extras) -> dict[str, Any]:
     # passing one run path twice on the command line doubled every total it
     # contributed. The last wins, which is what the runs dict does.
     by_name: dict[str, dict[str, Any]] = {}
-    for name, rows, _live in runs:
+    for name, rows, live in runs:
         rows = list(rows)
         readings = _readings_of(rows, default_weight=name)
         by_name[name] = {
@@ -1451,6 +1982,12 @@ def _all_time(runs, notes, kinds, extras) -> dict[str, Any]:
             "evals": readings,
             "note": str(notes.get(name, "") or ""),
             "job": kinds.get(name) == "job",
+            # Whether the file is still being written to, as the run list
+            # already decides it. A run that has stopped is a stopped run and
+            # not a losing one, and the only honest way to say so is this
+            # flag: a file mtime would vary with the machine and move the
+            # payload fingerprint on every poll.
+            "live": bool(live),
         }
     entries = list(by_name.values())
     collisions: list[str] = []
@@ -1473,6 +2010,7 @@ def _all_time(runs, notes, kinds, extras) -> dict[str, Any]:
 
     block = _block_of(entries)
     groups = _groups_of(entries, verdicts)
+    modes = _modes_of(entries, block, verdicts, lift_rows, with_mode)
     return {
         "census": len(entries),
         "collisions": sorted(set(collisions)),
@@ -1497,7 +2035,19 @@ def _all_time(runs, notes, kinds, extras) -> dict[str, Any]:
         "record": _record_of(block),
         "demoted": _demoted_of(entries, block, verdicts),
         "groups": groups,
-        "modes": _modes_of(entries, block, verdicts, lift_rows, with_mode),
+        "modes": modes,
+        # The one clean A/B on this project: two runs differing in a handful
+        # of configuration keys, paired at equal update index. `None` where no
+        # two runs pass the gate, which is the refusal itself.
+        "ab": _ab_of(entries, configs),
+        # Every verdict record ranked inside the sweep it came out of, and
+        # never across two.
+        "sweeps": _sweeps_of(verdicts),
+        # What a reading is worth, from the only intervals on disk.
+        "precision": _precision_of(modes["recorded"], readings),
+        # How many runs replayed their counters after a resume. The reason no
+        # picture here has a step axis, counted rather than asserted.
+        "resumed": sum(1 for e in entries if _resumed(e["rows"])),
         "exhibits": _exhibits_of(entries, block, verdicts),
         "ever": _ever_of(entries, verdicts, soak, readings, lift_files),
         "unreadable": sorted(name for name, v in verdicts.items()
@@ -1518,6 +2068,7 @@ def render_multi(
     notes: "dict[str, str] | None" = None,
     kinds: "dict[str, str] | None" = None,
     extras: "dict[str, Any] | None" = None,
+    configs: "dict[str, Any] | None" = None,
 ) -> "tuple[str, dict[str, Any]]":
     """One page holding several runs, as ``(name, rows, live)`` triples.
 
@@ -1556,7 +2107,7 @@ def render_multi(
     # anything added below ships in the HTML and is invisible to `version`,
     # so the page would never re-render for it -- stale aggregates sitting
     # beside fresh per-run curves on the same screen.
-    body["alltime"] = _all_time(runs, notes, kinds, extras)
+    body["alltime"] = _all_time(runs, notes, kinds, extras, configs)
     # A fingerprint of the data, so the page can re-render only when something
     # actually moved. Reloading on a timer throws away scroll position, an
     # open glossary and any chart mid-scrub, several times an hour, to redraw
@@ -1707,6 +2258,25 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .lrow .track{position:relative;height:7px;background:var(--panel2);border-radius:2px;margin-top:5px}
 .lrow .track i{position:absolute;top:0;bottom:0;background:var(--accent);border-radius:2px;min-width:1px}
 .lrow .track b{position:absolute;top:-2px;bottom:-2px;width:1px;background:var(--muted);opacity:.7}
+/* The recorded interval, drawn only where the record carries `ci_low` and
+   `ci_high` as fields of its own object. No metrics row on disk does, which
+   is why the metrics ladder has no whiskers and says so; every verdict record
+   in a sweep does, which is why those do. */
+.lrow .track u{position:absolute;top:3px;height:1px;background:var(--ink);opacity:.55;min-width:1px}
+.lrow .track u::before,.lrow .track u::after{content:"";position:absolute;top:-2px;height:5px;
+  width:1px;background:var(--ink);opacity:.9}
+.lrow .track u::before{left:0}
+.lrow .track u::after{right:0}
+/* A colour key printed in the DOM at real px beside every hand-rolled SVG in
+   the all-time view. The strokes carry the meaning and a 10px SVG label
+   renders at 5.5px on the phone this page is read on, so the names live
+   here. */
+.at .swatch{display:inline-flex;align-items:center;gap:4px;margin-right:10px;white-space:nowrap}
+.at .swatch i{display:inline-block;width:10px;height:2px;border-radius:1px}
+/* Chips in a hand-rolled chart's heading, on the right of its title, in the
+   slot the per-run charts give their scrub readout. */
+.chart h3 .heads{display:flex;gap:5px;align-items:baseline;flex-wrap:wrap;justify-content:flex-end;
+  font-weight:400}
 /* Two arms that are the same weights played two ways, tied together so the
    pair cannot be read as two separate policies. */
 .lrow.bracket{border-left:2px solid var(--accent);padding-left:9px}
@@ -1864,6 +2434,16 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--rule);font-si
     <dd>Counted from named sources only: training episodes, the engine soak, every arm of every verdict file, and job rows individually allowed in. The in-run probe figure is an estimate at the evaluation default and sits below the rule, outside the total.</dd>
     <dt>Recorded hours</dt>
     <dd>A floor and never a total. Fewer than half the runs write elapsed time at all, and five of the largest report zero, so the real figure is well above this one.</dd>
+    <dt>Greedy&ndash;sampled gap</dt>
+    <dd>One checkpoint's greedy lift minus its sampled one, drawn as a point against the 45&deg; line where they would be equal. Only checkpoints whose verdict names one opponent and one battle count are plotted, and only the largest such population; a second one is counted in the caption and never merged onto the axis. The metrics-derived pairs are left out entirely, because they carry no interval.</dd>
+    <dt>Matched pair</dt>
+    <dd>Two runs whose readings share a control rate, a recorded opponent, an evaluation size and a play mode, and whose config files differ in at most four keys. Paired at equal update index, never at equal wall clock. Fail any clause and there is no pair and nothing is drawn &mdash; the difference of two runs that do not match is not a smaller finding, it is a different quantity.</dd>
+    <dt>Sweep family</dt>
+    <dd>The first path segment after <code>runs/</code> in a verdict's checkpoint. Bars are scaled inside one family and nothing is ranked across two, because the family is the only thing on disk recording what was held fixed: two arms here share an observation, a head, an opponent and a battle count, and differ by three standard deviations for a reason that exists only in a log file.</dd>
+    <dt>Reading number</dt>
+    <dd>A reading's ordinal in write order, after dropping one identical to a reading already counted. It is the x axis of every card sparkline, in place of the step count, because runs that resumed replay their counters and a step axis folds those readings onto each other.</dd>
+    <dt>Interval width</dt>
+    <dd>Half the recorded 95% interval, in standard deviations. Measured only in verdict files, at one opponent and one battle count. The probe figure below it is that median scaled by the square root of the battle count &mdash; derived, not measured, and labelled so.</dd>
     <dt>Distinct evaluations</dt>
     <dd>Lift rows, less the ones that are the same measurement written twice. Two runs wrote one evaluation under both <code>updates</code> 1 and 2, and the de-duplication keys on <code>updates</code>, so both rows survive it and the row count overstates the evidence.</dd>
   </dl>
@@ -1906,6 +2486,17 @@ function recall(k,f){try{var v=localStorage.getItem(k);return v===null?f:v;}catc
 /* ---------------------------------------------------------------- charts */
 
 var CHARTS = [];   // every drawn chart, so scrubbing can find them
+
+/* The series palette. Frozen light-theme token values, so a stroke does not
+   change meaning between light and dark, and hoisted out of fillPane because
+   the all-time view now draws too and a second set of hexes there would be a
+   second vocabulary. A = the subject, B = the second arm, C = error or a
+   negative, D = healthy, G = the control and the chrome. Nothing here should
+   invent a colour, and nothing should pass var(--good) into a stroke.
+
+   Every all-time markup function takes its payload as `A`, which would shadow
+   the blue. Those functions name their argument something else. */
+var A='#2E86AB',B='#8A6516',C='#A2352C',D='#26704F',G='#8695A4';
 
 function chart(id,title,series,opts){
   opts=opts||{};
@@ -2082,7 +2673,7 @@ function fillPane(pane,name,slot){
     tile('pass',np===null?'--':pct(np),(np!==null&&np>0.5)?'crit':'')
   ].join('');
 
-  var A='#2E86AB',B='#8A6516',C='#A2352C',D='#26704F',G='#8695A4',p=slot;
+  var p=slot;
   q('c1').innerHTML=chart('ch'+p+'a','Lift vs control',
       [{name:S.lift_greedy.length?'sampled':'lift',color:A,points:S.lift}]
       .concat(S.lift_greedy.length?[{name:'greedy',color:B,points:S.lift_greedy}]:[]),
@@ -2106,10 +2697,22 @@ function fillPane(pane,name,slot){
 
 /* ------------------------------------------------------------------ all time
 
-   One page-wide view of everything measured so far. It draws no charts on
-   purpose: chart() plots x as `steps`, and every ladder row and every cloned
-   checkpoint has steps=0, so a curve here would stack eight separate
-   measurements on one vertical line and call it a trend. */
+   One page-wide view of everything measured so far. chart() is still never
+   called here, and CHARTS stays empty: chart() plots x as `steps`, and every
+   ladder row and every cloned checkpoint has steps=0, so a curve off it would
+   stack eight separate measurements on one vertical line and call it a trend
+   -- and three runs on this page replayed their step counter after a resume,
+   which folds a real series back on top of itself.
+
+   The pictures below therefore bring their own x quantity: a greedy lift, an
+   update index, a reading ordinal, a half-width in standard deviations. They
+   are hand-rolled inline SVG in the same idiom as chart() -- the same
+   palette, the same .chart/.empty/.zero/.axis/.lbl-s classes, the same
+   two-labels-per-axis restraint, the same "one reading, a trend needs two"
+   empty states -- and they register nothing, so wireScrub() has nothing to
+   look for and the all-time branch of draw() still returns before it.
+   Everything a reader needs is drawn into the SVG or printed in the DOM
+   caption beneath it, because there is no scrub here to reveal it. */
 
 function sd(v){return (v===null||v===undefined)?'--':((v>=0?'+':'-')+Math.abs(Number(v)).toFixed(3));}
 function mag(v){return (v===null||v===undefined)?'--':Math.abs(Number(v)).toFixed(3);}
@@ -2151,6 +2754,515 @@ function modeChip(m){
 function winLoss(w,l){
   if(w===null||w===undefined) return '';
   return '<span class="wl">'+pct(w)+' w'+((l===null||l===undefined)?'':(' / '+pct(l)+' l'))+'</span>';
+}
+
+/* ---------------------------------------------- the all-time pictures, shared
+
+   Five hand-rolled SVGs, none of them a chart() call and none of them in
+   CHARTS. Each brings its own x quantity, because chart()'s is steps and no
+   quantity worth drawing on this page is steps. */
+
+/* Labels pushed apart, deterministically. These pictures label a point with a
+   run name or an arm name at that point's own y, and two points half a pixel
+   apart print two names on top of each other. Sorted by y and pushed down in
+   fixed steps, so one payload always lays out one way and a poll that
+   measured nothing does not reshuffle the page. */
+function unstack(ys,step){
+  var order=ys.map(function(y,i){return {i:i,y:y};});
+  order.sort(function(x,y){return x.y-y.y;});
+  for(var k=1;k<order.length;k++){
+    if(order[k].y-order[k-1].y<step) order[k].y=order[k-1].y+step;
+  }
+  var out=ys.slice();
+  order.forEach(function(o){out[o.i]=o.y;});
+  return out;
+}
+
+/* A label at the end of a line, slid left far enough to stay inside the
+   viewBox. Text outside the viewBox is not drawn at all, and a run called
+   `ppo-from-clone` is wider than any right margin this page can afford. */
+function endLabel(x,y,text,colour,w){
+  var at=Math.min(x,w-3-String(text).length*6.2);
+  return '<text class="lbl-s" x="'+Math.max(2,at).toFixed(1)+'" y="'+y.toFixed(1)
+    +'" fill="'+colour+'">'+esc(text)+'</text>';
+}
+
+/* What is left of a name once the part it shares with its neighbours is gone.
+   The SVG has room for `factored` and not for `learn-1m-factored`; every one
+   of these pictures prints the full names in the DOM beneath it at real px,
+   so nothing is legible only at 8.75px. */
+function distinctPart(one,others){
+  var cut=String(one).length,any=false;
+  others.forEach(function(two){
+    if(two===one) return;
+    any=true;
+    var i=0;
+    while(i<one.length&&i<two.length&&one.charAt(i)===two.charAt(i)) i++;
+    cut=Math.min(cut,i);
+  });
+  if(!any) return String(one);
+  /* Backed up to a separator, so `learn-1m-factored` and `learn-1m-flat`
+     shorten to `factored` and `flat` rather than to `actored` and `lat`. A
+     name chopped mid-word is not a shorter name, it is a different one. */
+  var head=String(one).slice(0,cut),at=-1;
+  '-_/. '.split('').forEach(function(ch){at=Math.max(at,head.lastIndexOf(ch));});
+  cut=at+1;
+  return (cut>=3&&cut<String(one).length)?String(one).slice(cut):String(one);
+}
+
+/* The sweep a checkpoint path names, read exactly as `_sweep_family` reads it
+   in Python. Used only to tell two arms that share a name apart -- two sweeps
+   here both call an arm w0.5. */
+function familyOf(cp){
+  var parts=String(cp||'').replace(/\\/g,'/').split('/').filter(function(p){return p&&p!=='..';});
+  var at=parts.indexOf('runs');
+  if(at>=0) parts=parts.slice(at+1);
+  return parts.length>2?parts[0]:'';
+}
+
+function emptyCard(title,why){
+  return '<div class="chart"><h3>'+title+'</h3><div class="empty">'+esc(why)+'</div></div>';
+}
+
+function swatch(colour,text){
+  return '<span class="swatch"><i style="background:'+colour+'"></i>'+esc(text)+'</span>';
+}
+
+/* -------------------------------------------------- G1: greedy vs sampled */
+
+/* One point per checkpoint, greedy across and sampled up, on one shared
+   domain so the diagonal is a true 45 degrees and a point's distance from it
+   is the gap. That gap changes sign -- healthy checkpoints sit well above it
+   and collapsed always-pass ones well below, with sampled pinned near zero --
+   so this is the one picture here that shows why reading a single arm is not
+   a partial answer but the wrong sign.
+
+   The two axes are the two arms of one measurement, so they cannot be
+   confused with each other, and the drawn set is filtered to one recorded
+   opponent and one battle count before anything is plotted. A second
+   population is counted and named, never merged. There is no time axis, so no
+   resume can fold it. */
+function gvsGroups(m){
+  var usable=(m.recorded||[]).filter(function(r){
+    return r.opponent&&r.opponent_source==='recorded'&&!r.opponent_mismatch
+      &&typeof r.greedy.lift==='number'&&typeof r.sampled.lift==='number';});
+  var by={},order=[];
+  usable.forEach(function(r){
+    var k=String(r.opponent)+' '+String(r.episodes);
+    if(!by[k]){by[k]={key:k,opponent:r.opponent,episodes:r.episodes,scale:r.scale,rows:[]};order.push(k);}
+    by[k].rows.push(r);
+  });
+  order.sort(function(x,y){return by[y].rows.length-by[x].rows.length||(x<y?-1:1);});
+  return {drawn:order.length?by[order[0]]:null,
+          others:order.slice(1).map(function(k){return by[k];}),
+          excluded:(m.recorded||[]).length-usable.length,
+          pairs:(m.pairs||[]).length};
+}
+
+function gvsMarkup(m){
+  var title='Greedy vs sampled, one point per checkpoint';
+  var found=gvsGroups(m||{});
+  var g=found.drawn;
+  if(!g||!g.rows.length) return emptyCard(title,'no verdict records both ways of playing');
+  var pts=g.rows,lo=0,hi=0;
+  pts.forEach(function(r){
+    [r.greedy.lift,r.sampled.lift].forEach(function(v){lo=Math.min(lo,v);hi=Math.max(hi,v);});
+    /* The recorded intervals are inside the domain too. A whisker running off
+       the plot box is a drawn value with no scale under it. */
+    [r.greedy.ci,r.sampled.ci].forEach(function(ci){
+      if(ci){lo=Math.min(lo,ci[0]);hi=Math.max(hi,ci[1]);}});
+  });
+  if(hi-lo<1e-9){hi+=0.5;lo-=0.5;}
+  var pd=(hi-lo)*0.08;hi+=pd;lo-=pd;
+  /* Square viewBox, square plot box: 328 by 328. That is what makes y = x a
+     true 45 degrees, which is what lets the gap be read off the picture. Two
+     domains, one per axis, would make the diagonal a lie. */
+  var w=400,h=400,padL=44,padR=28,padT=28,padB=44;
+  var X=function(v){return padL+(v-lo)/(hi-lo)*(w-padL-padR);};
+  var Y=function(v){return padT+(1-(v-lo)/(hi-lo))*(h-padT-padB);};
+  var body='<line class="zero" x1="'+X(lo).toFixed(1)+'" y1="'+Y(lo).toFixed(1)
+    +'" x2="'+X(hi).toFixed(1)+'" y2="'+Y(hi).toFixed(1)+'"/>';
+  body+='<text class="lbl-s" x="'+(X(hi)-3).toFixed(1)+'" y="'+(Y(hi)+13).toFixed(1)
+    +'" text-anchor="end">greedy = sampled</text>';
+  body+='<line class="zero" x1="'+X(0).toFixed(1)+'" y1="'+padT+'" x2="'+X(0).toFixed(1)+'" y2="'+(h-padB)+'"/>';
+  body+='<line class="zero" x1="'+padL+'" y1="'+Y(0).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+Y(0).toFixed(1)+'"/>';
+  var placed=unstack(pts.map(function(r){return Y(r.sampled.lift)-4;}),11);
+  pts.forEach(function(r,i){
+    var col=r.flips?C:A;
+    var gx=X(r.greedy.lift),sy=Y(r.sampled.lift);
+    if(r.greedy.ci) body+='<line x1="'+X(r.greedy.ci[0]).toFixed(1)+'" y1="'+sy.toFixed(1)
+      +'" x2="'+X(r.greedy.ci[1]).toFixed(1)+'" y2="'+sy.toFixed(1)
+      +'" stroke="'+col+'" stroke-width="1" opacity=".45"/>';
+    if(r.sampled.ci) body+='<line x1="'+gx.toFixed(1)+'" y1="'+Y(r.sampled.ci[0]).toFixed(1)
+      +'" x2="'+gx.toFixed(1)+'" y2="'+Y(r.sampled.ci[1]).toFixed(1)
+      +'" stroke="'+col+'" stroke-width="1" opacity=".45"/>';
+    body+='<circle cx="'+gx.toFixed(1)+'" cy="'+sy.toFixed(1)+'" r="3.2" fill="'+col+'"/>';
+    var fam=r.ambiguous?familyOf(r.checkpoint):'';
+    /* A literal middle dot, not an entity: this text goes through esc() on
+       its way into the SVG, which would print the entity's ampersand. */
+    body+=endLabel(gx+6,placed[i],String(r.weight)+(fam?('·'+fam):''),col,w);
+  });
+  body+='<text class="lbl-s" x="'+padL+'" y="'+(h-padB+14)+'">'+lo.toFixed(2)+'</text>';
+  body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(h-padB+14)+'" text-anchor="end">'+hi.toFixed(2)+'</text>';
+  body+='<text class="lbl-s" x="3" y="'+(h-padB)+'">'+lo.toFixed(2)+'</text>';
+  body+='<text class="lbl-s" x="3" y="'+(padT+8)+'">'+hi.toFixed(2)+'</text>';
+  body+='<text class="lbl-s" x="'+((padL+w-padR)/2)+'" y="'+(h-6)+'" text-anchor="middle">greedy lift</text>';
+  body+='<text class="lbl-s" x="12" y="'+((padT+h-padB)/2)+'" text-anchor="middle" transform="rotate(-90 12 '
+    +((padT+h-padB)/2)+')">sampled lift</text>';
+  var chip=scaleChip(g.scale);
+  var out='<div class="chart"><h3>'+title+'<span class="heads"><span class="chip '+chip.cls+'">'
+    +esc(chip.text)+'</span><span class="chip dim">'+commas(g.episodes)+' battles</span></span></h3>'
+    +'<div style="max-width:420px;margin:0 auto"><svg viewBox="0 0 400 400" role="img" '
+    +'aria-label="greedy lift against sampled lift, one point per checkpoint">'+body+'</svg></div>';
+  out+='<div class="caption">'+pts.length+' '+plural(pts.length,'checkpoint')+', '+commas(g.episodes)
+    +' paired battles each, every one against a recorded '+esc(String(g.opponent))+' opponent.'
+    +(found.excluded?(' '+found.excluded+' more '+plural(found.excluded,'checkpoint')+' '
+      +plural(found.excluded,'records','record')+' no opponent at all and '
+      +plural(found.excluded,'is','are')+' not drawn.'):'')
+    +found.others.map(function(o){
+      return ' Another '+o.rows.length+' '+plural(o.rows.length,'checkpoint')+' faced '+esc(String(o.opponent))
+        +' over '+commas(o.episodes)+' battles; that is a second population, counted here and never merged '
+        +'onto this axis.';}).join('')
+    +(found.pairs?(' The '+found.pairs+' '+plural(found.pairs,'pair')+' in the ranked block '
+      +plural(found.pairs,'is','are')+' read from metrics rows that carry no interval, and '
+      +plural(found.pairs,'is','are')+' not drawn here either.'):'')
+    +'</div>';
+  out+='<div class="caption">Bars are the recorded 95% intervals &mdash; the only intervals on this project. '
+    +'No in-run probe carries one.</div>';
+  /* A scatter of one point is honest in a way a line of one point is not: it
+     is one checkpoint at its two readings, not a trend drawn through nothing.
+     So it is drawn, with both zero lines, the diagonal and its intervals. */
+  if(pts.length===1) out+='<div class="caption">One checkpoint &mdash; this is a gap, not yet a pattern.</div>';
+  return out+'</div>';
+}
+
+/* ---------------------------------------------------- G2: the matched pair */
+
+/* The only clean A/B this project has run: two runs differing in a handful of
+   configuration keys, sharing a control, a recorded opponent, a battle count
+   and a play mode, paired at equal update index. `_ab_of` refuses to build the
+   object at all unless every one of those holds, so when they do not there is
+   nothing here to draw -- the refusal is structural rather than a rendering
+   decision. */
+function abMarkup(ab){
+  var title='The matched pair, paired by update';
+  if(!ab) return emptyCard(title,
+    'no two runs share a control, an opponent, an evaluation size and a configuration');
+  /* The gate needs three shared updates, so a one- or two-point state is
+     unreachable here by construction. Do not add a fallback for it: it would
+     be dead code claiming this page will draw a paired mean over one
+     update. */
+  var pts=ab.points,tail=ab.tail||[];
+  var w=640,h=300,padL=44,padR=64,t0=14,t1=170,b0=200,b1=280;
+  var x0=pts[0].update,x1=Math.max(ab.a_last_update,ab.b_last_update);
+  pts.forEach(function(p){x0=Math.min(x0,p.update);x1=Math.max(x1,p.update);});
+  tail.forEach(function(t){x1=Math.max(x1,t[0]);});
+  var X=function(v){return padL+(x1===x0?0.5:(v-x0)/(x1-x0))*(w-padL-padR);};
+  var lo=null,hi=null;
+  function span(v){if(v===null||v===undefined)return;lo=(lo===null)?v:Math.min(lo,v);hi=(hi===null)?v:Math.max(hi,v);}
+  pts.forEach(function(p){span(p.a);span(p.b);span(p.replay_a);span(p.replay_b);});
+  tail.forEach(function(t){span(t[1]);});
+  if(hi-lo<1e-9){hi+=0.5;lo-=0.5;}
+  var pd=(hi-lo)*0.12;hi+=pd;lo-=pd;
+  var Y1=function(v){return t0+(1-(v-lo)/(hi-lo))*(t1-t0);};
+  function path(list,yf){return list.map(function(p,i){
+    return (i?'L':'M')+X(p[0]).toFixed(1)+' '+yf(p[1]).toFixed(1);}).join(' ');}
+  var aPts=pts.map(function(p){return [p.update,p.a];});
+  var bPts=pts.map(function(p){return [p.update,p.b];});
+  /* The line follows the first write. A resume's replayed reading is drawn
+     hollow beside it and joined by a tick, because it is a second measurement
+     of the same update and not a correction of the first. */
+  var body='<path fill="none" stroke="'+A+'" stroke-width="2" stroke-linejoin="round" d="'+path(aPts,Y1)+'"/>';
+  body+='<path fill="none" stroke="'+B+'" stroke-width="2" stroke-linejoin="round" d="'+path(bPts,Y1)+'"/>';
+  if(tail.length) body+='<path fill="none" stroke="'+A+'" stroke-width="2" opacity=".35" '
+    +'stroke-linejoin="round" d="'+path([aPts[aPts.length-1]].concat(tail),Y1)+'"/>';
+  pts.forEach(function(p){
+    body+='<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y1(p.a).toFixed(1)+'" r="3" fill="'+A+'"/>';
+    body+='<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y1(p.b).toFixed(1)+'" r="3" fill="'+B+'"/>';
+    [['replay_a','a',A],['replay_b','b',B]].forEach(function(k){
+      var v=p[k[0]];
+      if(v===null||v===undefined) return;
+      body+='<line x1="'+X(p.update).toFixed(1)+'" y1="'+Y1(p[k[1]]).toFixed(1)+'" x2="'+X(p.update).toFixed(1)
+        +'" y2="'+Y1(v).toFixed(1)+'" stroke="'+k[2]+'" stroke-width="1"/>'
+        +'<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y1(v).toFixed(1)+'" r="3" fill="none" stroke="'
+        +k[2]+'" stroke-width="1.5"/>';
+    });
+  });
+  /* Driven by the run list's own live flag and never by a file timestamp: an
+     mtime varies with the machine and would move the payload fingerprint on
+     every poll. */
+  var rule=X(ab.b_last_update);
+  var state=ab.b.name+(ab.b.live===false?' stopped':' still writing');
+  body+='<line class="axis" x1="'+rule.toFixed(1)+'" y1="'+t0+'" x2="'+rule.toFixed(1)+'" y2="'+(t1+6)+'"/>';
+  body+=(rule>w/2
+    ? '<text class="lbl-s" x="'+(rule-4).toFixed(1)+'" y="'+(t0+10)+'" text-anchor="end">'+esc(state)+'</text>'
+    : '<text class="lbl-s" x="'+(rule+4).toFixed(1)+'" y="'+(t0+10)+'">'+esc(state)+'</text>');
+  var names=[ab.a.name,ab.b.name];
+  var aEnd=tail.length?tail[tail.length-1]:aPts[aPts.length-1];
+  var bEnd=bPts[bPts.length-1];
+  var endYs=unstack([Y1(aEnd[1])+3.4,Y1(bEnd[1])+3.4],11);
+  body+=endLabel(X(aEnd[0])+6,endYs[0],distinctPart(ab.a.name,names),A,w);
+  body+=endLabel(X(bEnd[0])+6,endYs[1],distinctPart(ab.b.name,names),B,w);
+  var dlo=0,dhi=0;
+  pts.forEach(function(p){
+    var ra=(p.replay_a===null||p.replay_a===undefined)?p.a:p.replay_a;
+    var rb=(p.replay_b===null||p.replay_b===undefined)?p.b:p.replay_b;
+    dlo=Math.min(dlo,p.d,ra-rb);dhi=Math.max(dhi,p.d,ra-rb);
+  });
+  dlo=Math.min(dlo,ab.mean-ab.sd);dhi=Math.max(dhi,ab.mean+ab.sd);
+  if(dhi-dlo<1e-9){dhi+=0.5;dlo-=0.5;}
+  var dp=(dhi-dlo)*0.12;dhi+=dp;dlo-=dp;
+  var Y2=function(v){return b0+(1-(v-dlo)/(dhi-dlo))*(b1-b0);};
+  body+='<rect x="'+padL+'" y="'+Y2(ab.mean+ab.sd).toFixed(1)+'" width="'+(w-padL-padR)
+    +'" height="'+Math.max(0.5,Y2(ab.mean-ab.sd)-Y2(ab.mean+ab.sd)).toFixed(1)
+    +'" fill="'+G+'" opacity=".14"/>';
+  body+='<line class="zero" x1="'+padL+'" y1="'+Y2(0).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+Y2(0).toFixed(1)+'"/>';
+  body+='<line x1="'+padL+'" y1="'+Y2(ab.mean).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+Y2(ab.mean).toFixed(1)
+    +'" stroke="'+(ab.mean>=0?D:C)+'" stroke-width="1.5"/>';
+  pts.forEach(function(p){
+    body+='<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y2(p.d).toFixed(1)+'" r="3" fill="'
+      +(p.d>=0?D:C)+'"/>';
+    var ra=(p.replay_a===null||p.replay_a===undefined)?p.a:p.replay_a;
+    var rb=(p.replay_b===null||p.replay_b===undefined)?p.b:p.replay_b;
+    if(ra-rb!==p.d) body+='<line x1="'+X(p.update).toFixed(1)+'" y1="'+Y2(p.d).toFixed(1)+'" x2="'
+      +X(p.update).toFixed(1)+'" y2="'+Y2(ra-rb).toFixed(1)+'" stroke="'+G+'" stroke-width="1"/>'
+      +'<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y2(ra-rb).toFixed(1)+'" r="3" fill="none" stroke="'
+      +((ra-rb)>=0?D:C)+'" stroke-width="1.5"/>';
+  });
+  body+='<line class="axis" x1="'+padL+'" y1="'+(t1+6)+'" x2="'+(w-padR)+'" y2="'+(t1+6)+'"/>';
+  body+='<line class="axis" x1="'+padL+'" y1="'+(b1+6)+'" x2="'+(w-padR)+'" y2="'+(b1+6)+'"/>';
+  body+='<text class="lbl-s" x="3" y="'+(t0+8)+'">'+hi.toFixed(2)+'</text>';
+  body+='<text class="lbl-s" x="3" y="'+t1+'">'+lo.toFixed(2)+'</text>';
+  body+='<text class="lbl-s" x="3" y="'+(b0+8)+'">'+dhi.toFixed(2)+'</text>';
+  body+='<text class="lbl-s" x="3" y="'+b1+'">'+dlo.toFixed(2)+'</text>';
+  body+='<text class="lbl-s" x="'+padL+'" y="'+(b1+18)+'">'+pts[0].update+'</text>';
+  body+='<text class="lbl-s" x="'+X(pts[pts.length-1].update).toFixed(1)+'" y="'+(b1+18)
+    +'" text-anchor="middle">'+pts[pts.length-1].update+'</text>';
+  body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(b1+18)+'" text-anchor="end">'+ab.a_last_update+'</text>';
+  var t=(ab.se>0)?Math.abs(ab.mean/ab.se):null;
+  var out='<div class="chart"><h3>'+title+'<span class="heads">'+liftNode(ab.mean,ab.scale)
+    +'<span class="chip dim">'+commas(ab.episodes)+' battles</span>'+modeChip(ab.mode)+'</span></h3>'
+    +'<svg viewBox="0 0 640 300" role="img" aria-label="two runs paired at equal update index">'+body+'</svg>';
+  out+='<div class="caption">'+swatch(A,ab.a.name)+swatch(B,ab.b.name)
+    +' Top: each run&rsquo;s lift against the update index. Bottom: '+esc(ab.a.name)+' minus '+esc(ab.b.name)
+    +' at each shared update, against the mean and one standard deviation of the '+ab.n+'.</div>';
+  out+='<div class="caption">Two runs differing in '+ab.diff_keys.length+' of '+ab.config_keys
+    +' configuration '+plural(ab.config_keys,'key')+': '+esc(ab.diff_keys.join(', '))
+    +'. Same control, same recorded opponent, same '+commas(ab.episodes)+'-battle probe, same play mode.</div>';
+  out+='<div class="caption">&#177;'+mag(ab.sd)+' is one standard deviation of the '+ab.n+' paired '
+    +plural(ab.n,'difference')+', and '+ab.wins+' of '+ab.n+' favour '+esc(ab.a.name)
+    +'. A single update tells you nothing'
+    +(t===null?'.':('; the mean over '+ab.n+' is '+t.toFixed(1)+' standard errors from zero.'))+'</div>';
+  if(ab.replayed&&ab.replayed.length) out+='<div class="caption">'
+    +plural(ab.replayed.length,'Update','Updates')+' '+ab.replayed.join(' and ')+' '
+    +plural(ab.replayed.length,'was','were')+' written twice after a resume. Both readings are drawn, hollow '
+    +'for the replay; the line follows the first. '
+    +(ab.alt?('Taking the replay instead gives '+sd(ab.alt.mean)+' rather than '+sd(ab.mean)+'.'):'')+'</div>';
+  out+='<div class="caption">'+esc(ab.rule)+' &mdash; '+esc(ab.a.name)+' is at update '+ab.a_last_update
+    +' and '+esc(ab.b.name)+(ab.b.live===false?' stopped at ':' has reached ')+ab.b_last_update
+    +'. The faded tail is every reading '+esc(ab.a.name)+' took after that, drawn so a stopped run is not '
+    +'read as a losing one.</div>';
+  return out+'</div>';
+}
+
+/* ------------------------------------------------------- G3: sweep ladders */
+
+/* One ladder per sweep, and never one across two. The most dangerous pair on
+   disk is headablate/flat against obsablate/v1: identical stated observation
+   and head, identical recorded opponent, identical battle count, opposite
+   sign, three standard deviations apart. No control-based guard can separate
+   them, because their controls genuinely match. The family read off the
+   checkpoint path does, structurally -- they are never on one bar scale and
+   never in one ordering. Why they differ is not in the data this page reads,
+   so this page does not say. */
+function sweepMarkup(sw){
+  if(!sw) return '';
+  var out='<div class="panel">';
+  if(!sw.families||!sw.families.length){
+    out+='<div class="empty">no verdict file records a sweep against a named opponent</div>';
+  }else{
+    sw.families.forEach(function(f){
+      var chip=scaleChip(f.scale),weights={};
+      f.sections.forEach(function(s){s.arms.forEach(function(a){
+        weights[a.weight]=(weights[a.weight]||0)+1;});});
+      out+='<div class="lbl" style="margin-top:18px">'+esc(f.family)+' &mdash; '+f.checkpoints+' '
+        +plural(f.checkpoints,'checkpoint')+' &middot; <span class="chip '+chip.cls+'">'+esc(chip.text)
+        +'</span> &middot; '+commas(f.episodes)+' battles each</div>';
+      f.sections.forEach(function(s){out+=ladderSection(s,{control:null},weights);});
+      out+='<div class="caption">'+f.checkpoints+' '+plural(f.checkpoints,'checkpoint')+', '
+        +f.sections.map(function(s){return s.mode||'play mode never recorded';}).join(' and ')+', '
+        +commas(f.episodes)+' battles each, vs '+esc(String(f.scale.opponent))+' (recorded). '
+        +'The whisker on each bar is that record&rsquo;s own interval.</div>';
+    });
+  }
+  out+='<div class="caption">Each family is one sweep. Bar lengths do not carry from one family to the next '
+    +'and nothing is ranked across families, because the family is the only thing on disk that records what '
+    +'was held fixed.</div>';
+  if(sw.singletons) out+='<div class="caption">'+sw.singletons+' '+plural(sw.singletons,'checkpoint')
+    +' '+plural(sw.singletons,'belongs','belong')+' to no sweep and '+plural(sw.singletons,'is','are')
+    +' not drawn: one arm is not a ladder, and a '
+    +'bar for it would be full length for having nothing to be measured against.</div>';
+  if(sw.excluded) out+='<div class="caption">'+sw.excluded+' '+plural(sw.excluded,'checkpoint')
+    +' record no opponent, or disagree with the rest of their family about the opponent or the battle count, '
+    +'and '+plural(sw.excluded,'is','are')+' counted here rather than ranked.</div>';
+  return out+'</div>';
+}
+
+/* ---------------------------------------------- G5: what a reading is worth */
+
+/* The direct answer to the ladder's caption. Every number panel on this page
+   gives a value and nothing anywhere gives a precision, so a reader has no way
+   to tell a real move from a re-run. One opponent and one battle count per
+   strip, or it is not one population: an interval from 300 battles laid beside
+   one from 150 is the battle count being read as precision. */
+function precisionMarkup(pr){
+  var title='What a reading is worth';
+  if(!pr||!pr.half||!pr.half.length) return emptyCard(title,'no verdict records an interval');
+  var pop=pr.population,rep=(pr.replicates||[])[0];
+  var w=640,h=150,padL=44,padR=56;
+  var top=Math.max(pr.max,pr.probes.derived_half||0,rep?rep.spread:0)*1.15;
+  if(!(top>0)) top=1;
+  var X=function(v){return padL+(v/top)*(w-padL-padR);};
+  var body='<line class="axis" x1="'+padL+'" y1="132" x2="'+(w-padR)+'" y2="132"/>';
+  body+='<text class="lbl-s" x="'+padL+'" y="146">0.00</text>';
+  body+='<text class="lbl-s" x="'+(w-padR)+'" y="146" text-anchor="end">'+top.toFixed(2)+'</text>';
+  pr.half.forEach(function(v){
+    body+='<line x1="'+X(v).toFixed(1)+'" y1="30" x2="'+X(v).toFixed(1)+'" y2="52" stroke="'+A
+      +'" stroke-width="1" opacity=".55"/>';});
+  /* One tick and no median line: a median of one reading is that reading
+     wearing a summary's clothes. */
+  if(pr.median!==null&&pr.median!==undefined&&pr.half.length>1){
+    body+='<line x1="'+X(pr.median).toFixed(1)+'" y1="26" x2="'+X(pr.median).toFixed(1)+'" y2="56" stroke="'
+      +D+'" stroke-width="2"/>';
+    body+=endLabel(X(pr.median)+5,24,num(pr.median,3),D,w);
+  }
+  if(pr.probes.derived_half!==null&&pr.probes.derived_half!==undefined){
+    body+='<line x1="'+X(pr.probes.derived_half).toFixed(1)+'" y1="70" x2="'
+      +X(pr.probes.derived_half).toFixed(1)+'" y2="94" stroke="'+B+'" stroke-width="2"/>';
+    body+=endLabel(X(pr.probes.derived_half)+5,86,num(pr.probes.derived_half,3),B,w);
+  }
+  if(rep){
+    body+='<line x1="'+X(0)+'" y1="115" x2="'+X(rep.spread).toFixed(1)+'" y2="115" stroke="'+C
+      +'" stroke-width="3"/>';
+    body+=endLabel(X(rep.spread)+5,112,num(rep.spread,3),C,w);
+    body+='<circle cx="'+X(0)+'" cy="115" r="2.5" fill="'+G+'"/>';
+    body+='<text class="lbl-s" x="'+(X(0)-5)+'" y="112" text-anchor="end" fill="'+G+'">0.000</text>';
+  }
+  var chip=scaleChip(pop?pop.scale:null);
+  var out='<div class="chart"><h3>'+title+'<span class="heads"><span class="chip '+chip.cls+'">'
+    +esc(chip.text)+'</span><span class="chip dim">'+commas(pop?pop.episodes:null)+' battles</span></span></h3>'
+    +'<svg viewBox="0 0 640 150" role="img" aria-label="interval half-widths in standard deviations">'
+    +body+'</svg>';
+  out+='<ul class="why"><li>'+swatch(A,'')+pr.half.length+' recorded 95% '+plural(pr.half.length,'interval')
+    +', '+commas(pop?pop.episodes:null)+' battles each, against a recorded '+esc(String(pop?pop.opponent:''))
+    +' opponent'+((pr.half.length>1&&pr.median!==null&&pr.median!==undefined)
+      ?('. Narrowest '+num(pr.min,3)+', median '+num(pr.median,3)+', widest '+num(pr.max,3)+'.')
+      :'. One interval &mdash; a spread needs two.')+'</li>';
+  if(pr.probes.derived_half!==null&&pr.probes.derived_half!==undefined)
+    out+='<li>'+swatch(B,'')+'&#177;'+num(pr.probes.derived_half,3)+' is what '+commas(pr.probes.episodes)
+      +' battles would give, if a probe carried an interval: '+esc(pr.probes.rule)+'. '
+      +commas(pr.probes.count)+' '+plural(pr.probes.count,'reading')+' on this page were taken at that size '
+      +'and '+commas(pr.without_interval)+' lift '+plural(pr.without_interval,'reading')
+      +' in total carry no interval at all.</li>';
+  if(rep) out+='<li>'+swatch(C,'')+'The same weights measured twice: greedy repeats to every digit ('
+    +esc(String(rep.greedy))+') while sampled moves '+num(rep.spread,3)+', across '
+    +esc(rep.sources.join(' and '))+'. Joined on that bit-equal greedy value and nothing else &mdash; greedy '
+    +'play on fixed seeds is deterministic, so agreement to sixteen digits is evidence of identical weights '
+    +'in a way an arm name never is.'
+    +(rep.scales_agree===true?'':(' These two records do not both name an opponent, so they cannot be shown '
+      +'to be on one scale; the bit-equal greedy arm is the evidence that they are the same weights.'))+'</li>';
+  else out+='<li>No checkpoint has been measured twice.</li>';
+  out+='</ul>';
+  (pr.populations_not_drawn||[]).forEach(function(p){
+    out+='<div class="caption">'+p.n+' further '+plural(p.n,'interval')+' were recorded against '
+      +esc(String(p.opponent))+' over '+commas(p.episodes)+' battles. That is a second population, drawn '
+      +'nowhere on this strip and never averaged into it.</div>';});
+  return out+'</div>';
+}
+
+/* -------------------------------------- G4: a sparkline inside a scale card */
+
+/* Drawn inside the scale group's own card, which is what makes the control
+   label structural: two lines can only meet on one axis if `_groups_of` put
+   them in the same bucket, and the card header already carries the scale chip
+   and the control rate. The idle-scale series is in a different card from
+   every random-scale series and cannot reach them.
+
+   The x is the reading number and never the step count. A run with one
+   reading is drawn as a dot, which deliberately differs from chart(), where a
+   one-point series inside a drawn chart is invisible. */
+function groupSpark(g){
+  if(g.control===null||g.control===undefined)
+    return '<div class="caption">No trend is drawn here: these readings record no control rate, so they are '
+      +'not known to share one axis &mdash; which is exactly why this card is not ordered.</div>';
+  var runs=(g.runs||[]).filter(function(r){return r.series&&r.series.length;});
+  if(!runs.length) return '';
+  if(runs.every(function(r){return r.series.length<2;}))
+    return '<div class="caption">One reading each &mdash; a trend needs two.</div>';
+  var w=640,h=120,padL=40,padR=64,padT=10,padB=18;
+  var n=1,lo=0,hi=0;
+  runs.forEach(function(r){
+    n=Math.max(n,r.series.length);
+    r.series.forEach(function(p){lo=Math.min(lo,p[1]);hi=Math.max(hi,p[1]);});});
+  if(hi-lo<1e-9){hi+=0.5;lo-=0.5;}
+  var pd=(hi-lo)*0.12;hi+=pd;lo-=pd;
+  var X=function(v){return padL+(n===1?0.5:(v-1)/(n-1))*(w-padL-padR);};
+  var Y=function(v){return padT+(1-(v-lo)/(hi-lo))*(h-padT-padB);};
+  var wheel=[A,D,B,C,G];
+  var body='<line class="zero" x1="'+padL+'" y1="'+Y(0).toFixed(1)+'" x2="'+(w-padR)+'" y2="'
+    +Y(0).toFixed(1)+'"/>';
+  var names=runs.map(function(r){return r.name;});
+  var ends=unstack(runs.map(function(r){return Y(r.series[r.series.length-1][1])+3.4;}),11);
+  runs.forEach(function(r,i){
+    var col=wheel[i%wheel.length];
+    var dash=(i>=wheel.length)?' stroke-dasharray="4 3"':'';
+    if(r.series.length<2){
+      body+='<circle cx="'+X(1).toFixed(1)+'" cy="'+Y(r.series[0][1]).toFixed(1)+'" r="3.2" fill="'+col+'"/>';
+    }else{
+      body+='<path fill="none" stroke="'+col+'" stroke-width="1.5" stroke-linejoin="round"'+dash+' d="'
+        +r.series.map(function(p,k){return (k?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1);}).join(' ')
+        +'"/>';
+    }
+    body+=endLabel(X(r.series[r.series.length-1][0])+5,ends[i],distinctPart(r.name,names),col,w);
+  });
+  /* A ruler, not a band. A band around zero would say these readings are
+     being tested against zero; a free-standing arrow says only how far one
+     reading moves on its own. */
+  var source=runs[0];
+  runs.forEach(function(r){if(r.series.length>source.series.length) source=r;});
+  var ruled=(source.noise!==null&&source.noise!==undefined);
+  if(ruled){
+    var rx=w-padR+30,mid=(padT+h-padB)/2,half=(source.noise/(hi-lo))*(h-padT-padB);
+    body+='<line x1="'+rx+'" y1="'+(mid-half).toFixed(1)+'" x2="'+rx+'" y2="'+(mid+half).toFixed(1)
+      +'" stroke="'+G+'" stroke-width="1"/>'
+      +'<line x1="'+(rx-3)+'" y1="'+(mid-half).toFixed(1)+'" x2="'+(rx+3)+'" y2="'+(mid-half).toFixed(1)
+      +'" stroke="'+G+'" stroke-width="1"/>'
+      +'<line x1="'+(rx-3)+'" y1="'+(mid+half).toFixed(1)+'" x2="'+(rx+3)+'" y2="'+(mid+half).toFixed(1)
+      +'" stroke="'+G+'" stroke-width="1"/>'
+      +'<text class="lbl-s" x="'+rx+'" y="'+(mid-half-4).toFixed(1)+'" text-anchor="middle">&#177;'
+      +num(source.noise,2)+'</text>';
+  }
+  body+='<line class="axis" x1="'+padL+'" y1="'+(h-padB)+'" x2="'+(w-padR)+'" y2="'+(h-padB)+'"/>';
+  body+='<text class="lbl-s" x="3" y="'+(padT+8)+'">'+hi.toFixed(2)+'</text>';
+  body+='<text class="lbl-s" x="3" y="'+(h-padB)+'">'+lo.toFixed(2)+'</text>';
+  body+='<text class="lbl-s" x="'+padL+'" y="'+(h-4)+'">1</text>';
+  body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(h-4)+'" text-anchor="end">'+n+'</text>';
+  var out='<svg viewBox="0 0 640 120" role="img" aria-label="lift against reading number, one line per run">'
+    +body+'</svg>';
+  out+='<div class="caption">'+runs.map(function(r,i){
+    return swatch(wheel[i%wheel.length],r.name);}).join('')+'</div>';
+  out+='<div class="caption">The x axis is the reading number, not the step count: '+DATA.alltime.resumed+' '
+    +plural(DATA.alltime.resumed,'run')+' on this page replayed '+plural(DATA.alltime.resumed,'its','their')
+    +' step counter after a resume, and a step axis folds those readings on top of each other.</div>';
+  if(ruled) out+='<div class="caption">&#177;'+num(source.noise,2)+' is '+esc(source.noise_rule)
+    +', measured on '+esc(source.name)+' &mdash; the longest series in this card. It stands beside the lines '
+    +'rather than as a band around zero, because it says how far one reading moves, not what any of them is '
+    +'being tested against.</div>';
+  var doubled=runs.filter(function(r){return r.evals>r.series.length;});
+  if(doubled.length) out+='<div class="caption">'+doubled.map(function(r){
+    return (r.evals-r.series.length)+' of '+esc(r.name)+'&rsquo;s readings';}).join(', ')
+    +' were written twice with identical values and are counted once.</div>';
+  return out;
 }
 
 /* What has moved since this browser last opened the view. Compared on
@@ -2278,6 +3390,12 @@ function demotedMarkup(A){
    by how each policy was played more than by its weights. */
 function ladderSection(g,b,weights){
   var lifts=g.arms.map(function(a){return a.lift;}).concat([0]);
+  /* An arm's interval, where it has one, stretches the section's own scale so
+     the whisker fits inside the track rather than being clipped at the end of
+     it. No arm of the metrics ladder carries one -- no lift row on disk does
+     -- so that ladder's scale, and its caption saying it has no whiskers, are
+     both unchanged by this. */
+  g.arms.forEach(function(a){if(a.ci){lifts.push(a.ci[0]);lifts.push(a.ci[1]);}});
   var lo=Math.min.apply(null,lifts),hi=Math.max.apply(null,lifts),span=(hi-lo)||1;
   var zero=(0-lo)/span*100;
   var out='<div class="lbl" style="margin-top:14px">'
@@ -2286,9 +3404,16 @@ function ladderSection(g,b,weights){
   g.arms.forEach(function(a){
     var v=(a.lift-lo)/span*100;
     var left=Math.min(zero,v),width=Math.abs(v-zero);
+    var whisker='';
+    if(a.ci){
+      var c0=(a.ci[0]-lo)/span*100,c1=(a.ci[1]-lo)/span*100;
+      whisker='<u style="left:'+Math.min(c0,c1)+'%;width:'+Math.abs(c1-c0)+'%"></u>';
+    }
     out+='<div class="lrow'+(weights[a.weight]>1?' bracket':'')+'">'
-      +'<div class="name">'+liftNode(a.lift,a.scale)+' '+modeChip(a.mode)+' <b>'+esc(a.weight)+'</b> '+winLoss(a.win)+'</div>'
-      +'<div class="track"><i style="left:'+left+'%;width:'+width+'%"></i><b style="left:'+zero+'%"></b></div>'
+      +'<div class="name">'+liftNode(a.lift,a.scale)+' '+modeChip(a.mode)+' <b>'+esc(a.weight)+'</b> '+winLoss(a.win)
+      +(a.ci?(' <span class="prov" style="margin:0">['+sd(a.ci[0])+', '+sd(a.ci[1])+']</span>'):'')+'</div>'
+      +'<div class="track"><i style="left:'+left+'%;width:'+width+'%"></i>'+whisker
+      +'<b style="left:'+zero+'%"></b></div>'
       +'</div>';
   });
   out+='<div class="lrow zero"><div class="name"><span class="lift">0.000<span class="chip dim">the control itself</span></span> '
@@ -2323,7 +3448,11 @@ function ladderMarkup(A){
 }
 
 function modesMarkup(A){
-  var m=A.modes,out='<div class="panel">';
+  var m=A.modes;
+  /* The table drawn. It leads, because a reader who sees a checkpoint in the
+     lower-left quadrant knows its near-zero sampled number is a collapsed
+     policy rather than a mediocre one, and stops quoting one arm. */
+  var out=gvsMarkup(m)+'<div class="panel">';
   out+='<div class="caption">Only '+m.with_mode+' of '+m.lift_rows+' readings record how the policy played at all. '
     +'clone_policy keeps max(greedy, sampled) and discards the other half, so the rest are one number '
     +'with no way back to the pair it came from.</div>';
@@ -2424,6 +3553,9 @@ function groupsMarkup(A){
     out+='<details class="card"><summary><span class="chip '+c.cls+'">'+esc(c.text)+'</span>'
       +'<span class="caption">'+g.rows+' readings across '+g.runs.length+' '+plural(g.runs.length,'run')
       +(g.rankable?'':' &mdash; not ordered')+'</span></summary><div class="body">';
+    /* Inside the card, so the control label is structural: two lines can only
+       meet on one axis if they were bucketed to the same control above. */
+    out+=groupSpark(g);
     if(!g.rankable) out+='<div class="caption">These readings record neither a control rate nor an opponent. '
       +'They are not one scale and nothing here says they are, so they are listed by name and not by size.</div>';
     g.runs.forEach(function(r){
@@ -2532,8 +3664,11 @@ function allTimeMarkup(A){
   var out='<div class="seen">'+esc(sinceLastLook(A))+'</div>';
   out+='<h2>The record</h2>'+recordMarkup(A);
   out+='<h2>'+demotedHeading(A)+'</h2>'+demotedMarkup(A);
+  out+='<h2>The matched pair</h2>'+abMarkup(A.ab);
   out+='<h2>The comparable ladder</h2>'+(A.block?ladderMarkup(A)
     :'<div class="panel">No comparable ranking on disk.<div class="caption">Nothing is sorted in its place.</div></div>');
+  out+='<h2>Sweep ladders, one per checkpoint family</h2>'+sweepMarkup(A.sweeps);
+  out+='<h2>What a reading is worth</h2>'+precisionMarkup(A.precision);
   out+='<h2>Greedy vs sampled, wherever both survive</h2>'+modesMarkup(A);
   /* Counted, not named. An exhibit is dropped where the data stops
      supporting it -- a selected peak whose replay turns out to be a
@@ -2763,6 +3898,18 @@ def _kind_of(run: Path) -> "str | None":
     return raw.get("kind") if isinstance(raw, dict) else None
 
 
+def _config_of(run: Path) -> dict[str, Any]:
+    """A run's config, as a dict, or an empty one where there is none readable.
+
+    Read so two runs can be asked how much they actually differ. Only the
+    *names* of the keys that differ ever reach the payload -- one of them
+    holds an absolute Windows path, and nothing in ``_all_time`` may vary
+    with the machine.
+    """
+    raw = _read_json(run / "config.json")
+    return raw if isinstance(raw, dict) else {}
+
+
 def _read_json(path: Path) -> Any:
     """One JSON file, or None if it cannot be read.
 
@@ -2962,6 +4109,7 @@ def main(argv: list[str] | None = None) -> int:
         collected = []
         notes: dict[str, str] = {}
         kinds: dict[str, str] = {}
+        configs: dict[str, Any] = {}
         skipped: list[str] = []
         for run in discover():
             metrics = run / "metrics.jsonl"
@@ -2999,12 +4147,13 @@ def main(argv: list[str] | None = None) -> int:
             kind = _kind_of(run)
             if kind:
                 kinds[label] = kind
+            configs[label] = _config_of(run)
         if not collected:
             return 0
         extras = _extras_of(_run_roots())
         extras["skipped"] = skipped
         html, body = render_multi(collected, notes=notes, kinds=kinds,
-                                  extras=extras)
+                                  extras=extras, configs=configs)
         out.write_text(html, encoding="utf-8")
         # Beside the page, because a served copy polls this rather than
         # reloading itself. Written second so a reader never sees data newer
