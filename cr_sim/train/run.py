@@ -398,6 +398,10 @@ def main(argv: list[str] | None = None) -> int:
                     # exactly the question its flat metrics provoke.
                     "pool_size": args.pool_size,
                     "refresh_every": args.refresh_every,
+                    # 0 disables the ladder entirely, which is worth stating:
+                    # a run with no ancestor rows is not a run whose ladder
+                    # broke, it is a run that never measured one.
+                    "ancestor_episodes": args.ancestor_episodes,
                     "opponent_temperature": args.opponent_temperature,
                     "init_from": str(args.init_from) if args.init_from else None,
                     "resumed": bool(args.resume),

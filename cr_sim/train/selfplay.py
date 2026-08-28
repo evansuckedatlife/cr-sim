@@ -326,12 +326,22 @@ def ancestor_probe(
     seeds = [int(s) for s in np.random.default_rng(seed).integers(0, 2**31 - 1, episodes)]
 
     def probe(net: ActorCritic) -> dict:
+        # No battles means no measurement, and no keys. np.mean([]) is NaN,
+        # which json.dumps writes as a bare NaN token that is not valid JSON,
+        # and which every consumer downstream then has to recognise: the page
+        # drew an empty self-play ladder for a whole run because --ancestor
+        # -episodes was 0 and the rows said NaN rather than saying nothing.
+        # An absent key is the honest report of a measurement not taken.
+        if episodes <= 0:
+            return {}
         ancestor = pool.oldest()
         if ancestor is None:
             return {}
         env = make_env(FrozenOpponent(ancestor, nvec, seed=seed))
         result = evaluate(env, net, episodes=episodes, seeds=seeds, greedy=False)
         crowns = result["crowns"]
+        if len(crowns) == 0:
+            return {}
         return {
             "ancestor_win": float(np.mean([c > 0 for c in crowns])),
             "ancestor_loss": float(np.mean([c < 0 for c in crowns])),

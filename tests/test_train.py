@@ -686,3 +686,79 @@ def test_make_demos_does_not_confuse_the_search_horizon_with_the_rewards():
         "--horizon-seconds, which is the search's own lookahead")
     assert "_reward_weights(args)" not in source, (
         "passing args directly picks up the search horizon as the reward's")
+
+
+# ---------------------------------------- a measurement not taken says nothing
+
+
+def test_the_ancestor_probe_reports_nothing_rather_than_nan():
+    """--ancestor-episodes 0 wrote NaN into every row for a whole run.
+
+    np.mean([]) is NaN, json.dumps writes it as a bare NaN token which is not
+    valid JSON, and the page then drew an empty self-play ladder with no way to
+    tell a broken ladder from one that was never measured. An absent key is the
+    honest report of a measurement not taken.
+
+    The pool must be non-empty for this to bite: with nothing in it the probe
+    exits through the older `ancestor is None` guard and never reaches the
+    arithmetic. A first version of this test made that mistake and passed
+    against the unfixed source.
+    """
+    import math
+
+    from cr_sim.train.selfplay import ancestor_probe
+
+    class _Pool:
+        """Non-empty, so the probe gets past its ancestor-is-None guard."""
+
+        generations = 3
+
+        def __len__(self):
+            return 1
+
+        def oldest(self):
+            return object()
+
+    def _make_env(opponent):
+        raise AssertionError(
+            "a zero-episode probe must not build an environment at all")
+
+    probe = ancestor_probe(_make_env, _Pool(), (5, 9, 16), episodes=0)
+    row = probe(None)
+    assert row == {}, f"zero episodes must produce no keys, got {row}"
+    for value in row.values():
+        assert not (isinstance(value, float) and math.isnan(value))
+
+
+def test_a_run_records_whether_it_measured_a_ladder_at_all(tmp_path,
+                                                           monkeypatch):
+    """ancestor_episodes decides whether the self-play ladder exists.
+
+    It was not recorded, so a run directory with no ancestor rows was
+    indistinguishable from one whose probe had failed.
+    """
+    from cr_sim.api import vec as vec_module
+
+    captured = {}
+
+    class _Stop(RuntimeError):
+        pass
+
+    def _capture(config, num_envs, workers):
+        captured["config"] = config
+        raise _Stop("captured")
+
+    monkeypatch.setattr(vec_module, "CRSimVecEnv", _capture)
+
+    from cr_sim.train.run import main
+
+    with pytest.raises(_Stop):
+        main([
+            "--steps", "64", "--horizon", "8", "--envs", "2", "--workers", "1",
+            "--match-seconds", "20", "--device", "cpu",
+            "--ancestor-episodes", "7",
+            "--out", str(tmp_path), "--name", "ladder",
+        ])
+
+    written = json.loads((tmp_path / "ladder" / "config.json").read_text())
+    assert written["ancestor_episodes"] == 7
