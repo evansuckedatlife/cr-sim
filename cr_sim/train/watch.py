@@ -902,6 +902,31 @@ def _groups_of(entries: list[dict[str, Any]],
                 # is the largest of two scales, so it is reported per mode.
                 "modes": sorted({str(r.get("mode")) for r in rows}),
             }
+            # A trajectory or nothing. Two kinds of list on this page are a
+            # sequence of readings and are not a trajectory, and joining
+            # either of them draws a descent that nothing descended:
+            #
+            #   - a ranking job's rows are separate checkpoints sorted
+            #     best-first, which is the flag the ladder already trusts
+            #     three lines above;
+            #   - a run read both greedily and sampled holds two scales, and
+            #     greedy and sampled on one set of weights differ by 2.3x
+            #     here.
+            #
+            # `_noise_of` over either reports the gap between two policies as
+            # what one probe moves -- 1.26 against the 0.025 the replicate
+            # actually measured, with both figures printed on this one page.
+            # Refused with the reason, which the card prints where the line
+            # would have been.
+            refusal = None
+            if ranking:
+                refusal = ("these readings are separate checkpoints sorted "
+                           "best-first, not one run over time")
+            elif len(entry["modes"]) > 1:
+                refusal = ("these readings were played more than one way ("
+                           + ", ".join("mode unrecorded" if m == "None" else m
+                                       for m in entry["modes"])
+                           + ") and two ways of playing are two scales")
             # This run's lift against the reading number, for the sparkline
             # inside the card. The x is the reading's ordinal in write order
             # and never the step count: three runs on this page replayed
@@ -924,9 +949,11 @@ def _groups_of(entries: list[dict[str, Any]],
                     continue
                 already.add(key)
                 series.append([len(series) + 1, reading["lift"]])
-            entry["series"] = series
-            entry["noise"] = _noise_of([point[1] for point in series])
+            entry["series"] = [] if refusal else series
+            entry["noise"] = (None if refusal
+                              else _noise_of([point[1] for point in series]))
             entry["noise_rule"] = _NOISE_RULE
+            entry["no_series"] = refusal
             if ranking:
                 entry["arms"] = [
                     {"arm": str(a.get("arm")), "lift": a["lift"],
@@ -1580,6 +1607,39 @@ def _by_update(evals: Sequence[dict[str, Any]]) -> "tuple[dict, dict]":
     return first, replay
 
 
+def _duplicate_runs(entries: list[dict[str, Any]]) -> list[list[str]]:
+    """Labels that hold the same measurements as a label already read.
+
+    ``_run_roots`` deliberately scans the agent worktrees, so a run present in
+    both a checkout and a worktree arrives here twice under two labels with
+    identical rows. ``_extras_of`` already guards verdict files against
+    exactly this -- "a checkout and a worktree holding a copy" -- and nothing
+    guarded the runs, so the matched pair could select a run against itself:
+    every clause of its gate passes (same control, same opponent, same battle
+    count, same mode, a configuration diff of nothing), it wins the tie-break
+    on shared updates, and it reports a paired mean of exactly zero over
+    every update, with the most weight anything on this page can carry.
+
+    Compared on the measurements and never on the names, because the labels
+    legitimately differ: ``_label_for`` tags a worktree copy with the
+    worktree's hash.
+    """
+    seen: dict[Any, str] = {}
+    out: list[list[str]] = []
+    for entry in entries:
+        if not entry["evals"]:
+            continue
+        key = tuple(sorted(
+            ((r.get("updates"), r["lift"], r.get("win"), r.get("control"),
+              r.get("mode")) for r in entry["evals"]), key=repr))
+        first = seen.get(key)
+        if first is None:
+            seen[key] = entry["name"]
+        else:
+            out.append([first, entry["name"]])
+    return out
+
+
 def _ab_of(entries: list[dict[str, Any]],
            configs: "dict[str, Any] | None") -> "dict[str, Any] | None":
     """The one pair of runs whose difference is a difference in the runs.
@@ -1600,9 +1660,15 @@ def _ab_of(entries: list[dict[str, Any]],
     subtract a run's first hour from another run's third.
     """
     configs = configs or {}
+    # One run reached through two roots is one run. Refused here rather than
+    # inside the pair loop, so the copy cannot stand in for the original
+    # against a third run either, and named in the payload rather than
+    # dropped in silence.
+    same_run = _duplicate_runs(entries)
+    twins = {name for _first, name in same_run}
     candidates = []
     for entry in entries:
-        if entry["job"]:
+        if entry["job"] or entry["name"] in twins:
             continue
         evals = [r for r in entry["evals"] if _plottable(r.get("updates"))]
         if len(evals) < _AB_MIN_SHARED:
@@ -1710,9 +1776,25 @@ def _ab_of(entries: list[dict[str, Any]],
         "alt": alt,
         "a_readings": len(one["evals"]), "b_readings": len(two["evals"]),
         "a_last_update": last_a, "b_last_update": last_b,
-        # What the longer run did after the shorter one stopped writing. Drawn
-        # faded past the rule, so "stopped" and "losing" cannot be confused.
+        # What each run did after the other stopped writing. Drawn faded past
+        # the rule, so "stopped" and "losing" cannot be confused. Both are
+        # emitted, because A and B are oriented by which run scored better
+        # over the shared window and not by which one ran longer -- with only
+        # an a-tail, a losing run that kept going lost every reading it took
+        # after the winner stopped, which is the exact misreading the tail
+        # exists to prevent.
         "tail": [[u, first_a[u]] for u in sorted(first_a) if u > last_b],
+        "tail_b": [[u, first_b[u]] for u in sorted(first_b) if u > last_a],
+        # Whether the play mode is a recorded fact or an agreement between
+        # two runs that both recorded nothing. `_same_scale` refuses to read
+        # two silences as a match for the opponent; the same rule holds for
+        # the mode, and the caption says which of the two answers it got.
+        # Greedy and sampled on one set of weights differ by 2.3x here, so
+        # "same play mode" is the load-bearing half of that sentence.
+        "mode_recorded": one["mode"] in ("greedy", "sampled"),
+        # Pairs refused for being one run reached twice. Named rather than
+        # silently dropped, the way `_extras_of` names a duplicated verdict.
+        "same_run": sorted(same_run),
         "rule": "paired at equal update index, never at equal wall clock",
     }
     out.update(stats)
@@ -1798,7 +1880,26 @@ def _sweeps_of(verdicts: dict[str, Any]) -> dict[str, Any]:
 
     families = []
     for family in sorted(placed):
-        checkpoints = placed[family]
+        # One checkpoint is one arm, however many verdict files measured it.
+        # Two evaluation processes are writing verdict files right now, so
+        # the same weights re-measured under a second file name is an
+        # ordinary event -- and flattening the per-checkpoint lists straight
+        # into the sections drew the same arm at two different ranks with
+        # nothing distinguishing them, under a header that still counted the
+        # checkpoint once. Where two readings of one checkpoint in one mode
+        # disagree, the checkpoint is dropped and counted rather than ranked
+        # twice: a ladder cannot show a policy in two places at once and
+        # still be a ranking.
+        checkpoints = {}
+        for checkpoint in sorted(placed[family]):
+            by_mode: dict[Any, list] = {}
+            for record in placed[family][checkpoint]:
+                by_mode.setdefault(record.get("mode"), []).append(record)
+            if any(len({repr(float(r["lift"])) for r in same}) > 1
+                   for same in by_mode.values()):
+                dropped.add(checkpoint)
+                continue
+            checkpoints[checkpoint] = [same[0] for same in by_mode.values()]
         rows = [r for group in checkpoints.values() for r in group]
         if len(checkpoints) < 2:
             # One arm is not a sweep. Named as a singleton rather than drawn
@@ -1875,8 +1976,18 @@ def _precision_of(recorded: list[dict[str, Any]],
     drawn = order[0] if order else None
     half = sorted(populations[drawn]) if drawn else []
 
+    # Only readings that actually record their battle count. The `or`
+    # default that used to stand here asserted every silent reading was a
+    # 40-battle probe, which counted the record +1.813 and every arm of the
+    # ranked block -- all of them 150-battle evaluations recording
+    # `episodes` and not `eval_episodes` -- as probes, and handed the reader
+    # a 0.482 half-width for readings whose own files record 0.23. The
+    # battle ledger on this same page already calls that default an
+    # estimate; a derived precision may not restate it as a fact.
     probes = sum(1 for r in readings
-                 if (r.get("eval_episodes") or _PROBE_EPISODES) == _PROBE_EPISODES)
+                 if r.get("eval_episodes") == _PROBE_EPISODES)
+    unrecorded = sum(1 for r in readings
+                     if not _plottable(r.get("eval_episodes")))
     median = None
     if half:
         middle = len(half) // 2
@@ -1932,6 +2043,7 @@ def _precision_of(recorded: list[dict[str, Any]],
         "probes": {
             "episodes": _PROBE_EPISODES,
             "count": probes,
+            "unrecorded": unrecorded,
             "derived_half": (median * math.sqrt(drawn[1] / _PROBE_EPISODES)
                              if (median is not None and drawn) else None),
             "rule": ("the median recorded interval, scaled by the square root "
@@ -2059,6 +2171,11 @@ def _all_time(runs, notes, kinds, extras, configs=None) -> dict[str, Any]:
         "skipped": sorted(str(s) for s in (extras.get("skipped") or [])),
         "duplicate_verdicts": sorted(
             str(d) for d in (extras.get("duplicate_verdicts") or [])),
+        # Run labels holding the same measurements as a label already read.
+        # The runs' half of the same guard: a copy of a run is not a second
+        # run, and the matched pair used to be able to select one against
+        # itself.
+        "duplicate_runs": sorted(_duplicate_runs(entries)),
     }
 
 
@@ -2820,6 +2937,53 @@ function familyOf(cp){
   return parts.length>2?parts[0]:'';
 }
 
+/* One marker per sweep, and a hollow ring for a checkpoint that came out of
+   no sweep at all -- which is what `_sweeps_of` does with `runs/_diag/cloned.pt`
+   rather than ranking it against anything. The scatter's own guard is
+   control-based, and a control-based guard cannot separate two checkpoints
+   out of different sweeps that state the same configuration, faced the same
+   recorded opponent over the same battle count and disagree by three
+   standard deviations: their controls genuinely match. Only the sweep the
+   checkpoint came out of records what was held fixed, so the sweep is drawn
+   into the mark and printed on every label. */
+var MARKERS=['circle','square','triangle','diamond','cross','wedge'];
+function marker(kind,x,y,col){
+  var s=x.toFixed(1),t=y.toFixed(1);
+  if(kind==='square') return '<rect x="'+(x-2.9).toFixed(1)+'" y="'+(y-2.9).toFixed(1)
+    +'" width="5.8" height="5.8" fill="'+col+'"/>';
+  if(kind==='triangle') return '<path d="M'+s+' '+(y-3.9).toFixed(1)+'L'+(x+3.6).toFixed(1)+' '
+    +(y+2.6).toFixed(1)+'L'+(x-3.6).toFixed(1)+' '+(y+2.6).toFixed(1)+'Z" fill="'+col+'"/>';
+  if(kind==='diamond') return '<path d="M'+s+' '+(y-4.2).toFixed(1)+'L'+(x+4.2).toFixed(1)+' '+t
+    +'L'+s+' '+(y+4.2).toFixed(1)+'L'+(x-4.2).toFixed(1)+' '+t+'Z" fill="'+col+'"/>';
+  if(kind==='cross') return '<path d="M'+(x-3.4).toFixed(1)+' '+(y-3.4).toFixed(1)+'L'+(x+3.4).toFixed(1)
+    +' '+(y+3.4).toFixed(1)+'M'+(x+3.4).toFixed(1)+' '+(y-3.4).toFixed(1)+'L'+(x-3.4).toFixed(1)+' '
+    +(y+3.4).toFixed(1)+'" stroke="'+col+'" stroke-width="2" fill="none"/>';
+  if(kind==='wedge') return '<path d="M'+s+' '+(y+3.9).toFixed(1)+'L'+(x+3.6).toFixed(1)+' '
+    +(y-2.6).toFixed(1)+'L'+(x-3.6).toFixed(1)+' '+(y-2.6).toFixed(1)+'Z" fill="'+col+'"/>';
+  if(kind==='ring') return '<circle cx="'+s+'" cy="'+t+'" r="3.2" fill="none" stroke="'+col
+    +'" stroke-width="1.6"/>';
+  return '<circle cx="'+s+'" cy="'+t+'" r="3.2" fill="'+col+'"/>';
+}
+
+/* Which mark each sweep gets. Biggest sweep first so the assignment does not
+   move between two polls that measured nothing, and the checkpoints that
+   belong to no sweep always last and always the ring -- their marker says
+   what they are rather than which position they landed in. */
+function gvsFamilies(rows){
+  var counts={},order=[];
+  rows.forEach(function(r){
+    var f=familyOf(r.checkpoint)||'';
+    if(counts[f]===undefined){counts[f]=0;order.push(f);}
+    counts[f]++;});
+  order.sort(function(x,y){
+    if(!x!==!y) return x?-1:1;
+    return counts[y]-counts[x]||(x<y?-1:1);});
+  var kind={},n=0;
+  order.forEach(function(f){kind[f]=f?MARKERS[(n++)%MARKERS.length]:'ring';});
+  return {order:order,counts:counts,kind:kind,
+          reused:Math.max(0,order.filter(function(f){return f;}).length-MARKERS.length)};
+}
+
 function emptyCard(title,why){
   return '<div class="chart"><h3>'+title+'</h3><div class="empty">'+esc(why)+'</div></div>';
 }
@@ -2863,7 +3027,16 @@ function gvsMarkup(m){
   var title='Greedy vs sampled, one point per checkpoint';
   var found=gvsGroups(m||{});
   var g=found.drawn;
-  if(!g||!g.rows.length) return emptyCard(title,'no verdict records both ways of playing');
+  /* A checkpoint measured both ways that records no opponent is not a
+     smaller finding than no checkpoint at all -- it is a reading on an
+     unknown scale, which is exactly what this axis may not carry. Said
+     apart from the empty case, so the refusal names what it refused. */
+  if(!g||!g.rows.length) return emptyCard(title,found.excluded
+    ? (found.excluded+' '+plural(found.excluded,'checkpoint')+' '
+       +plural(found.excluded,'was','were')+' measured both ways and '
+       +plural(found.excluded,'records','record')+' no opponent at all, so '
+       +plural(found.excluded,'it is','they are')+' not drawn on an axis')
+    : 'no verdict records both ways of playing');
   var pts=g.rows,lo=0,hi=0;
   pts.forEach(function(r){
     [r.greedy.lift,r.sampled.lift].forEach(function(v){lo=Math.min(lo,v);hi=Math.max(hi,v);});
@@ -2886,7 +3059,15 @@ function gvsMarkup(m){
     +'" text-anchor="end">greedy = sampled</text>';
   body+='<line class="zero" x1="'+X(0).toFixed(1)+'" y1="'+padT+'" x2="'+X(0).toFixed(1)+'" y2="'+(h-padB)+'"/>';
   body+='<line class="zero" x1="'+padL+'" y1="'+Y(0).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+Y(0).toFixed(1)+'"/>';
+  var fams=gvsFamilies(pts);
+  /* Stacked labels, stopped at the plot floor. Unstacking in fixed 11-unit
+     steps has no lower bound, and the live set already stacks into one
+     unbroken column from y=120 down: about 27 checkpoints and the lowest
+     names fall outside the 400-unit viewBox, where they are not drawn at
+     all. A name that is silently missing is the failure this page otherwise
+     refuses, so the ones that do not fit are counted and said. */
   var placed=unstack(pts.map(function(r){return Y(r.sampled.lift)-4;}),11);
+  var floor=h-padB-2,unlabelled=0;
   pts.forEach(function(r,i){
     var col=r.flips?C:A;
     var gx=X(r.greedy.lift),sy=Y(r.sampled.lift);
@@ -2896,11 +3077,16 @@ function gvsMarkup(m){
     if(r.sampled.ci) body+='<line x1="'+gx.toFixed(1)+'" y1="'+Y(r.sampled.ci[0]).toFixed(1)
       +'" x2="'+gx.toFixed(1)+'" y2="'+Y(r.sampled.ci[1]).toFixed(1)
       +'" stroke="'+col+'" stroke-width="1" opacity=".45"/>';
-    body+='<circle cx="'+gx.toFixed(1)+'" cy="'+sy.toFixed(1)+'" r="3.2" fill="'+col+'"/>';
-    var fam=r.ambiguous?familyOf(r.checkpoint):'';
-    /* A literal middle dot, not an entity: this text goes through esc() on
-       its way into the SVG, which would print the entity's ampersand. */
-    body+=endLabel(gx+6,placed[i],String(r.weight)+(fam?('·'+fam):''),col,w);
+    var fam=familyOf(r.checkpoint)||'';
+    body+=marker(fams.kind[fam],gx,sy,col);
+    /* The sweep on every label, not only where two arms happen to share a
+       name: the sweep is what says two points are on one footing, so leaving
+       it off is what lets a reader rank across two. A literal middle dot,
+       not an entity: this text goes through esc() on its way into the SVG,
+       which would print the entity's ampersand. */
+    if(placed[i]<=floor)
+      body+=endLabel(gx+6,placed[i],String(r.weight)+'·'+(fam||'no sweep'),col,w);
+    else unlabelled++;
   });
   body+='<text class="lbl-s" x="'+padL+'" y="'+(h-padB+14)+'">'+lo.toFixed(2)+'</text>';
   body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(h-padB+14)+'" text-anchor="end">'+hi.toFixed(2)+'</text>';
@@ -2927,8 +3113,30 @@ function gvsMarkup(m){
       +plural(found.pairs,'is','are')+' read from metrics rows that carry no interval, and '
       +plural(found.pairs,'is','are')+' not drawn here either.'):'')
     +'</div>';
+  /* The names at real px, and the sweep each one came out of. The SVG labels
+     render at about 5px at this page's target width, so nothing here may be
+     legible only inside the picture. */
+  out+='<div class="caption">'+fams.order.map(function(f){
+      return '<b>'+esc(f||'no sweep')+'</b> ('+fams.kind[f]+'): '
+        +esc(pts.filter(function(r){return (familyOf(r.checkpoint)||'')===f;})
+          .map(function(r){return String(r.weight);}).join(', '));}).join('. ')
+    +'.</div>';
+  out+='<div class="caption">One marker per sweep. A point&rsquo;s distance from the diagonal is a fact '
+    +'about that one checkpoint and reads the same anywhere on this axis; its position relative to another '
+    +'point is comparable inside one sweep only. Two checkpoints out of different sweeps can state the same '
+    +'configuration, face the same recorded opponent over the same battles and still disagree by three '
+    +'standard deviations, and no control-based guard separates them because their controls genuinely '
+    +'match &mdash; the sweep is the only thing on disk that records what was held fixed. A ring belongs to '
+    +'no sweep and is ranked against nothing, exactly as the ladders treat it.'
+    +(fams.reused?(' '+fams.reused+' '+plural(fams.reused,'sweep')+' beyond the sixth '
+      +plural(fams.reused,'reuses','reuse')+' a marker; the sweep is on every label.'):'')
+    +'</div>';
+  if(unlabelled) out+='<div class="caption">'+unlabelled+' '+plural(unlabelled,'point')+' '
+    +plural(unlabelled,'is','are')+' drawn without a name in the picture: the label would fall below the '
+    +'plot and be dropped without saying so. Every name is in the list above.</div>';
   out+='<div class="caption">Bars are the recorded 95% intervals &mdash; the only intervals on this project. '
-    +'No in-run probe carries one.</div>';
+    +'No in-run probe carries one. The axes run from '+num(lo,2)+' to '+num(hi,2)+' in lift, both of them, '
+    +'which is what makes the diagonal a true 45 degrees.</div>';
   /* A scatter of one point is honest in a way a line of one point is not: it
      is one checkpoint at its two readings, not a trend drawn through nothing.
      So it is drawn, with both zero lines, the diagonal and its intervals. */
@@ -2952,16 +3160,22 @@ function abMarkup(ab){
      unreachable here by construction. Do not add a fallback for it: it would
      be dead code claiming this page will draw a paired mean over one
      update. */
-  var pts=ab.points,tail=ab.tail||[];
+  /* Two tails, one per run. A and B are oriented by which run scored better
+     over the shared window, not by which one ran longer, so drawing only an
+     a-tail dropped every reading the losing run took after the winner
+     stopped -- exactly the misreading the tail exists to prevent. */
+  var pts=ab.points,tail=ab.tail||[],tailB=ab.tail_b||[];
   var w=640,h=300,padL=44,padR=64,t0=14,t1=170,b0=200,b1=280;
   var x0=pts[0].update,x1=Math.max(ab.a_last_update,ab.b_last_update);
   pts.forEach(function(p){x0=Math.min(x0,p.update);x1=Math.max(x1,p.update);});
   tail.forEach(function(t){x1=Math.max(x1,t[0]);});
+  tailB.forEach(function(t){x1=Math.max(x1,t[0]);});
   var X=function(v){return padL+(x1===x0?0.5:(v-x0)/(x1-x0))*(w-padL-padR);};
   var lo=null,hi=null;
   function span(v){if(v===null||v===undefined)return;lo=(lo===null)?v:Math.min(lo,v);hi=(hi===null)?v:Math.max(hi,v);}
   pts.forEach(function(p){span(p.a);span(p.b);span(p.replay_a);span(p.replay_b);});
   tail.forEach(function(t){span(t[1]);});
+  tailB.forEach(function(t){span(t[1]);});
   if(hi-lo<1e-9){hi+=0.5;lo-=0.5;}
   var pd=(hi-lo)*0.12;hi+=pd;lo-=pd;
   var Y1=function(v){return t0+(1-(v-lo)/(hi-lo))*(t1-t0);};
@@ -2976,6 +3190,8 @@ function abMarkup(ab){
   body+='<path fill="none" stroke="'+B+'" stroke-width="2" stroke-linejoin="round" d="'+path(bPts,Y1)+'"/>';
   if(tail.length) body+='<path fill="none" stroke="'+A+'" stroke-width="2" opacity=".35" '
     +'stroke-linejoin="round" d="'+path([aPts[aPts.length-1]].concat(tail),Y1)+'"/>';
+  if(tailB.length) body+='<path fill="none" stroke="'+B+'" stroke-width="2" opacity=".35" '
+    +'stroke-linejoin="round" d="'+path([bPts[bPts.length-1]].concat(tailB),Y1)+'"/>';
   pts.forEach(function(p){
     body+='<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y1(p.a).toFixed(1)+'" r="3" fill="'+A+'"/>';
     body+='<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y1(p.b).toFixed(1)+'" r="3" fill="'+B+'"/>';
@@ -2991,15 +3207,19 @@ function abMarkup(ab){
   /* Driven by the run list's own live flag and never by a file timestamp: an
      mtime varies with the machine and would move the payload fingerprint on
      every poll. */
-  var rule=X(ab.b_last_update);
-  var state=ab.b.name+(ab.b.live===false?' stopped':' still writing');
+  /* The rule stands where the shared window ends, which is wherever the
+     first run stopped -- and that is not always B. */
+  var stopAt=Math.min(ab.a_last_update,ab.b_last_update);
+  var first=(ab.a_last_update<=ab.b_last_update)?ab.a:ab.b;
+  var rule=X(stopAt);
+  var state=first.name+(first.live===false?' stopped':' still writing');
   body+='<line class="axis" x1="'+rule.toFixed(1)+'" y1="'+t0+'" x2="'+rule.toFixed(1)+'" y2="'+(t1+6)+'"/>';
   body+=(rule>w/2
     ? '<text class="lbl-s" x="'+(rule-4).toFixed(1)+'" y="'+(t0+10)+'" text-anchor="end">'+esc(state)+'</text>'
     : '<text class="lbl-s" x="'+(rule+4).toFixed(1)+'" y="'+(t0+10)+'">'+esc(state)+'</text>');
   var names=[ab.a.name,ab.b.name];
   var aEnd=tail.length?tail[tail.length-1]:aPts[aPts.length-1];
-  var bEnd=bPts[bPts.length-1];
+  var bEnd=tailB.length?tailB[tailB.length-1]:bPts[bPts.length-1];
   var endYs=unstack([Y1(aEnd[1])+3.4,Y1(bEnd[1])+3.4],11);
   body+=endLabel(X(aEnd[0])+6,endYs[0],distinctPart(ab.a.name,names),A,w);
   body+=endLabel(X(bEnd[0])+6,endYs[1],distinctPart(ab.b.name,names),B,w);
@@ -3036,9 +3256,17 @@ function abMarkup(ab){
   body+='<text class="lbl-s" x="3" y="'+(b0+8)+'">'+dhi.toFixed(2)+'</text>';
   body+='<text class="lbl-s" x="3" y="'+b1+'">'+dlo.toFixed(2)+'</text>';
   body+='<text class="lbl-s" x="'+padL+'" y="'+(b1+18)+'">'+pts[0].update+'</text>';
-  body+='<text class="lbl-s" x="'+X(pts[pts.length-1].update).toFixed(1)+'" y="'+(b1+18)
-    +'" text-anchor="middle">'+pts[pts.length-1].update+'</text>';
-  body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(b1+18)+'" text-anchor="end">'+ab.a_last_update+'</text>';
+  /* The last shared update, unless it lands on top of the right-hand label.
+     While both runs are still writing and standing at the same update -- the
+     ordinary state of the pair this pane exists for -- the two are the same
+     number at the same x and render as smeared double text. */
+  if(X(pts[pts.length-1].update)<w-padR-14)
+    body+='<text class="lbl-s" x="'+X(pts[pts.length-1].update).toFixed(1)+'" y="'+(b1+18)
+      +'" text-anchor="middle">'+pts[pts.length-1].update+'</text>';
+  /* The right end of the axis is x1, so it is labelled x1. Labelling it with
+     A's last update printed one number at the pixel column belonging to
+     another whenever B was the longer run. */
+  body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(b1+18)+'" text-anchor="end">'+x1+'</text>';
   var t=(ab.se>0)?Math.abs(ab.mean/ab.se):null;
   var out='<div class="chart"><h3>'+title+'<span class="heads">'+liftNode(ab.mean,ab.scale)
     +'<span class="chip dim">'+commas(ab.episodes)+' battles</span>'+modeChip(ab.mode)+'</span></h3>'
@@ -3048,7 +3276,16 @@ function abMarkup(ab){
     +' at each shared update, against the mean and one standard deviation of the '+ab.n+'.</div>';
   out+='<div class="caption">Two runs differing in '+ab.diff_keys.length+' of '+ab.config_keys
     +' configuration '+plural(ab.config_keys,'key')+': '+esc(ab.diff_keys.join(', '))
-    +'. Same control, same recorded opponent, same '+commas(ab.episodes)+'-battle probe, same play mode.</div>';
+    +'. Same control, same recorded opponent, same '+commas(ab.episodes)+'-battle probe'
+    /* Never "same play mode" off two silences. Both runs recording nothing
+       satisfies one.mode === two.mode and says nothing at all, and greedy
+       and sampled on one set of weights differ by 2.3x here -- so if these
+       two probes were not played the same way the paired mean is not a
+       quantity. The header chip already says "mode unknown"; this sentence
+       may not contradict it. */
+    +(ab.mode_recorded?(', same play mode ('+esc(String(ab.mode))+').')
+      :'. Neither run recorded how it was played, so the play mode is not on that list: '
+       +'these two probes are not known to have been played the same way.')+'</div>';
   out+='<div class="caption">&#177;'+mag(ab.sd)+' is one standard deviation of the '+ab.n+' paired '
     +plural(ab.n,'difference')+', and '+ab.wins+' of '+ab.n+' favour '+esc(ab.a.name)
     +'. A single update tells you nothing'
@@ -3058,10 +3295,23 @@ function abMarkup(ab){
     +plural(ab.replayed.length,'was','were')+' written twice after a resume. Both readings are drawn, hollow '
     +'for the replay; the line follows the first. '
     +(ab.alt?('Taking the replay instead gives '+sd(ab.alt.mean)+' rather than '+sd(ab.mean)+'.'):'')+'</div>';
+  var longer=(ab.a_last_update>=ab.b_last_update)?ab.a:ab.b;
+  var shorter=(ab.a_last_update>=ab.b_last_update)?ab.b:ab.a;
   out+='<div class="caption">'+esc(ab.rule)+' &mdash; '+esc(ab.a.name)+' is at update '+ab.a_last_update
-    +' and '+esc(ab.b.name)+(ab.b.live===false?' stopped at ':' has reached ')+ab.b_last_update
-    +'. The faded tail is every reading '+esc(ab.a.name)+' took after that, drawn so a stopped run is not '
-    +'read as a losing one.</div>';
+    +' and '+esc(ab.b.name)+(ab.b.live===false?' stopped at ':' has reached ')+ab.b_last_update+'. '
+    +((tail.length||tailB.length)
+      ?('The faded tail is every reading '+esc(longer.name)+' took after '+esc(shorter.name)+' stopped at '
+        +stopAt+', drawn so a stopped run is not read as a losing one.')
+      :'Neither run has a reading past the other, so there is no tail to draw.')
+    +'</div>';
+  out+='<div class="caption">The upper panel runs from '+num(lo,2)+' to '+num(hi,2)+' in lift and the '
+    +'difference panel from '+num(dlo,2)+' to '+num(dhi,2)+', over updates '+x0+' to '+x1+'. Stated here '
+    +'because the numbers inside the picture render at about 5px at this page&rsquo;s width.</div>';
+  (ab.same_run||[]).forEach(function(p){
+    out+='<div class="caption">'+esc(p.join(' and '))+' were refused as a pair: they hold the same '
+      +'readings, so that is one run reached through two roots and not two runs. Subtracting it from '
+      +'itself gives a mean of exactly zero over every update it has, with the most weight anything '
+      +'here can carry.</div>';});
   return out+'</div>';
 }
 
@@ -3082,13 +3332,11 @@ function sweepMarkup(sw){
     out+='<div class="empty">no verdict file records a sweep against a named opponent</div>';
   }else{
     sw.families.forEach(function(f){
-      var chip=scaleChip(f.scale),weights={};
-      f.sections.forEach(function(s){s.arms.forEach(function(a){
-        weights[a.weight]=(weights[a.weight]||0)+1;});});
+      var chip=scaleChip(f.scale);
       out+='<div class="lbl" style="margin-top:18px">'+esc(f.family)+' &mdash; '+f.checkpoints+' '
         +plural(f.checkpoints,'checkpoint')+' &middot; <span class="chip '+chip.cls+'">'+esc(chip.text)
         +'</span> &middot; '+commas(f.episodes)+' battles each</div>';
-      f.sections.forEach(function(s){out+=ladderSection(s,{control:null},weights);});
+      f.sections.forEach(function(s){out+=ladderSection(s,{control:null});});
       out+='<div class="caption">'+f.checkpoints+' '+plural(f.checkpoints,'checkpoint')+', '
         +f.sections.map(function(s){return s.mode||'play mode never recorded';}).join(' and ')+', '
         +commas(f.episodes)+' battles each, vs '+esc(String(f.scale.opponent))+' (recorded). '
@@ -3153,6 +3401,8 @@ function precisionMarkup(pr){
     +esc(chip.text)+'</span><span class="chip dim">'+commas(pop?pop.episodes:null)+' battles</span></span></h3>'
     +'<svg viewBox="0 0 640 150" role="img" aria-label="interval half-widths in standard deviations">'
     +body+'</svg>';
+  out+='<div class="caption">The strip runs from 0.00 to '+num(top,2)+' in lift, left to right. Stated '
+    +'here because the numbers inside the picture render at about 5px at this page&rsquo;s width.</div>';
   out+='<ul class="why"><li>'+swatch(A,'')+pr.half.length+' recorded 95% '+plural(pr.half.length,'interval')
     +', '+commas(pop?pop.episodes:null)+' battles each, against a recorded '+esc(String(pop?pop.opponent:''))
     +' opponent'+((pr.half.length>1&&pr.median!==null&&pr.median!==undefined)
@@ -3161,8 +3411,12 @@ function precisionMarkup(pr){
   if(pr.probes.derived_half!==null&&pr.probes.derived_half!==undefined)
     out+='<li>'+swatch(B,'')+'&#177;'+num(pr.probes.derived_half,3)+' is what '+commas(pr.probes.episodes)
       +' battles would give, if a probe carried an interval: '+esc(pr.probes.rule)+'. '
-      +commas(pr.probes.count)+' '+plural(pr.probes.count,'reading')+' on this page were taken at that size '
-      +'and '+commas(pr.without_interval)+' lift '+plural(pr.without_interval,'reading')
+      +commas(pr.probes.count)+' '+plural(pr.probes.count,'reading on this page records',
+        'readings on this page record')+' that size, and '+commas(pr.probes.unrecorded)+' '
+      +plural(pr.probes.unrecorded,'records','record')
+      +' no battle count at all &mdash; the derived figure does not '
+      +'apply to those, and several of them are 150-battle evaluations whose own files record a half-width '
+      +'nearer 0.23. '+commas(pr.without_interval)+' lift '+plural(pr.without_interval,'reading')
       +' in total carry no interval at all.</li>';
   if(rep) out+='<li>'+swatch(C,'')+'The same weights measured twice: greedy repeats to every digit ('
     +esc(String(rep.greedy))+') while sampled moves '+num(rep.spread,3)+', across '
@@ -3196,9 +3450,18 @@ function groupSpark(g){
     return '<div class="caption">No trend is drawn here: these readings record no control rate, so they are '
       +'not known to share one axis &mdash; which is exactly why this card is not ordered.</div>';
   var runs=(g.runs||[]).filter(function(r){return r.series&&r.series.length;});
-  if(!runs.length) return '';
+  /* Runs whose readings are a list and not a trajectory. `_groups_of`
+     refuses to build a series for a ranking job's arm table -- separate
+     checkpoints sorted best-first -- and for a run read both greedily and
+     sampled, and hands back the reason. The reason is printed where the line
+     would have been, because a card that silently omits a run reads as a
+     card that never had it. */
+  var why=(g.runs||[]).filter(function(r){return r.no_series;}).map(function(r){
+    return '<div class="caption">No line for '+esc(r.name)+' &mdash; '+esc(r.no_series)
+      +'. Its readings are listed in the card above.</div>';}).join('');
+  if(!runs.length) return why;
   if(runs.every(function(r){return r.series.length<2;}))
-    return '<div class="caption">One reading each &mdash; a trend needs two.</div>';
+    return '<div class="caption">One reading each &mdash; a trend needs two.</div>'+why;
   var w=640,h=120,padL=40,padR=64,padT=10,padB=18;
   var n=1,lo=0,hi=0;
   runs.forEach(function(r){
@@ -3211,6 +3474,34 @@ function groupSpark(g){
   var wheel=[A,D,B,C,G];
   var body='<line class="zero" x1="'+padL+'" y1="'+Y(0).toFixed(1)+'" x2="'+(w-padR)+'" y2="'
     +Y(0).toFixed(1)+'"/>';
+  /* A ruler, not a band. A band around zero would say these readings are
+     being tested against zero; a free-standing arrow says only how far one
+     reading moves on its own. Chosen before the lines are drawn, because the
+     end labels have to be told where its column starts: parked at w-padR+30
+     while labels were clamped to w-3, the two shared pixels and every run
+     name on this page was painted through the rule.
+
+     Only runs that survived `_groups_of`'s refusals can be the source, since
+     only they have a series at all -- a ranking table's uneven sorted gaps
+     were being published as this card's measurement noise, 13x the floor the
+     replicate actually measured. */
+  var source=runs[0];
+  runs.forEach(function(r){if(r.series.length>source.series.length) source=r;});
+  var ruled=(source.noise!==null&&source.noise!==undefined);
+  var rx=w-padR+30,mid=(padT+h-padB)/2;
+  var want=ruled?(source.noise/(hi-lo))*(h-padT-padB):0;
+  /* Bounded to the plot band. Unbounded, a run whose noise runs past about
+     0.57 of its own domain put both end caps and the magnitude label outside
+     the 120-unit viewBox, where they are not drawn at all -- leaving a bare
+     full-height line indistinguishable from a plot border under a caption
+     still calling it a scale mark. */
+  var clipped=ruled&&want>(mid-padT-4);
+  var half=clipped?(mid-padT-4):want;
+  var tag=ruled?num(source.noise,2):'';
+  /* Where the names have to stop: the ruler's own magnitude label is centred
+     on rx, so half its width is the first pixel a name may not reach. 6.2
+     units per character is the same figure endLabel measures with. */
+  var lim=ruled?(rx-(1+tag.length)*6.2/2+1):w;
   var names=runs.map(function(r){return r.name;});
   var ends=unstack(runs.map(function(r){return Y(r.series[r.series.length-1][1])+3.4;}),11);
   runs.forEach(function(r,i){
@@ -3223,16 +3514,9 @@ function groupSpark(g){
         +r.series.map(function(p,k){return (k?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1);}).join(' ')
         +'"/>';
     }
-    body+=endLabel(X(r.series[r.series.length-1][0])+5,ends[i],distinctPart(r.name,names),col,w);
+    body+=endLabel(X(r.series[r.series.length-1][0])+5,ends[i],distinctPart(r.name,names),col,lim);
   });
-  /* A ruler, not a band. A band around zero would say these readings are
-     being tested against zero; a free-standing arrow says only how far one
-     reading moves on its own. */
-  var source=runs[0];
-  runs.forEach(function(r){if(r.series.length>source.series.length) source=r;});
-  var ruled=(source.noise!==null&&source.noise!==undefined);
   if(ruled){
-    var rx=w-padR+30,mid=(padT+h-padB)/2,half=(source.noise/(hi-lo))*(h-padT-padB);
     body+='<line x1="'+rx+'" y1="'+(mid-half).toFixed(1)+'" x2="'+rx+'" y2="'+(mid+half).toFixed(1)
       +'" stroke="'+G+'" stroke-width="1"/>'
       +'<line x1="'+(rx-3)+'" y1="'+(mid-half).toFixed(1)+'" x2="'+(rx+3)+'" y2="'+(mid-half).toFixed(1)
@@ -3240,7 +3524,7 @@ function groupSpark(g){
       +'<line x1="'+(rx-3)+'" y1="'+(mid+half).toFixed(1)+'" x2="'+(rx+3)+'" y2="'+(mid+half).toFixed(1)
       +'" stroke="'+G+'" stroke-width="1"/>'
       +'<text class="lbl-s" x="'+rx+'" y="'+(mid-half-4).toFixed(1)+'" text-anchor="middle">&#177;'
-      +num(source.noise,2)+'</text>';
+      +tag+'</text>';
   }
   body+='<line class="axis" x1="'+padL+'" y1="'+(h-padB)+'" x2="'+(w-padR)+'" y2="'+(h-padB)+'"/>';
   body+='<text class="lbl-s" x="3" y="'+(padT+8)+'">'+hi.toFixed(2)+'</text>';
@@ -3254,15 +3538,20 @@ function groupSpark(g){
   out+='<div class="caption">The x axis is the reading number, not the step count: '+DATA.alltime.resumed+' '
     +plural(DATA.alltime.resumed,'run')+' on this page replayed '+plural(DATA.alltime.resumed,'its','their')
     +' step counter after a resume, and a step axis folds those readings on top of each other.</div>';
-  if(ruled) out+='<div class="caption">&#177;'+num(source.noise,2)+' is '+esc(source.noise_rule)
-    +', measured on '+esc(source.name)+' &mdash; the longest series in this card. It stands beside the lines '
-    +'rather than as a band around zero, because it says how far one reading moves, not what any of them is '
-    +'being tested against.</div>';
+  out+='<div class="caption">The lines run from '+num(lo,2)+' to '+num(hi,2)+' in lift, over '
+    +'readings 1 to '+n+'. Stated here because the numbers inside the picture render at about 5px at '
+    +'this page&rsquo;s width.</div>';
+  if(ruled) out+='<div class="caption">&#177;'+tag+' is '+esc(source.noise_rule)
+    +', measured on '+esc(source.name)+' &mdash; the longest trajectory in this card. It stands beside the '
+    +'lines rather than as a band around zero, because it says how far one reading moves, not what any of '
+    +'them is being tested against.'
+    +(clipped?(' The arrow is cut off at the top and bottom of the plot: '+esc(source.name)+' moves further '
+      +'between readings than this picture is tall.'):'')+'</div>';
   var doubled=runs.filter(function(r){return r.evals>r.series.length;});
   if(doubled.length) out+='<div class="caption">'+doubled.map(function(r){
     return (r.evals-r.series.length)+' of '+esc(r.name)+'&rsquo;s readings';}).join(', ')
     +' were written twice with identical values and are counted once.</div>';
-  return out;
+  return out+why;
 }
 
 /* What has moved since this browser last opened the view. Compared on
@@ -3388,7 +3677,13 @@ function demotedMarkup(A){
    not comparable across sections and the caption says so: greedy exceeds
    sampled for every paired checkpoint here, so a single sorted list is driven
    by how each policy was played more than by its weights. */
-function ladderSection(g,b,weights){
+function ladderSection(g,b){
+  /* Counted inside this section and never across the family or the block. A
+     weight measured greedy and sampled appears once in each section, so a
+     count taken across both sections is 2 for every arm and the bracket
+     marks every row -- which is the same as marking none. */
+  var weights={};
+  g.arms.forEach(function(a){weights[a.weight]=(weights[a.weight]||0)+1;});
   var lifts=g.arms.map(function(a){return a.lift;}).concat([0]);
   /* An arm's interval, where it has one, stretches the section's own scale so
      the whisker fits inside the track rather than being clipped at the end of
@@ -3425,14 +3720,12 @@ function ladderSection(g,b,weights){
 function ladderMarkup(A){
   var b=A.block;
   if(!b) return '';
-  var weights={};
-  b.arms.forEach(function(a){weights[a.weight]=(weights[a.weight]||0)+1;});
   var c=scaleChip(b.scale);
   var out='<div class="panel"><div class="lbl">'+b.count+' arms &middot; '+commas(b.seeds)
     +' paired seeds each &middot; <span class="chip '+c.cls+'">'+esc(c.text)+'</span> control '+pct(b.control)
     +' w &middot; conditions as the note states them, quoted in full below</div>';
   out+='<div class="note">'+esc(b.note)+'</div>';
-  b.groups.forEach(function(g){out+=ladderSection(g,b,weights);});
+  b.groups.forEach(function(g){out+=ladderSection(g,b);});
   if(b.groups.length>1) out+='<div class="caption">One section per way of playing, each scaled to its own arms: '
     +'bar lengths do not carry from one section to the next, and neither do the rankings. The same weights greedy '
     +'and sampled are two measurements, not two policies.</div>';
@@ -3647,6 +3940,12 @@ function closingMarkup(A){
   if(A.skipped&&A.skipped.length) out+='<div class="caption">Not in the '+A.census+': '+A.skipped.length+' run '
     +plural(A.skipped.length,'directory','directories')+' with a config and no rows at all &mdash; '+esc(A.skipped.join(', '))
     +'. A run that started and produced nothing is exactly what a census is asked about, so it is named here rather than dropped.</div>';
+  if(A.duplicate_runs&&A.duplicate_runs.length) out+='<div class="caption">'+A.duplicate_runs.length+' run '
+    +plural(A.duplicate_runs.length,'label')+' reachable through a second root held the same readings as one '
+    +'already read and '+plural(A.duplicate_runs.length,'was','were')+' not treated as a second run: '
+    +esc(A.duplicate_runs.map(function(p){return p[1]+' is '+p[0];}).join(', '))
+    +'. The matched pair cannot select a run against itself, which would report a paired mean of exactly '
+    +'zero over every update it has.</div>';
   if(A.duplicate_verdicts&&A.duplicate_verdicts.length) out+='<div class="caption">'+A.duplicate_verdicts.length
     +' verdict '+plural(A.duplicate_verdicts.length,'file')+' reachable through a second root held the same content as one already read, '
     +'and '+plural(A.duplicate_verdicts.length,'was','were')+' counted once rather than twice: '+esc(A.duplicate_verdicts.join(', '))+'.</div>';

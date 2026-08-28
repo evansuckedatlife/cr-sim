@@ -258,8 +258,13 @@ def _node(source):
     with tempfile.TemporaryDirectory() as tmp:
         script = pathlib.Path(tmp) / "page.js"
         script.write_text(source, encoding="utf-8")
+        # Decoded as UTF-8 and not as the console codepage: node writes its
+        # stdout as UTF-8, and the page draws a literal middle dot between a
+        # point's arm and the sweep it came out of. Read as cp1252 that
+        # arrives as two mojibake characters and no test can assert on the
+        # label at all.
         result = subprocess.run([node, str(script)], capture_output=True,
-                                text=True, timeout=60)
+                                text=True, encoding="utf-8", timeout=60)
     assert result.returncode == 0, result.stderr
     return result.stdout
 
@@ -1666,6 +1671,20 @@ def test_the_greedy_sampled_scatter_puts_both_arms_on_one_domain():
     assert collapsed[2] == "#A2352C" and healthy[2] == "#2E86AB"
     assert level[2] == "#2E86AB"
 
+    # The chip is the gate's answer read back to the reader, and nothing was
+    # checking it: every one of these records was measured against a recorded
+    # random opponent over 150 battles, so naming any other opponent or any
+    # other battle count here is the project's signature failure printed as a
+    # label. The negative half is what makes this non-vacuous.
+    assert "vs random (recorded)" in out and "idle" not in out
+    assert "150 battles" in out and "40 battles" not in out
+
+    # One marker per sweep, and the sweep on every label -- not only where two
+    # arms happen to share a name. These three came out of one sweep, so they
+    # share a marker and the caption says which.
+    assert "<b>fam</b> (circle): healthy, level, collapsed" in out
+    assert "healthy\u00b7fam" in out and "collapsed\u00b7fam" in out
+
     # The intervals are drawn from the recorded ones and from nothing else.
     # Asserted as a ratio against the distance between two points, so it holds
     # whatever the padding rule is: healthy's greedy interval is 0.40 wide and
@@ -1689,8 +1708,17 @@ def test_the_greedy_sampled_scatter_counts_a_second_population_rather_than_mergi
              _record("big", "other", "big", "sampled", 7.0, 6.5, 7.5, episodes=300),
              _record("huge", "other", "huge", "greedy", 9.0, 8.5, 9.5, episodes=300),
              _record("huge", "other", "huge", "sampled", 7.5, 7.0, 8.0, episodes=300)]
+    # And one checkpoint measured both ways that names no opponent at all --
+    # the pre-fix shape of every verdict on this project. Counted in the
+    # caption, exactly as the second population is, because the two halves of
+    # "counted, never merged" are one contract.
+    blind = [dict(r) for r in _BOTH_WAYS[:2]]
+    for record in blind:
+        record["name"] = record["checkpoint"] = "runs/fam/blind/cloned.pt"
+        record.pop("eval_opponent")
     out = _call_multi(_QUIET, "gvsMarkup(DATA.alltime.modes)",
-                      extras={"verdicts": {"a": _BOTH_WAYS, "b": other}})
+                      extras={"verdicts": {"a": _BOTH_WAYS, "b": other,
+                                           "c": blind}})
 
     dots = [t for t in _tags(out, "circle") if t.get("r") == "3.2"]
     assert len(dots) == 3, "two battle counts were plotted on one axis"
@@ -1700,6 +1728,7 @@ def test_the_greedy_sampled_scatter_counts_a_second_population_rather_than_mergi
     assert "2.11" in labels and "-2.41" in labels, \
         "the axis stretched around a population that is not drawn"
     assert "Another 2 checkpoints faced random over 300 battles" in out
+    assert "1 more checkpoint records no opponent at all and is not drawn." in out
 
 
 @needs_node
@@ -1722,11 +1751,93 @@ def test_one_checkpoint_measured_both_ways_is_still_drawn():
 
 
 @needs_node
+def test_two_sweeps_on_the_scatter_are_two_markers_and_never_one():
+    """The scatter's only guard is the opponent and the battle count.
+
+    That is a control-based guard, and it cannot separate two checkpoints out
+    of different sweeps that state the same configuration, faced the same
+    recorded opponent over the same battles and read opposite signs three
+    standard deviations apart -- their controls genuinely match. The sweep is
+    the only thing on disk that records what was held fixed, so it is drawn
+    into the mark and printed on every label, and a checkpoint out of no
+    sweep is marked as belonging to none.
+    """
+    two = _BOTH_WAYS + [
+        _record("v1", "obsablate", "v1", "greedy", -1.60, -1.86, -1.34),
+        _record("v1", "obsablate", "v1", "sampled", 0.12, -0.10, 0.34)]
+    solo = [dict(record) for record in _BOTH_WAYS[:2]]
+    for record in solo:
+        record["name"] = "baseline"
+        record["checkpoint"] = "runs/_diag/cloned.pt"
+
+    out = _call_multi(_QUIET, "gvsMarkup(DATA.alltime.modes)",
+                      extras={"verdicts": {"a": two, "b": solo}})
+    circles = [t for t in _tags(out, "circle") if t.get("r") == "3.2"]
+    filled = [t for t in circles if t.get("fill") != "none"]
+    rings = [t for t in circles if t.get("fill") == "none"]
+
+    assert len(filled) == 3, "the largest sweep keeps the filled circle"
+    assert len(_tags(out, "rect")) == 1, "the second sweep shares the first's mark"
+    assert len(rings) == 1, "a checkpoint out of no sweep is not marked as one"
+    assert "<b>fam</b> (circle): healthy, level, collapsed" in out
+    assert "<b>obsablate</b> (square): v1" in out
+    assert "<b>no sweep</b> (ring): baseline" in out
+    assert "comparable inside one sweep only" in out
+
+
+@needs_node
+def test_the_scatter_says_how_many_points_it_could_not_label():
+    """Label stacking in fixed steps has no lower bound.
+
+    The live page already stacks every point into one unbroken column; a few
+    more checkpoints and the lowest names fall below the plot and then out of
+    the viewBox, where they are not drawn at all. A label dropped without
+    saying so is the failure this page otherwise refuses, and the picture
+    gains one point per new sweep checkpoint.
+    """
+    crowd = []
+    for i in range(30):
+        arm = "w%02d" % i
+        crowd += [_record(arm, "big", arm, "greedy", 1.0 + i * 0.001),
+                  _record(arm, "big", arm, "sampled", 0.2 + i * 0.0001)]
+    out = _call_multi(_QUIET, "gvsMarkup(DATA.alltime.modes)",
+                      extras={"verdicts": {"v": crowd}})
+
+    drawn = [t for t in _tags(out, "circle") if t.get("r") == "3.2"]
+    assert len(drawn) == 30, "the picture did not draw its input"
+    labels = re.findall(r'<text class="lbl-s" x="[\d.]+" y="([\d.]+)" fill=', out)
+    assert labels, "nothing was labelled at all"
+    assert max(float(y) for y in labels) <= 354, \
+        "a label was drawn below the plot floor, or outside the viewBox"
+    missing = 30 - len(labels)
+    assert missing > 0, "the fixture no longer crowds the label column"
+    assert ("%d points are drawn without a name" % missing) in out
+    # Every name is still on the page at reading size, in the sweep list.
+    assert "<b>big</b> (circle): w00, w01" in out
+    assert "w29" in out
+
+
+@needs_node
 def test_a_page_with_no_paired_verdict_draws_no_scatter():
-    """Nothing measured both ways is an empty card, not an empty axis."""
+    """Nothing measured both ways is an empty card, not an empty axis.
+
+    And so is a checkpoint measured both ways that records no opponent: those
+    are the pre-fix verdicts, and a reading on an unknown scale is not a
+    smaller finding than no reading, it is the one thing this axis may not
+    carry. A page with no verdicts at all proves only that `modes.recorded`
+    was empty, so it never reached the filter's opponent clause.
+    """
     out = _call_multi(_QUIET, "gvsMarkup(DATA.alltime.modes)")
     assert "no verdict records both ways of playing" in out
     assert "<svg" not in out
+
+    blind = [dict(r) for r in _BOTH_WAYS[:2]]
+    for record in blind:
+        record.pop("eval_opponent")
+    out = _call_multi(_QUIET, "gvsMarkup(DATA.alltime.modes)",
+                      extras={"verdicts": {"v": blind}})
+    assert "records no opponent at all, so it is not drawn on an axis" in out
+    assert "<svg" not in out and "<circle" not in out
 
 
 # ---------------------------------------------------------- the matched pair
@@ -1788,9 +1899,129 @@ def test_the_matched_pair_is_paired_at_equal_update_and_not_at_equal_time():
 
     assert (ab["a_last_update"], ab["b_last_update"]) == (15, 12)
     assert ab["tail"] == [[15, 1.9]], "the longer run's readings past the rule"
+    assert ab["tail_b"] == [], "arm-b stopped first, so it has nothing past it"
     assert (ab["a_readings"], ab["b_readings"]) == (7, 4)
     assert ab["episodes"] == 40 and ab["scale"]["opponent"] == "random"
     assert ab["mode"] is None and ab["rule"]
+    # Neither run recorded how it played, and two silences are not a match.
+    assert ab["mode_recorded"] is False
+    assert ab["same_run"] == []
+
+
+#: The same pair with one update where arm-b leads. Every difference in
+#: `_AB_A` is positive, so "N of M favour" reads the same whether `wins`
+#: counts the positive differences or simply all of them.
+_AB_MIXED = [("arm-a", _ab_run([(3, 3000, 1.0), (6, 6000, 1.2), (9, 9000, 0.5),
+                                (12, 12000, 1.6)]), False),
+             ("arm-b", _AB_B, False)]
+
+
+@needs_node
+def test_an_update_the_other_arm_won_is_counted_against_the_leader():
+    """`wins` is a count of signs, and nothing had ever shown it one."""
+    _page, payload = render_multi(_AB_MIXED, configs=_AB_CONFIGS)
+    ab = payload["alltime"]["ab"]
+
+    assert [round(p["d"], 6) for p in ab["points"]] == [0.4, 0.5, -0.3, 0.7]
+    assert (ab["n"], ab["wins"]) == (4, 3), \
+        "the update arm-b won was counted as a win for arm-a"
+
+    out = _call_multi(_AB_MIXED, "abMarkup(DATA.alltime.ab)", configs=_AB_CONFIGS)
+    assert "3 of 4 favour arm-a" in out and "4 of 4 favour" not in out
+    # And the losing difference is drawn on the losing side of zero.
+    below = [t for t in _tags(out, "circle")
+             if t.get("r") == "3" and t.get("fill") == "#A2352C"]
+    assert len(below) == 1, "the negative difference is not drawn in its own colour"
+
+
+def test_a_run_reached_through_two_roots_is_never_paired_against_itself():
+    """`_run_roots` scans the agent worktrees, so a copy of a run arrives
+    under a second label with identical rows. Every clause of the pair's gate
+    passes on it, it wins the tie-break on shared updates, and the panel then
+    reports a paired mean of exactly zero over every update -- one run
+    subtracted from itself, with the most weight anything here can carry.
+    """
+    copy = [("arm-a", _AB_A, True), ("arm-b", _AB_B, False),
+            ("deadbee:arm-a", list(_AB_A), False)]
+    configs = dict(_AB_CONFIGS, **{"deadbee:arm-a": dict(_AB_CONFIGS["arm-a"])})
+    _page, payload = render_multi(copy, configs=configs)
+    ab = payload["alltime"]["ab"]
+
+    assert (ab["a"]["name"], ab["b"]["name"]) == ("arm-a", "arm-b"), \
+        "a run was paired against a copy of itself"
+    assert round(ab["mean"], 6) == 0.55 and ab["n"] == 4
+    assert ab["same_run"] == [["arm-a", "deadbee:arm-a"]]
+    assert payload["alltime"]["duplicate_runs"] == [["arm-a", "deadbee:arm-a"]]
+
+    # Two runs that merely agree about one reading are still two runs.
+    near = _ab_run([(3, 3000, 1.0), (6, 6000, 1.2), (9, 9000, 1.4),
+                    (12, 12000, 1.7)])
+    _page, payload = render_multi(
+        [("arm-a", _AB_A, True), ("arm-b", _AB_B, False), ("arm-c", near, False)],
+        configs=dict(_AB_CONFIGS, **{"arm-c": {"head": "conv", "note": "c",
+                                               "lr": 3e-4, "seed": 1}}))
+    assert payload["alltime"]["duplicate_runs"] == []
+
+
+@needs_node
+def test_the_run_that_kept_going_keeps_its_readings_when_it_is_the_losing_one():
+    """A and B are oriented by which run scored better, not by which ran on.
+
+    With only an a-tail, a losing run that carried on lost every reading it
+    took after the winner stopped -- and the axis still printed A's last
+    update at the pixel column belonging to B's.
+    """
+    short = _ab_run([(3, 3000, 1.2), (6, 6000, 1.3), (9, 9000, 1.25),
+                     (12, 12000, 1.35), (15, 15000, 1.30)])
+    long_weak = _ab_run(
+        [(3, 3000, 0.5), (6, 6000, 0.6), (9, 9000, 0.55), (12, 12000, 0.7),
+         (15, 15000, 0.65)]
+        + [(u, u * 1000, 1.0 + 0.1 * ((u - 18) // 3)) for u in range(18, 61, 3)])
+    runs = [("short-strong", short, False), ("long-weak", long_weak, False)]
+    configs = {"short-strong": {"head": "a", "lr": 3e-4},
+               "long-weak": {"head": "b", "lr": 3e-4}}
+
+    _page, payload = render_multi(runs, configs=configs)
+    ab = payload["alltime"]["ab"]
+    assert (ab["a"]["name"], ab["b"]["name"]) == ("short-strong", "long-weak")
+    assert (ab["a_last_update"], ab["b_last_update"]) == (15, 60)
+    assert ab["tail"] == []
+    assert [u for u, _v in ab["tail_b"]] == list(range(18, 61, 3)), \
+        "the longer run's 15 later readings are in the payload nowhere"
+
+    out = _call_multi(runs, "abMarkup(DATA.alltime.ab)", configs=configs)
+    faded = [t for t in _tags(out, "path") if t.get("opacity") == ".35"]
+    assert len(faded) == 1 and faded[0]["stroke"] == "#8A6516", \
+        "the tail was not drawn, or was drawn in the other run's colour"
+    assert len(_path_points(faded[0]["d"])) == 16
+
+    # The right end of the axis is labelled with the update it maps to.
+    ends = re.findall(r'<text class="lbl-s" x="576" y="298" text-anchor="end">'
+                      r'(\d+)</text>', out)
+    assert ends == ["60"], "the axis printed one run's last update at another's column"
+    # The rule stands where the first run stopped, and that is not B here.
+    rule = re.findall(r'<text class="lbl-s" x="[-\d.]+" y="24"[^>]*>([^<]*)</text>',
+                      out)
+    assert rule == ["short-strong stopped"],         "the rule names the run that stopped last, not the one that stopped first"
+    axis = [t for t in _tags(out, "line") if t.get("class") == "axis"]
+    at = [float(t["x1"]) for t in axis if t["x1"] == t["x2"]]
+    assert len(at) == 1 and abs(at[0] - 156.0) < 0.5,         "the rule is not at update 15, where the shared window ends"
+    assert ("The faded tail is every reading long-weak took after "
+            "short-strong stopped at 15") in out
+
+
+@needs_node
+def test_two_runs_still_level_print_the_shared_update_once():
+    """Both runs writing and standing at the same update is the ordinary
+    state of the pair this pane exists for. The centred label and the
+    right-hand label are then the same number at the same x.
+    """
+    level = [("arm-a", _ab_run([(3, 3000, 1.0), (6, 6000, 1.2), (9, 9000, 1.4),
+                                (12, 12000, 1.6)]), True),
+             ("arm-b", _AB_B, True)]
+    out = _call_multi(level, "abMarkup(DATA.alltime.ab)", configs=_AB_CONFIGS)
+    axis = re.findall(r'<text class="lbl-s"[^>]*y="298"[^>]*>(\d+)</text>', out)
+    assert axis == ["3", "12"], "the last shared update is printed twice, overlapping"
 
 
 def test_two_runs_on_two_scales_are_never_paired():
@@ -1891,6 +2122,40 @@ def test_the_matched_pair_draws_both_readings_of_a_replayed_update():
     assert "Updates 9 and 12 were written twice after a resume" in out
     assert "+0.300 rather than +0.550" in out
 
+    # The lower panel is where the headline number comes from, and none of it
+    # was asserted: the band, the mean line and every difference dot could be
+    # deleted with the suite green, leaving an empty box under a caption that
+    # still described them.
+    diffs = [t for t in _tags(out, "circle")
+             if t.get("r") == "3" and t.get("fill") == "#26704F"]
+    assert len(diffs) == 4, "the four paired differences are not drawn"
+    ys = [float(t["cy"]) for t in sorted(diffs, key=lambda t: float(t["cx"]))]
+    assert all(200 <= y <= 280 for y in ys), "a difference left its own panel"
+    assert ys == sorted(ys, reverse=True), \
+        "the differences are not ordered by their own value: 0.4 < 0.5 < 0.6 < 0.7"
+    band = [t for t in _tags(out, "rect") if t.get("opacity") == ".14"]
+    assert len(band) == 1, "the one-standard-deviation band is not drawn"
+    mean = [t for t in _tags(out, "line")
+            if t.get("stroke-width") == "1.5" and t.get("stroke") == "#26704F"]
+    assert len(mean) == 1, "the paired mean is not drawn"
+    top, height = float(band[0]["y"]), float(band[0]["height"])
+    assert top < float(mean[0]["y1"]) < top + height, \
+        "the mean line does not sit inside its own standard-deviation band"
+    # +0.4 and +0.7 are more than one standard deviation from +0.55, so they
+    # fall outside the band; +0.5 and +0.6 fall inside it.
+    assert sum(1 for y in ys if top <= y <= top + height) == 2
+
+    # The chip is the gate's answer read back, and it was unchecked. These
+    # rows record a random opponent and no play mode at all, and the caption
+    # may not upgrade that silence into "same play mode".
+    assert "vs random (recorded)" in out and "idle" not in out
+    assert "40 battles" in out
+    assert "mode unknown" in out and "same play mode" not in out
+    assert "Neither run recorded how it was played" in out
+    # Both panels' domains in the DOM, at reading size.
+    assert "The upper panel runs from " in out
+    assert "difference panel from " in out and "over updates 3 to 15" in out
+
     # The rule naming the shorter run is driven by the payload's live flag and
     # never by a file timestamp.
     assert "arm-b stopped" in out and "arm-b still writing" not in out
@@ -1951,6 +2216,14 @@ def test_a_sweep_is_ranked_inside_its_family_and_nowhere_else():
     # The interval travels with the arm, which is what licenses the whiskers.
     assert head["sections"][0]["arms"][0]["ci"] == [1.96, 2.38]
     assert (sweeps["singletons"], sweeps["excluded"]) == (0, 0)
+    # Every arm carries the scale its own chip will print. Nothing checked
+    # that, so the chip could be built from a fabricated opponent and each
+    # ladder row would read "vs idle" under a header still saying "vs
+    # random" -- the project's signature failure, printed as a label.
+    assert [a["scale"]["opponent"] for f in sweeps["families"]
+            for s in f["sections"] for a in s["arms"]] == ["random"] * 8
+    assert [a["scale"]["source"] for f in sweeps["families"]
+            for s in f["sections"] for a in s["arms"]] == ["recorded"] * 8
 
 
 @needs_node
@@ -1986,6 +2259,29 @@ def test_a_sweep_bar_is_scaled_to_its_own_family_and_not_to_the_page():
                - (2.38 - 1.96) / 2.38 * 100) < 0.5
 
     assert "nothing is ranked across families" in out
+
+    # The zero marker is the axis every bar is read against, and pinning it
+    # to the left edge would make every negative bar read as if it started
+    # there. obsablate's greedy section spans -1.86 to 0.06, so zero is at
+    # 96.9% of it; headablate's spans 0 to 2.38, so zero is at the left.
+    zeros = [_percent(t["style"], "left") for t in _tags(out, "b")
+             if "left" in t.get("style", "")]
+    assert len(zeros) == 8
+    assert all(abs(z) < 0.5 for z in zeros[:4]), "headablate's arms are all positive"
+    assert abs(zeros[4] - 96.9) < 0.5 and abs(zeros[5] - 96.9) < 0.5
+    assert abs(zeros[6] - 78.6) < 0.5 and abs(zeros[7] - 78.6) < 0.5
+
+    # A bracket means "this weight appears twice in this ladder". Counted
+    # across the family it was 2 for every arm, once per play mode, which
+    # marks every row and so marks none.
+    assert "bracket" not in out, "every row was bracketed, which says nothing"
+
+    # And every chip the section prints is the one the payload computed:
+    # two family headers, eight arms, two family captions.
+    assert out.count("vs random (recorded)") == 12 and "idle" not in out
+    assert out.count('&middot; <span class="chip good">'
+                     'vs random (recorded)</span>') == 2
+    assert "150 battles each" in out
 
 
 def test_a_family_that_disagrees_about_its_opponent_is_counted_not_drawn():
@@ -2024,6 +2320,70 @@ def test_a_family_that_disagrees_about_its_opponent_is_counted_not_drawn():
 
 
 @needs_node
+def test_a_sweep_holding_one_checkpoint_is_a_singleton_and_not_a_ladder():
+    """One arm is not a sweep, and a bar for it would be nearly full length
+    for having nothing to be measured against. The guard existed and nothing
+    reached it: the only singleton the suite had was a path with no arm level
+    at all, which `_sweep_family` refuses one step earlier.
+    """
+    solo = [_record("only", "solo", "only", "greedy", 1.62, 1.40, 1.85),
+            _record("only", "solo", "only", "sampled", 0.71, 0.50, 0.92)]
+    _page, payload = render_multi(_QUIET, extras={"verdicts": {"s": solo}})
+    sweeps = payload["alltime"]["sweeps"]
+
+    assert sweeps["families"] == [], "a checkpoint was ranked against nothing"
+    assert (sweeps["singletons"], sweeps["excluded"]) == (1, 0)
+
+    out = _call_multi(_QUIET, "sweepMarkup(DATA.alltime.sweeps)",
+                      extras={"verdicts": {"s": solo}})
+    assert '<i style="left:' not in out, "a lone arm was given a bar"
+    assert "1 checkpoint belongs to no sweep" in out
+
+
+@needs_node
+def test_a_checkpoint_measured_by_two_verdict_files_is_one_arm():
+    """Two evaluation processes are writing verdict files right now.
+
+    The same three checkpoints re-measured under a second file name flattened
+    straight into the sections: six peer arms in a three-arm sweep, the same
+    name at two different ranks with nothing telling them apart, under a
+    header that still counted three checkpoints.
+    """
+    first = [_record("w0.1", "pw", "w0.1", "greedy", -1.318),
+             _record("w0.5", "pw", "w0.5", "greedy", -2.802),
+             _record("w1.0", "pw", "w1.0", "greedy", -2.728)]
+    again = [_record("w0.1", "pw", "w0.1", "greedy", -1.018),
+             _record("w0.5", "pw", "w0.5", "greedy", -2.502),
+             _record("w1.0", "pw", "w1.0", "greedy", -2.428)]
+
+    _page, payload = render_multi(
+        _QUIET, extras={"verdicts": {"a": first, "b": again}})
+    sweeps = payload["alltime"]["sweeps"]
+    assert sweeps["families"] == [], \
+        "three checkpoints measured twice were drawn as six peer arms"
+    assert sweeps["excluded"] == 3, "the disagreeing checkpoints are counted"
+
+    # Read twice and agreeing is one reading, and the ladder keeps its arms.
+    _page, payload = render_multi(
+        _QUIET, extras={"verdicts": {"a": first, "b": list(first)}})
+    family = payload["alltime"]["sweeps"]["families"][0]
+    assert family["checkpoints"] == 3
+    assert [len(s["arms"]) for s in family["sections"]] == [3], \
+        "one checkpoint read twice was drawn as two arms"
+
+    # Two different checkpoints that happen to share an arm name are two
+    # arms, and the ladder brackets them so the repeat is visible.
+    twins = [_record("w0.5", "pw", "w0.5", "greedy", -2.802),
+             _record("w0.5", "pw", "w0.5", "greedy", -2.400),
+             _record("w1.0", "pw", "w1.0", "greedy", -2.728)]
+    twins[1]["checkpoint"] = "runs/pw/w0.5/other.pt"
+    out = _call_multi(_QUIET, "sweepMarkup(DATA.alltime.sweeps)",
+                      extras={"verdicts": {"t": twins}})
+    assert out.count("bracket") == 2, \
+        "two arms sharing a name inside one ladder are not marked"
+
+
+@needs_node
 def test_with_no_sweep_on_disk_the_section_says_so():
     out = _call_multi(_QUIET, "sweepMarkup(DATA.alltime.sweeps)")
     assert "no verdict file records a sweep against a named opponent" in out
@@ -2033,13 +2393,18 @@ def test_with_no_sweep_on_disk_the_section_says_so():
 # --------------------------------------------------- what a reading is worth
 
 
+#: Deliberately not in ascending order, and with neither the widest nor the
+#: narrowest at an end. `min` and `max` read the first and last of the sorted
+#: list, so a fixture whose write order and sorted order coincide cannot tell
+#: a sort from no sort at all: written ascending, dropping the sort left
+#: `min` and `max` correct and the whole strip unchanged.
 _INTERVALS = [
-    _record("a", "f", "a", "greedy", 1.0, 0.90, 1.10),      # half 0.10
-    _record("a", "f", "a", "sampled", 0.5, 0.30, 0.70),     # half 0.20
+    _record("a", "f", "a", "greedy", 1.0, 0.74, 1.26),      # half 0.26
+    _record("a", "f", "a", "sampled", 0.5, 0.40, 0.60),     # half 0.10
     _record("b", "f", "b", "greedy", 0.9, 0.70, 1.10),      # half 0.20
-    _record("b", "f", "b", "sampled", 0.4, 0.14, 0.66),     # half 0.26
-    _record("c", "f", "c", "greedy", 0.8, 0.50, 1.10),      # half 0.30
-    _record("c", "f", "c", "sampled", 0.3, -0.10, 0.70),    # half 0.40
+    _record("b", "f", "b", "sampled", 0.4, 0.20, 0.60),     # half 0.20
+    _record("c", "f", "c", "greedy", 0.8, 0.40, 1.20),      # half 0.40
+    _record("c", "f", "c", "sampled", 0.3, 0.00, 0.60),     # half 0.30
 ]
 
 
@@ -2061,6 +2426,36 @@ def test_the_precision_strip_is_built_from_the_recorded_intervals_only():
     assert pr["populations_not_drawn"] == []
     # Every in-run reading on the page, none of which carries an interval.
     assert pr["without_interval"] == payload["alltime"]["lift_rows"] == 1
+    # And none of them recorded a battle count, so none of them is a probe.
+    assert (pr["probes"]["count"], pr["probes"]["unrecorded"]) == (0, 1)
+
+
+@needs_node
+def test_a_reading_that_records_no_battle_count_is_not_called_a_probe():
+    """The 40-episode default is an estimate everywhere else on this page.
+
+    `runs/headtohead-aug27`, `runs/passweight-sweep` and `runs/cloned` record
+    `episodes: 150` and no `eval_episodes`, and counting them at the probe
+    size stated as fact -- the record +1.813 among them -- what the battle
+    ledger on the same page carefully calls an estimate, and handed a reader
+    a half-width twice what those files record.
+    """
+    common = dict(eval_win=0.5, control_win=0.26, eval_opponent="random")
+    rows = [_row(1, 1000, episodes=150, eval_lift_sd=1.813, **common),
+            _row(2, 2000, eval_episodes=40, eval_lift_sd=0.4, **common),
+            _row(3, 3000, eval_episodes=150, eval_lift_sd=0.5, **common)]
+    runs = [("mixed", rows, False)]
+
+    _page, payload = render_multi(runs, extras={"verdicts": {"v": _INTERVALS}})
+    pr = payload["alltime"]["precision"]
+    assert pr["probes"]["count"] == 1, \
+        "a reading recording 150 battles, or none at all, was counted as a probe"
+    assert pr["probes"]["unrecorded"] == 1
+
+    out = _call_multi(runs, "precisionMarkup(DATA.alltime.precision)",
+                      extras={"verdicts": {"v": _INTERVALS}})
+    assert "1 reading on this page records that size" in out
+    assert "1 records no battle count at all" in out
 
 
 def test_a_second_interval_population_is_counted_and_never_averaged_in():
@@ -2102,6 +2497,17 @@ def test_the_same_weights_are_joined_on_a_bit_equal_reading_and_nothing_else():
     assert round(reps[0]["spread"], 10) == 0.024898934
     assert reps[0]["sources"] == ["one", "two"]
 
+    # The bar is the drawn half of that finding, and nothing asserted it.
+    out = _call_multi(_QUIET, "precisionMarkup(DATA.alltime.precision)",
+                      extras={"verdicts": {"one": twin, "two": other}})
+    bar = [t for t in _tags(out, "line") if t.get("stroke-width") == "3"]
+    assert len(bar) == 1, "the replicate spread bar is not drawn"
+    span = float(bar[0]["x2"]) - float(bar[0]["x1"])
+    pr = payload["alltime"]["precision"]
+    top = max(pr["max"], pr["probes"]["derived_half"], reps[0]["spread"]) * 1.15
+    assert abs(span - reps[0]["spread"] / top * (640 - 44 - 56)) < 0.2
+    assert "0.025" in out and "greedy repeats to every digit" in out
+
     nearly = dict(other, greedy=dict(other["greedy"], lift=same + 1e-12))
     _page, payload = render_multi(
         _QUIET, extras={"verdicts": {"one": twin, "two": nearly}})
@@ -2120,6 +2526,26 @@ def test_the_precision_strip_draws_a_tick_for_every_interval_and_refuses_one():
     # ticks are in the ratio of the half-widths and of nothing else.
     assert xs[1] == xs[2]
     assert abs((xs[3] - xs[0]) / (xs[1] - xs[0]) - 0.16 / 0.10) < 0.02
+
+    # The blue mark is the derived probe half-width and not the median: they
+    # differ by the root of the battle-count ratio, so drawing one at the
+    # other's x puts two quantities at one place under two labels.
+    _page, payload = render_multi(_QUIET, extras={"verdicts": {"v": _INTERVALS[:4]}})
+    pr = payload["alltime"]["precision"]
+    top = max(pr["max"], pr["probes"]["derived_half"]) * 1.15
+    at = lambda v: 44 + v / top * (640 - 44 - 56)
+    derived = [t for t in _tags(out, "line") if t.get("y1") == "70"]
+    median = [t for t in _tags(out, "line") if t.get("y1") == "26"]
+    assert len(derived) == 1 and len(median) == 1
+    assert abs(float(derived[0]["x1"]) - at(pr["probes"]["derived_half"])) < 0.2
+    assert abs(float(median[0]["x1"]) - at(pr["median"])) < 0.2
+    assert float(derived[0]["x1"]) - float(median[0]["x1"]) > 150, \
+        "the derived probe mark was drawn at the median"
+
+    # And the chip reports the population the strip actually drew.
+    assert "vs random (recorded)" in out and "idle" not in out
+    assert "150 battles" in out
+    assert ("The strip runs from 0.00 to %.2f in lift" % top) in out
 
     # One interval is a reading, not a spread, so no median is drawn over it.
     lone = _call_multi(_QUIET, "precisionMarkup(DATA.alltime.precision)",
@@ -2197,6 +2623,167 @@ def test_the_noise_ruler_is_the_spread_of_consecutive_readings():
     # the figure is the spread of the readings rather than of the differences.
     climbing = _spark_run([0.0, 0.1, 0.2, 0.3])["noise"]
     assert climbing < 1e-8 < measured
+
+
+@needs_node
+def test_a_job_that_ranks_its_arms_draws_no_line_and_no_noise():
+    """A table of arms sorted best-first is not a run over time.
+
+    `runs/headtohead-aug27` holds four checkpoints played two ways, written
+    best-first, and its own config note says so in as many words. Joined into
+    a line it drew a smooth descent that nothing descended; worse, the
+    unevenness of that sort's gaps was then published as the card's
+    measurement noise -- 13 times the floor the bit-equal replicate actually
+    measured, with the two figures on one page.
+    """
+    arms = [("cloned, greedy", 1.813), ("ppo, greedy", 1.239),
+            ("cloned, sampled", 0.775), ("ppo, sampled", 0.422)]
+    rows = [_row(i + 1, 0, episodes=150, arm=name, eval_lift_sd=lift,
+                 eval_win=0.6, control_win=0.26, eval_opponent="random")
+            for i, (name, lift) in enumerate(arms)]
+    runs = [("headtohead", rows, False)]
+
+    _page, payload = render_multi(runs, kinds={"headtohead": "job"})
+    run = payload["alltime"]["groups"][0]["runs"][0]
+    assert run["ranking"] is True, "the fixture is not a ranking job"
+    assert run["series"] == [], "a table of arms was built into a trajectory"
+    assert run["noise"] is None, "a sort's own gaps were measured as noise"
+    assert "separate checkpoints sorted best-first" in run["no_series"]
+
+    out = _call_multi(runs, "groupSpark(DATA.alltime.groups[0])",
+                      kinds={"headtohead": "job"})
+    assert "<path" not in out and "<svg" not in out
+    assert "No line for headtohead" in out
+
+
+@needs_node
+def test_a_run_read_both_ways_draws_no_line_either():
+    """Greedy and sampled on one set of weights differ by 2.3x here.
+
+    A run whose readings hold both is two scales in one list, so a line
+    through them descends every time the mode changes and `_noise_of` reads
+    that step as what one probe moves.
+    """
+    rows = [_row(i + 1, (i + 1) * 1000, eval_lift_sd=0.40 + i * 0.01,
+                 eval_lift_sd_greedy=1.60 + i * 0.01, eval_win=0.5,
+                 eval_win_greedy=0.9, control_win=0.26,
+                 eval_opponent="random") for i in range(4)]
+    runs = [("bothways", rows, False)]
+
+    _page, payload = render_multi(runs)
+    run = payload["alltime"]["groups"][0]["runs"][0]
+    assert run["modes"] == ["greedy", "sampled"], "the fixture holds one mode"
+    assert run["ranking"] is False, "this is a training run, not a job"
+    assert run["series"] == [] and run["noise"] is None
+    assert "more than one way" in run["no_series"]
+
+    out = _call_multi(runs, "groupSpark(DATA.alltime.groups[0])")
+    assert "<path" not in out
+    assert "No line for bothways" in out
+
+
+@needs_node
+def test_a_card_sparkline_is_drawn_in_write_order_and_never_sorted():
+    """The readings are a sequence, and sorting them draws a climb that never
+    happened -- from the run's worst reading to its best, monotonically."""
+    rows = [_row(i + 1, (i + 1) * 1000, eval_lift_sd=v, eval_win=0.4,
+                 control_win=0.26, eval_opponent="random")
+            for i, v in enumerate([0.9, 0.1, 0.8, 0.2, 0.7])]
+    out = _call_multi([("saw", rows, False)], "groupSpark(DATA.alltime.groups[0])")
+
+    line = [t for t in _tags(out, "path") if t.get("stroke")]
+    assert len(line) == 1
+    points = _path_points(line[0]["d"])
+    assert len(points) == 5
+    assert [p[0] for p in points] == sorted(p[0] for p in points)
+    assert [p[1] for p in points] != sorted(p[1] for p in points)
+    assert [p[1] for p in points] != sorted((p[1] for p in points), reverse=True)
+
+    # The zero line is the reference that says which readings beat the
+    # control, and it can be deleted with nothing noticing.
+    assert [t for t in _tags(out, "line") if t.get("class") == "zero"], \
+        "no zero line, so nothing says which readings beat the control"
+
+
+@needs_node
+def test_the_noise_ruler_is_read_off_the_longest_trajectory_and_named():
+    """Its source, its presence and its height all survived mutation.
+
+    And it may not be painted through the run names: parked 30 units inside
+    the right margin while labels were clamped to the viewBox edge, the rule
+    split every name on the live page down the middle.
+    """
+    noisy = [_row(i + 1, (i + 1) * 1000, eval_lift_sd=v, eval_win=0.4,
+                  control_win=0.26, eval_opponent="random")
+             for i, v in enumerate([0.2, 0.5, 0.3, 0.6, 0.35, 0.7, 0.45, 0.8])]
+    calm = [_row(i + 1, (i + 1) * 1000, eval_lift_sd=v, eval_win=0.4,
+                 control_win=0.26, eval_opponent="random")
+            for i, v in enumerate([0.30, 0.32, 0.31, 0.33])]
+    runs = [("noisy", noisy, False), ("calm", calm, False)]
+
+    _page, payload = render_multi(runs)
+    drawn = {r["name"]: r for r in payload["alltime"]["groups"][0]["runs"]}
+    assert len(drawn["noisy"]["series"]) == 8 and len(drawn["calm"]["series"]) == 4
+    assert drawn["noisy"]["noise"] > drawn["calm"]["noise"] > 0
+
+    out = _call_multi(runs, "groupSpark(DATA.alltime.groups[0])")
+
+    # The panel's own domain, computed the way the drawing computes it.
+    lo = hi = 0.0
+    for run in drawn.values():
+        for _at, value in run["series"]:
+            lo, hi = min(lo, value), max(hi, value)
+    pad = (hi - lo) * 0.12
+    lo, hi = lo - pad, hi + pad
+    half = drawn["noisy"]["noise"] / (hi - lo) * (120 - 10 - 18)
+
+    caps = [float(t["y1"]) for t in _tags(out, "line") if t.get("x1") == "603"]
+    assert len(caps) == 2, "the ruler's end caps are not drawn"
+    assert abs(max(caps) - min(caps) - 2 * half) < 0.1, \
+        "the ruler is not the longest run's own noise on this panel's domain"
+    assert abs((max(caps) + min(caps)) / 2 - 56) < 0.1
+    assert "measured on noisy" in out and "the longest trajectory" in out
+    # The domain, in the DOM: a 640-unit chart's own axis numbers render at
+    # about 5px at this page's width, so nothing may be stated only there.
+    assert ("The lines run from %.2f to %.2f in lift, over readings 1 to 8"
+            % (lo, hi)) in out
+    assert "measured on calm" not in out, \
+        "the ruler was read off the shortest series and named the longest"
+
+    # No name may reach the ruler's column.
+    tag = re.search(r'text-anchor="middle">&#177;([\d.]+)</text>', out).group(1)
+    left = 606 - (1 + len(tag)) * 6.2 / 2
+    ends = re.findall(r'<text class="lbl-s" x="([\d.]+)" y="[-\d.]+" '
+                      r'fill="[^"]+">([^<]*)</text>', out)
+    assert len(ends) == 2
+    for at, text in ends:
+        assert float(at) + len(text) * 6.2 <= left, \
+            "a run name is painted through the noise ruler"
+
+
+@needs_node
+def test_a_noise_ruler_wider_than_its_plot_is_clamped_and_says_so():
+    """`overnight-selfplay`'s noise is 0.85 of its own domain.
+
+    Unbounded, both end caps and the magnitude label are drawn outside the
+    120-unit viewBox, where nothing renders them at all -- leaving a bare
+    full-height line indistinguishable from a plot border, under a caption
+    still calling it a scale mark. These are that run's six readings.
+    """
+    values = [0.1624, 0.2319, -0.1199, -0.0851, 0.1949, -0.1224]
+    rows = [_row(i + 1, (i + 1) * 1000, eval_lift_sd=v, eval_win=0.4,
+                 control_win=0.26, eval_opponent="random")
+            for i, v in enumerate(values)]
+    runs = [("swingy", rows, False)]
+
+    out = _call_multi(runs, "groupSpark(DATA.alltime.groups[0])")
+    ruler = [t for t in _tags(out, "line") if t.get("x1") in ("603", "606")]
+    assert len(ruler) == 3, "the rule and its two caps"
+    ys = [float(t[key]) for t in ruler for key in ("y1", "y2")]
+    ys += [float(t["y"]) for t in _tags(out, "text")]
+    assert min(ys) >= 0 and max(ys) <= 120, \
+        "part of the ruler is drawn outside the viewBox, where it never renders"
+    assert "moves further between readings than this picture is tall" in out
 
 
 @needs_node
