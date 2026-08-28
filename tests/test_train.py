@@ -515,3 +515,87 @@ def test_the_in_run_evaluation_faces_a_random_opponent(tmp_path):
     lifts = [r for r in rows if "eval_lift_sd" in r]
     assert lifts, "the run evaluated but recorded no lift"
     assert all(r["eval_opponent"] == "random" for r in lifts)
+
+
+# ------------------------------------- the workers play the game that was asked for
+
+
+def test_the_workers_get_the_tower_level_the_run_was_launched_with(tmp_path,
+                                                                   monkeypatch):
+    """--tower-level reached the evaluation probe and not the workers.
+
+    VecEnvConfig defaults tower_level to 11, and run.py built one without
+    passing it, so any run with --workers trained every rollout at level 11
+    while config.json recorded 5 and the probe measured at 5. At level 11 the
+    towers outlast a 120-second match: ~90% of battles draw, crowns almost
+    never fire, and the agent learns from shaping alone. Nothing in the suite
+    mentioned tower_level, so nothing could have caught it.
+    """
+    from cr_sim.api import vec as vec_module
+
+    captured = {}
+
+    class _Stop(RuntimeError):
+        pass
+
+    def _capture(config, num_envs, workers):
+        captured["config"] = config
+        raise _Stop("captured")
+
+    monkeypatch.setattr(vec_module, "CRSimVecEnv", _capture)
+
+    from cr_sim.train.run import main
+
+    with pytest.raises(_Stop):
+        main([
+            "--steps", "64", "--horizon", "8", "--envs", "2", "--workers", "1",
+            "--match-seconds", "20", "--tower-level", "5", "--device", "cpu",
+            "--out", str(tmp_path), "--name", "towers",
+        ])
+
+    config = captured["config"]
+    assert config.tower_level == 5, (
+        f"workers build tower_level={config.tower_level} for a run launched "
+        "with --tower-level 5; they would train on a different game from the "
+        "one the run records and evaluates on")
+
+
+def test_the_worker_config_agrees_with_the_probe_env_field_for_field(tmp_path,
+                                                                    monkeypatch):
+    """The general form of the bug above, so the next dropped field is caught.
+
+    run.py builds the same battle twice -- once as a local CRSimEnv it probes
+    and evaluates with, once as a VecEnvConfig the workers run. Any field that
+    disagrees means the run measures a different game from the one it trains
+    on, silently.
+    """
+    from cr_sim.api import vec as vec_module
+
+    captured = {}
+
+    class _Stop(RuntimeError):
+        pass
+
+    def _capture(config, num_envs, workers):
+        captured["config"] = config
+        raise _Stop("captured")
+
+    monkeypatch.setattr(vec_module, "CRSimVecEnv", _capture)
+
+    from cr_sim.train.run import main
+
+    argv = [
+        "--steps", "64", "--horizon", "8", "--envs", "2", "--workers", "1",
+        "--match-seconds", "20", "--tower-level", "5", "--tps", "20",
+        "--frame-skip", "30", "--shaping", "0.02", "--device", "cpu",
+        "--out", str(tmp_path), "--name", "agree",
+    ]
+    with pytest.raises(_Stop):
+        main(argv)
+
+    config = captured["config"]
+    assert config.tower_level == 5
+    assert config.ticks_per_second == 20
+    assert config.frame_skip == 30
+    assert config.max_ticks == 20 * 20
+    assert config.reward_shaping_weight == pytest.approx(0.02)

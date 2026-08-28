@@ -625,6 +625,17 @@ def main(argv: list[str] | None = None) -> int:
                     build=args.build, blue_deck=DEFAULT_DECK, red_deck=DEFAULT_DECK,
                     ticks_per_second=args.tps, frame_skip=args.frame_skip,
                     max_ticks=args.tps * args.match_seconds,
+                    # Every field _env() sets, the workers must set too. This
+                    # one was missing, and VecEnvConfig defaults it to 11, so
+                    # `--tower-level 5 --workers 8` trained every rollout at
+                    # level 11 while config.json recorded 5 and the evaluation
+                    # probe ran at 5. That is not a smaller effect than it
+                    # sounds: at level 11 the towers outlast the match, 90% of
+                    # battles end in a draw and crowns almost never fire, so
+                    # the agent learned from shaping alone -- which
+                    # docs/training.md already identified and which
+                    # --tower-level was added to fix.
+                    tower_level=args.tower_level,
                     reward_shaping_weight=args.shaping,
                     reward_weights=_reward_weights(args),
                     observation=observation,
