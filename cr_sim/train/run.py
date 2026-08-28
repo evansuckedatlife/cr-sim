@@ -391,6 +391,16 @@ def main(argv: list[str] | None = None) -> int:
                     "tower_level": args.tower_level,
                     "horizon_seconds": args.horizon_seconds,
                     "opponent": args.opponent, "head": args.head,
+                    # Self-play's cadence, and the weights the run started
+                    # from. None of these were recorded, so a run directory
+                    # could not answer "was this actually self-play, against
+                    # what, drawn how often, from which clone?" -- which is
+                    # exactly the question its flat metrics provoke.
+                    "pool_size": args.pool_size,
+                    "refresh_every": args.refresh_every,
+                    "opponent_temperature": args.opponent_temperature,
+                    "init_from": str(args.init_from) if args.init_from else None,
+                    "resumed": bool(args.resume),
                     "kl": args.kl, "elixir_weight": args.elixir_weight,
                     "kl_reference": str(anchor_path) if anchor_path else None,
                     "observation": args.observation,
