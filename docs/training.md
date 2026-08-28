@@ -200,26 +200,113 @@ hiding flags are at best neutral at this corpus size.
 
 The honest next step is to re-collect at full scale rather than to conclude.
 
+## The workers never got the tower level
+
+`run.py` built its `VecEnvConfig` without passing `tower_level`, and
+`VecEnvConfig` defaults it to 11. `_env()`, which builds the local probe, passed
+it correctly. So the flag was honoured on the path that *measures* and dropped
+on the path that does 100% of the training: any run launched
+`--tower-level 5 --workers N` trained every rollout at level 11 while its
+`config.json` recorded 5 and its evaluation probe ran at 5.
+
+This document already said what that costs, three sections up: at level 11 the
+towers outlast a 120-second match, ~90% of battles draw, crowns almost never
+fire, and everything learned comes from shaping alone. `--tower-level` was added
+to fix exactly that, and then never reached a worker.
+
+Every logged statistic matches a level-11 probe and none matches level-5:
+
+| | logged | L11 probe | L5 probe |
+|---|---|---|---|
+| `ret_std` | 0.201 | 0.217 | 0.654 |
+| `value_loss` | 0.010–0.054 | 0.047 | 0.426 |
+| rollout win rate | 0.025–0.11 | 0.063 | 0.291 |
+| steps/episode | 27.7 | 28.0 | 25.3 |
+
+Worker towers measure [4224, 2576, 2576] HP against the parent's
+[3072, 1848, 1848]. `learn-1m-factored`, `learn-1m-flat` and `learn-1m-aborted`
+all record `tower_level: 5` and all sit in the level-11 band, so **no number any
+of them produced describes the configuration it claims**. Nothing in `tests/`
+mentioned `tower_level`, and `test_train.py`'s `main()` call runs without
+`--workers`, so it took the in-process path and could never have caught it.
+
+Fixed, with a test that pins `tower_level` and a second that asserts the worker
+config agrees with the probe env field for field, so the next dropped field is
+caught by construction. After the fix, rollout win rate went **4% → 28%**: the
+crowns fire now, and there is a gradient to follow.
+
+A second scale error hides inside the first. The in-run probe evaluates at
+level 5 against a random opponent while the rollout metrics come from level-11
+self-play, so `win_rate` and `eval_lift_sd` on the same row describe different
+games. `check_lift_is_named` guards the opponent half of that; the level half
+was unguarded.
+
+## Why explained variance is zero, and what it is not
+
+Three hypotheses were tested independently. All three were refuted, and the
+machinery is sound:
+
+- **The metric is correct.** `ppo.py:405-409` computes `1 - Var(ret-value)/Var(ret)`
+  over the whole flattened batch on raw returns, matched against an independent
+  implementation to 3e-7 across four synthetic cases. GAE matches a brute-force
+  reference to 1.4e-7 including done masking.
+- **The critic fits.** Driving the real `_update` with the live hyperparameters
+  on a learnable target moves explained variance −0.167 → +0.442 in one update
+  and +0.945 in eight. There is no value clipping; advantage normalisation
+  touches only `advantage`; the KL block runs under `no_grad` and contributes
+  nothing to the critic; critic gradient norms are 0.015–0.061, nonzero.
+- **The critic arrives trained.** `clone.py:444` trains a value head at
+  `value_coefficient` 0.5 on γ-discounted returns with γ matching PPO's. All 12
+  critic tensors are in the checkpoint, `strict=True` load matches every key,
+  and on demo states it scores +0.685 against its own targets.
+
+What is true instead, in two parts.
+
+**The ceiling is low by construction.** `projected` is an exact potential
+reward — `r = Φ(s') − Φ(s)`, verified to 2.2e-16, with every episode's summed
+reward equal to Φ(s_T) to 4.4e-16. Returns therefore telescope to
+Φ(s_T) − Φ(s_t), and Φ is close to a martingale: regressing Φ_T on Φ_t gives
+slope 1.03–1.07 with intercept ±0.02, so E[G|s] is nearly constant and
+R²(return-to-go | Φ_t) is +0.0027. Handing the critic the *exact* reward
+potential scores −0.0011. `reward.py` says the same thing in its own comment:
+it "explained six per cent of the variance in returns". Note also that
+`ret = adv + value`, so a constant critic scores exactly 0.0 — "EV ≈ 0" reads
+literally as "the critic is a constant".
+
+**But the critic is below even that ceiling.** Branching the engine at
+on-policy states and playing K continuations to the end puts Var(E[G|s])/Var(G)
+at 0.135 [0.034, 0.257] at level 11 and **0.290 [0.153, 0.418] at level 5**,
+against a measured explained variance of +0.006. A six-parameter linear read of
+Φ and its parts scores +0.026 out-of-fold — better than the trained 64-channel
+critic. Ridge over all 754 live v1 observation features gives out-of-fold R² ≤ 0
+at every λ from 1 to 1e5, so **the remaining signal is not linearly accessible
+from what the network can see**: v1 carries hitpoint mass only, and the
+body-count, spell and threat channels that distinguish a Musketeer from a
+Knight are off.
+
+That is the case for `v3`. It is also why the level-5 fix matters twice: it
+roughly doubles the variance that is knowable at all.
+
 ## What to do next
 
 Specific to one machine at roughly 46 decisions a second, not a literature
 summary.
 
 **Re-collect the demonstrations, at full scale, with the fixed targets.**
-Two things ride on it. The soft target has never once been used, and the
-observation ablation above is bounded by a corpus a third the size of the one
-the heads were compared on -- at which size nothing converges and only the
-largest effect is visible. Recollecting 420 episodes costs about two hours over
-four processes, `collect(variants=...)` records every encoding off one
-playthrough, and it unblocks both.
+*Done, and in flight as `data_cache/demos_v1v3`:* 420 episodes over four
+shards, recording v1 (9 channels) and v3 (17) off the same playthroughs, under
+`--reward projected --elixir-weight 0 --tower-level 5`. Three things rode on
+it. The soft target had never once been used; the observation ablation was
+bounded by a corpus a third the size of the one the heads were compared on, at
+which size nothing converges; and the value targets came from the wrong reward
+entirely (below). `collect(variants=...)` records every encoding off one
+playthrough, so v1 and v3 see identical states, identical labels and identical
+decisions -- which makes the encoding comparison a paired experiment rather
+than two.
 
-**Then re-run the observation ablation.** Every downstream comparison
-here is bounded by a corpus whose soft targets contradict the expert on 44% of
-its own decisions and which has never been used with a working soft target at
-all. Recollecting 420 episodes costs about two hours over four processes and is
-the cheapest large improvement available. `collect(variants=...)` records every
-observation encoding off one playthrough, so this is also the moment to record
-whatever channels are wanted.
+**Then re-run the observation ablation** on that corpus, which is now the
+*only* thing standing between the critic's measured +0.006 and the 0.290 of
+return variance that is knowable at level 5.
 
 **DAgger, not more episodes.** Behavioural cloning fails on states the expert
 never visits, and the cloned policy visits different ones. The standard fix is
@@ -235,15 +322,21 @@ sampled policy. The thing to watch is not `noop_fraction` but the greedy pass
 rate against the expert's 44.2%, measured on held-out states — a number that
 costs one forward pass and that no run currently logs.
 
-**Fix the critic before adding a league.** Explained variance sits at 0.00–0.03
-in every fine-tune, and the cloned critic is worse than useless under a
-different reward: it predicts +1.48 where returns average +0.47, because
-`make_demos.py` records value targets under the *simple* reward and the
-fine-tune trains under `projected`. Recording value targets under the reward
-that will be trained on is a one-line change and has to come before anything
-that assumes advantages carry signal. Population-based training and AlphaStar's
-league both spend their compute on opponent diversity, which is the wrong
-bottleneck while the critic explains nothing.
+**Fix the critic before adding a league.** *Half done.* The reward mismatch is
+fixed: `make_demos.py` now takes `--reward`, `--elixir-weight` and
+`--reward-horizon-seconds`, defaults to the fine-tune's shape, and stamps what
+it used onto every shard, which `clone_policy` verifies rather than trusts. The
+cloned critic no longer arrives predicting +1.48 against returns averaging
++0.47.
+
+That was never the reason explained variance is zero, though -- see the section
+above. It is offset-invariant by construction, so a constant +1.5 error is
+invisible to it, and PPO re-fits the scale within five updates anyway. The
+remaining half is the **observation**: the signal is not linearly accessible
+from v1's hitpoint-mass channels at any ridge penalty, so the next measurement
+is the v3 clone against the v1 clone on the paired corpus. Population-based
+training and AlphaStar's league both spend their compute on opponent diversity,
+which is the wrong bottleneck while the critic explains nothing.
 
 **Self-play needs a sharp opponent.** A frozen snapshot sampled at temperature
 1.0 is nearly random when the policy's entropy is near uniform, which leaves the
