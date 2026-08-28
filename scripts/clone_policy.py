@@ -114,6 +114,15 @@ def subset(data: Demonstrations, fraction: float, seed: int) -> Demonstrations:
     the shards are ordered, so a prefix is a handful of battles seen in full
     while a random draw is the same distribution of positions at a smaller
     count -- which is what "learns more per example" has to be measured on.
+
+    ``observation`` and ``reward`` are carried through. They were not, and a
+    slice is exactly where dropping them does damage: ``main`` refuses a set
+    whose recorded encoding disagrees with ``--observation``, and that check
+    reads the field. Taking a fraction blanked it, so the guard fell through
+    to the "these shards predate provenance" warning and every
+    sample-efficiency run trained with the one check on the encoding switched
+    off -- the check being the point of the field. Selecting rows must not
+    change what the rows are.
     """
     keep = max(1, int(len(data) * max(0.0, min(1.0, fraction))))
     order = np.random.default_rng(seed).permutation(len(data))[:keep]
@@ -122,7 +131,8 @@ def subset(data: Demonstrations, fraction: float, seed: int) -> Demonstrations:
         grid=data.grid[order], vector=data.vector[order], mask=data.mask[order],
         action=data.action[order], value=data.value[order],
         target=None if data.target is None else data.target[order],
-        episodes=data.episodes, play_rate=data.play_rate)
+        episodes=data.episodes, play_rate=data.play_rate,
+        observation=data.observation, reward=data.reward)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -151,13 +151,26 @@ def evaluate(
     difference of this size readable at all.
 
     ``generator`` is the sampled arm's own random stream. Without it the
-    sampling draws from torch's global one, which nothing here seeds: two
-    identical sampled evaluations of the same checkpoint on the same seeds
-    measured +0.583 and +0.581 sd, so a difference smaller than that between
-    two runs is not a difference at all. Optional and off by default because
-    the alternative -- seeding the global stream -- would reset the sampling
-    of any training run that called this mid-flight, and the in-run probe
-    calls it every twenty updates.
+    sampling draws from torch's global one, which nothing here seeds, and two
+    runs of the same checkpoint then land in different places.
+
+    **How far apart is worth knowing, because it is much further than this
+    docstring used to say.** It cited one pair measuring +0.583 and +0.581 and
+    read a spread of 0.002 off it. Measured properly by
+    ``scripts/measure_sampled_noise.py`` -- one checkpoint, four independent
+    sampling streams, the same 150 battles against the same control -- the
+    lifts were +0.833, +0.923, +0.964 and +0.849: sd 0.062, range 0.132, so
+    two runs can differ by about 0.17 sd at 95%. The greedy arm over the same
+    battles reproduced +2.1257 twice, exactly, which is what says the spread
+    is the sampling and not the battles.
+
+    So a sampled difference under roughly 0.17 sd is not a difference, and the
+    0.04 sd figure quoted elsewhere in this project is about four times too
+    small. Anything relying on it deserves a second look.
+
+    Optional and off by default because the alternative -- seeding the global
+    stream -- would reset the sampling of any training run that called this
+    mid-flight, and the in-run probe calls it every twenty updates.
     """
     nvec = [int(v) for v in env.action_space.nvec]
     rng = np.random.default_rng(0)

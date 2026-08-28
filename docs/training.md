@@ -171,6 +171,100 @@ with a 32-wide context vector), not wrong in principle, and it is the one thing
 here worth another attempt before the idea is discarded: a hidden 1x1 layer, or
 more context width, at a fraction of the flat head's parameters.
 
+### The card-stat head: parity yes, generalisation no
+
+`factored-stats` is the factored head with its card *lookup* replaced by an
+encoder over the card's own statistics — hitpoints, damage, reach, speed, what
+it targets, what it leaves behind — so the conditioning vector is computed from
+what a card does rather than read out of a free column per vocabulary slot. The
+argument for it was never a better number on the training deck. It was a
+capability the lookup cannot have: a card outside the training decks gets a
+conditioning vector for free.
+
+Both arms are cloned from the same corpus (`data_cache/demos_v1v3/v1`, 11,940
+decisions from 420 episodes), same recipe — soft targets, 20 epochs,
+`pass_weight` 0.1, seed 0 — and scored in one `scripts/evaluate_checkpoints.py`
+pass so they share a single control arm. Deliberately not a row in the table
+above: that ablation used hard labels and these use soft, so the lookup arm was
+re-run rather than differenced against a transcribed number. It came back
++2.126 against the +2.118 on record for this corpus and recipe, which is how
+far the protocol reproduces.
+
+| head | policy params | greedy lift | sampled lift | greedy W/L |
+|---|---|---|---|---|
+| factored (lookup) | 57,141 | +2.126 [+1.933, +2.319] | +0.799 [+0.553, +1.046] | 95% / 1% |
+| factored-stats | 59,541 | +2.216 [+2.011, +2.422] | +0.750 [+0.495, +1.005] | 96% / 1% |
+
+**Parity holds.** The intervals overlap heavily in both modes, which is the
+pass condition. The encoder costs 2,400 parameters and no measurable training
+time — 18.4 minutes against 18.5 for the lookup, run concurrently.
+
+**The capability it was built for does not show up in play.** Both checkpoints
+were scored on ten 8-card mirror decks drawn at random from the 114 cards
+outside `DEFAULT_DECK`, 150 paired battles each against that deck's own random
+control (`scripts/evaluate_decks.py`). Because both arms play the same seeds on
+the same decks against the same control, the control cancels exactly and the two
+policies can be differenced battle by battle instead of compared through two
+overlapping intervals.
+
+| ten unseen decks, 1,500 paired battles | lookup | encoder | encoder − lookup |
+|---|---|---|---|
+| greedy | +0.726 [+0.648, +0.804] | +0.654 [+0.578, +0.730] | **−0.072** [−0.140, −0.004] |
+| sampled | +0.229 [+0.153, +0.305] | +0.216 [+0.139, +0.294] | −0.013 [−0.088, +0.063] |
+
+The encoder is not better on decks it has never seen. It is ahead on 3 of the
+10 (sign test *p* = 0.34), and the same head-to-head on the training deck is
++0.091 [−0.07, +0.25] — so if anything it is slightly better where it trained
+and slightly worse where it did not, which is the opposite of the hypothesis.
+
+**The mechanism works. It is the mechanism that is not worth anything.** The
+head does exactly what it was built to do: holding the observation fixed and
+changing only the deck, the lookup head's conditioning vector moves by 0.000 —
+it is not merely uninformed about a new deck, it is *misinformed*, applying what
+it learned about the Knight to whichever card sorted into the Knight's position
+— while the encoder's moves by 1.40 of its own norm.
+
+That change is not swallowed downstream either. Asked about the same states, the
+two arms pick the same greedy action 72% of the time on the training deck but
+only 47–64% on unseen decks, and the same *card* 75–91% against 95%. They
+genuinely play differently on an unseen deck, on roughly half the decisions —
+and none of that difference is an improvement. Knowing what a card does is not
+the binding constraint. The rest of the network is still out of distribution: 80
+of `vector.0.weight`'s 102 input columns are card-identity one-hot bits that
+neither head re-keys, and nothing in the observation tells the trunk what the
+units now on the board actually do.
+
+**The obvious confound was controlled, and it was not the story.** Eight cards
+drawn uniformly from the 114 average 4.09 elixir against `DEFAULT_DECK`'s 2.50,
+so an unseen-deck result otherwise mixes unfamiliar cards with an economy 64%
+more expensive than either policy ever played — and within the ten decks, lift
+did correlate with cost (*r* = −0.61 between the lookup's lift and mean elixir,
+*n* = 9, which is not significant). Repeating the whole sweep on six decks drawn
+to within 0.4 elixir of the training deck (`--cost-window`) settles it the way a
+correlation cannot:
+
+| six cost-matched decks, 900 paired battles | lookup | encoder | encoder − lookup |
+|---|---|---|---|
+| greedy | +0.641 [+0.543, +0.738] | +0.492 [+0.400, +0.584] | −0.149 [−0.238, −0.060] |
+| sampled | +0.245 [+0.150, +0.340] | +0.246 [+0.148, +0.344] | +0.001 [−0.098, +0.100] |
+
+Matching the economy rescues nothing. The lookup arm scores +0.641 on
+cost-matched decks against +0.726 on the uniform draw and +2.126 on the deck it
+trained on, so roughly two thirds of the policy's edge is lost to the *cards*
+being different, not to their being expensive. The encoder's greedy deficit is
+if anything larger here, and its sampled gap is exactly zero.
+
+**What this does not settle.** One seed per arm. Parity is robust to that — the
+intervals overlap far too much for a seed to be the story — but a head-to-head
+gap this small is within what a different initialisation could produce, so "not
+better" is established and "slightly worse" is not. Note also that neither
+sampled row above is a result at all: two runs of one checkpoint over identical
+battles differ by up to 0.17 sd from the sampling stream alone (see
+`scripts/measure_sampled_noise.py`), which is wider than any sampled difference
+here. The honest next step is not more battles, it is the trunk: until the
+observation stops encoding card identity as a position in a per-episode
+vocabulary, no change to the head alone can make an unseen deck work.
+
 ## Which observation changes helped
 
 Recorded off one playthrough with `collect(variants=...)`, so all four

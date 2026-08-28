@@ -581,6 +581,44 @@ def test_shards_that_agree_merge_and_carry_their_provenance(tmp_path):
     assert len(merged) == 6
 
 
+def test_taking_a_fraction_of_a_set_does_not_blank_its_provenance():
+    """Selecting rows must not change what the rows are.
+
+    ``subset`` rebuilt the dataclass field by field and omitted these two, so
+    every ``--fraction`` run reported "these shards record no observation" and
+    skipped the one check that stops a set recorded under one encoding being
+    trained as another. The rows it returns came out of a file that knew;
+    losing that on the way through is worse than never having had it, because
+    the warning it triggers reads as a property of the corpus.
+    """
+    from scripts.clone_policy import subset
+
+    data = _demo(observation="v3", reward="projected", rows=10)
+    sliced = subset(data, 0.5, seed=0)
+    assert len(sliced) == 5
+    assert sliced.observation == "v3"
+    assert sliced.reward == "projected"
+
+
+def test_a_fraction_run_still_refuses_a_mismatched_encoding(tmp_path, capsys):
+    """The guard the blanking switched off, exercised end to end.
+
+    Asserting on ``subset``'s fields alone would stay green if ``main`` ever
+    stopped consulting them, and it is ``main``'s refusal that is the thing
+    worth having.
+    """
+    import pytest as _pytest
+    from scripts.clone_policy import main
+
+    _demo(observation="v3", reward="projected", rows=10).save(
+        tmp_path / "shard-00.npz")
+    with _pytest.raises(SystemExit) as caught:
+        main(["--demos", str(tmp_path), "--out", str(tmp_path / "out"),
+              "--observation", "v1", "--fraction", "0.5", "--epochs", "0",
+              "--episodes", "0"])
+    assert "recorded under 'v3'" in str(caught.value)
+
+
 def test_collect_stamps_names_not_the_loop_variables_that_shadow_them(tmp_path):
     """collect's step loop rebinds both names, once per step.
 
