@@ -107,7 +107,7 @@ def test_the_hand_layout_points_at_the_card_that_is_actually_in_the_slot(world):
 # ---------------------------------------------- interchangeable with the flat
 
 
-@pytest.mark.parametrize("head", ["flat", "factored", "conv"])
+@pytest.mark.parametrize("head", ["flat", "factored", "factored-stats", "conv"])
 def test_no_probability_reaches_a_masked_action(env, head):
     """Two log-softmaxes composed leave a finite floor, not a true zero, so
     the joint has to be re-masked. Without that an illegal placement keeps a
@@ -125,7 +125,7 @@ def test_no_probability_reaches_a_masked_action(env, head):
     assert torch.allclose(probs.sum(dim=-1), torch.ones(8), atol=1e-5)
 
 
-@pytest.mark.parametrize("head", ["flat", "factored", "conv"])
+@pytest.mark.parametrize("head", ["flat", "factored", "factored-stats", "conv"])
 def test_the_head_produces_one_logit_per_environment_action(env, head):
     net = ActorCritic(net_config_for(env, head=head))
     config = net.config
@@ -354,7 +354,7 @@ def test_the_conv_head_is_the_smallest_of_the_three(env):
     assert counts["conv"] < counts["factored"] < counts["flat"], counts
 
 
-@pytest.mark.parametrize("head", ["flat", "factored", "conv"])
+@pytest.mark.parametrize("head", ["flat", "factored", "factored-stats", "conv"])
 def test_policy_logits_matches_forward_and_skips_the_critic(env, head):
     """Choosing an action does not need a value. With a separate critic
     encoder, ``forward`` spends about half its time computing one that is

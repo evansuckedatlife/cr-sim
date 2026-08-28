@@ -31,7 +31,7 @@ from ..data.source import LogicData
 from ..api.encoding import NOOP_SLOT, grid_channels, parse_observation
 from ..api.env import CRSimEnv
 from ..api.reward import ProjectionWeights, RewardWeights
-from .nets import net_config_for
+from .nets import POLICY_HEADS, net_config_for
 from .ppo import PPOConfig, train
 from .selfplay import (
     FrozenOpponent, OpponentPool, PooledOpponent,
@@ -118,13 +118,20 @@ def build_parser() -> argparse.ArgumentParser:
              "recorded in the run and in every checkpoint it writes.",
     )
     parser.add_argument(
-        "--head", choices=("flat", "factored", "conv"), default="flat",
+        "--head", choices=POLICY_HEADS, default="flat",
         help="'flat' is one linear layer over all 720 actions; 'factored' "
              "picks the card, then the tile, with the tile head conditioned "
              "on an embedding of the card and its weights shared across "
              "cards. Not a correctness difference -- a flat masked "
              "categorical can represent anything the factorisation can -- but "
-             "a sample-efficiency one, and placements are the sparse part.",
+             "a sample-efficiency one, and placements are the sparse part. "
+             "'factored-stats' is 'factored' with the card lookup replaced by "
+             "an encoder over the card's own statistics -- hitpoints, damage, "
+             "reach, speed, what it targets -- so the head conditions on what "
+             "a card does rather than on which vocabulary slot it landed in, "
+             "and a card that was never in a training deck gets a "
+             "conditioning vector for free. 'conv' emits the placement logits "
+             "as a 1x1 convolution over the trunk's own feature map.",
     )
     parser.add_argument("--entropy", type=float, default=0.02)
     parser.add_argument(

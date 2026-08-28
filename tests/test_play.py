@@ -171,6 +171,75 @@ def test_the_opponent_actually_plays_cards(session):
     assert [c for c in session.commands if c["team"] == "RED"], "the opponent never played"
 
 
+@pytest.mark.parametrize("head", ["flat", "factored", "factored-stats", "conv"])
+def test_a_trained_checkpoint_plays_whatever_head_it_was_trained_with(
+    server, tmp_path, head
+):
+    """The browser server is the one load path that does not go through
+    ``net_config_for``: it has a battle rather than an environment and
+    restates every ``NetConfig`` field by hand.
+
+    It restated eight of them and not ``card_stats``, so a ``factored-stats``
+    checkpoint raised inside the head's constructor. Two things then hid it.
+    The network is built lazily on the *first move*, so ``PlayServer.
+    _controller``'s try/except -- which only wraps construction -- never saw
+    it; and ``PlaySession._think`` catches anything a controller raises by
+    setting ``self.controller = None``. The result was not a traceback and not
+    a fallback to random: it was an opponent that played nothing for the whole
+    match while the page reported a policy opponent. Parametrised over all
+    four heads rather than written for the one that broke, because what went
+    wrong is not specific to this head -- it is that this load path restates
+    the config instead of asking for it.
+    """
+    torch = pytest.importorskip("torch")
+
+    from cr_sim.api.env import CRSimEnv
+    from cr_sim.play.session import PlaySession, SessionConfig
+    from cr_sim.train.nets import ActorCritic, net_config_for
+
+    env = CRSimEnv(server.data, server.levels, server.registry,
+                   DEFAULT_DECK, DEFAULT_DECK, ticks_per_second=20,
+                   frame_skip=20, max_ticks=800)
+    env.reset(seed=0)
+    checkpoint = tmp_path / f"{head}.pt"
+    torch.save({"state_dict": ActorCritic(net_config_for(env, head=head)).state_dict(),
+                "head": head, "observation": "v1"}, checkpoint)
+
+    from cr_sim.play.policy import policy_controller
+
+    session = PlaySession(
+        data=server.data, levels=server.levels, registry=server.registry,
+        config=SessionConfig(human_deck=DEFAULT_DECK, ai_deck=DEFAULT_DECK, seed=1),
+        controller=policy_controller(checkpoint, server, 0),
+    )
+    now = 0.0
+    session._last_wall = now
+    for _ in range(300):
+        now += 0.1
+        session.advance(now)
+
+    assert session.controller is not None, (
+        f"the {head} opponent was retired mid-match: {session.controller_error}")
+    assert session.controller_error is None
+    assert [c for c in session.commands if c["team"] == "RED"], (
+        f"the {head} opponent played nothing")
+
+    if head == "factored-stats":
+        # Playing at all is not enough. Row i is what hand slot i's one-hot
+        # bit selects, and that bit is set from ``vocab.index(...)``, so a
+        # table built in any other order gives an opponent that plays fluently
+        # while conditioned on the wrong cards.
+        from cr_sim.data.card_features import card_feature_table
+
+        opponent = session.controller
+        expected = card_feature_table(
+            server.data, server.levels, server.registry,
+            opponent._config.vocab)
+        assert opponent._net.policy_head.card_stats.tolist() == [
+            list(row) for row in
+            torch.tensor(expected, dtype=torch.float32).tolist()]
+
+
 # ------------------------------------------------------------------ decks
 
 

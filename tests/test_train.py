@@ -627,6 +627,62 @@ def test_make_demos_builds_the_reward_the_fine_tune_will_use():
     assert weights.elixir == 0.0
 
 
+def test_every_head_the_network_can_build_is_reachable_from_both_entry_points():
+    """A head no entry point accepts is a head no checkpoint can be written
+    with, and that is not a hypothetical: ``"factored-stats"`` shipped
+    complete -- config field, head class, worker round-trip -- while both
+    ``--head`` choice tuples still said ``("flat", "factored", "conv")``, so
+    ``python -m cr_sim.train.run --head factored-stats`` exited 2 and nothing
+    downstream could ever be handed one.
+
+    ``run.py`` and ``clone_policy.py`` are the only two writers of a
+    checkpoint's ``"head"`` field, so they are the two that have to agree with
+    the network.
+    """
+    from cr_sim.train.nets import POLICY_HEADS
+    from cr_sim.train.run import build_parser
+
+    import scripts.clone_policy as clone_policy
+
+    # Pinned as a literal as well as compared, so shrinking the tuple to make
+    # a test pass is itself a failure rather than a smaller matrix.
+    assert set(POLICY_HEADS) == {"flat", "factored", "factored-stats", "conv"}
+
+    for head in POLICY_HEADS:
+        assert build_parser().parse_args(["--head", head]).head == head
+        assert clone_policy.build_parser().parse_args(["--head", head]).head == head
+
+    # And the refusal still works, in both directions: a name the network
+    # cannot build must not be accepted by either parser.
+    for parser in (build_parser(), clone_policy.build_parser()):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--head", "autoregressive-maybe"])
+
+
+def test_every_head_the_command_line_offers_actually_builds_a_network():
+    """The other direction. A choice the parser accepts and ``ActorCritic``
+    refuses is a run that dies after loading the data and building the
+    environment, which on this project is minutes in."""
+    from cr_sim.api.env import CRSimEnv
+    from cr_sim.data.cards import build_card_registry
+    from cr_sim.data.leveling import build_level_table
+    from cr_sim.data.source import LogicData
+    from cr_sim.train.nets import POLICY_HEADS, ActorCritic, net_config_for
+
+    from .test_data_pipeline import BUILD
+
+    data = LogicData.load(BUILD)
+    levels, registry = build_level_table(data), build_card_registry(data)
+    deck = ("Knight", "Musketeer", "Cannon", "Skeletons",
+            "IceSpirits", "Log", "Fireball", "Goblins")
+    env = CRSimEnv(data, levels, registry, deck, deck, ticks_per_second=20,
+                   frame_skip=20, max_ticks=400)
+    env.reset(seed=0)
+    for head in POLICY_HEADS:
+        net = ActorCritic(net_config_for(env, head=head))
+        assert sum(p.numel() for p in net.policy_head.parameters()) > 0, head
+
+
 def test_every_reward_a_run_can_train_under_can_also_be_recorded():
     """The two parsers are written separately, and drifted once already.
 

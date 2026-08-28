@@ -40,7 +40,7 @@ from cr_sim.data.source import LogicData
 from cr_sim.engine.entity import Team
 from cr_sim.train.clone import CloneConfig, Demonstrations, clone
 from cr_sim.train.evaluate import evaluate
-from cr_sim.train.nets import ActorCritic, net_config_for
+from cr_sim.train.nets import POLICY_HEADS, ActorCritic, net_config_for
 from cr_sim.train.run import DEFAULT_BUILD, DEFAULT_DECK, _random_opponent
 from cr_sim.train.selfplay import check_lift_is_named, opponent_name
 
@@ -125,7 +125,13 @@ def subset(data: Demonstrations, fraction: float, seed: int) -> Demonstrations:
         episodes=data.episodes, play_rate=data.play_rate)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Its own function, the way ``cr_sim.train.run`` has one.
+
+    So that what this script will accept can be asked without running a
+    clone. ``--head`` in particular went stale here while the network grew a
+    fourth head, and a flag nobody can inspect is a flag nobody checks.
+    """
     parser = argparse.ArgumentParser(prog="clone-policy")
     parser.add_argument("--demos", type=Path, default=Path("data_cache/demos"))
     parser.add_argument("--out", type=Path, default=Path("runs/cloned"))
@@ -162,12 +168,17 @@ def main(argv: list[str] | None = None) -> int:
              "to match, and a mismatch is a silent one: the shapes line up "
              "whenever the channel counts do.")
     parser.add_argument(
-        "--head", choices=("flat", "factored", "conv"), default="flat",
+        "--head", choices=POLICY_HEADS, default="flat",
         help="'flat' is one linear layer over all 720 actions; 'factored' "
              "picks the card, then the tile, with the tile head conditioned "
              "on an embedding of the card and its placement weights shared "
              "across cards. Both parameterise the same masked categorical, so "
-             "the comparison is about sample efficiency, not expressiveness.",
+             "the comparison is about sample efficiency, not expressiveness. "
+             "'factored-stats' is 'factored' with the card lookup replaced by "
+             "an encoder over the card's own statistics, so a clone trained on "
+             "one deck's demonstrations conditions correctly on a card it "
+             "never saw. 'conv' emits the placements as a 1x1 convolution "
+             "over the trunk's own feature map.",
     )
     parser.add_argument(
         "--fraction", type=float, default=1.0,
@@ -178,7 +189,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--episodes", type=int, default=120,
                         help="battles in the final evaluation")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     shards = sorted(args.demos.glob("shard-*.npz"))
     data = merge(shards)

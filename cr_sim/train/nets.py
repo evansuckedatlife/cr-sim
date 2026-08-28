@@ -38,8 +38,19 @@ import torch.nn.functional as F
 
 __all__ = [
     "ActorCritic", "NetConfig", "masked_categorical", "FactoredHead",
-    "ConvPlacementHead", "net_config_for",
+    "FactoredStatsHead", "ConvPlacementHead", "net_config_for", "POLICY_HEADS",
 ]
+
+#: Every head :class:`ActorCritic` can build, and the ``--head`` choices of
+#: both entry points that write a checkpoint's ``"head"`` field.
+#:
+#: One tuple because the two argparse lists were written out by hand and went
+#: stale: ``"factored-stats"`` shipped complete -- config, head, worker
+#: round-trip, all of it -- and was unreachable from
+#: ``python -m cr_sim.train.run`` and ``scripts/clone_policy.py`` alike, since
+#: neither would accept the name. A head no entry point can select is a head
+#: no checkpoint can ever be written with.
+POLICY_HEADS: tuple[str, ...] = ("flat", "factored", "factored-stats", "conv")
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +114,16 @@ class NetConfig:
     #: observation a grid rather than a flat vector, applied to the output.
     #: It also stays one flat masked categorical, so nothing downstream
     #: changes.
+    #:
+    #: ``"factored-stats"`` is the fourth, and it is the factored head with
+    #: its card *lookup* replaced by an encoder over the card's own stats --
+    #: see :class:`FactoredStatsHead`. A fourth name rather than a change to
+    #: ``"factored"`` because every ``load_state_dict`` in this tree is
+    #: strict, seven factored checkpoints exist on disk, and one of them is
+    #: the resume target of a live run: renaming a parameter under
+    #: ``policy_head`` kills that run at its next restart. A migration shim is
+    #: not available anyway -- the old weights are a free 32x8 table with no
+    #: encoder to project onto.
     head: str = "flat"
     #: Card-identity vocabulary, from the encoding config. Zero means the
     #: factored head falls back to conditioning on the hand *slot* index
@@ -125,6 +146,21 @@ class NetConfig:
     #: factors by. Mirrors ``cr_sim.api.encoding.NUM_CARD_SLOTS``; kept as a
     #: field rather than imported so this module stays free of the encoder.
     num_slots: int = 5
+    #: One row of card statistics per vocabulary entry, **in ``vocab`` order**,
+    #: for the ``"factored-stats"`` head. Built once by
+    #: :func:`net_config_for` from :func:`cr_sim.data.card_features
+    #: .card_feature_table`; empty for every other head.
+    #:
+    #: A tuple of tuples of plain floats and nothing else. This dataclass is
+    #: ``frozen`` and ``slots``, so the field has to stay hashable, and
+    #: ``asdict()`` pickles the whole config into ``VecEnvConfig`` for each of
+    #: the spawned worker processes to rebuild. A numpy array would break the
+    #: auto ``__hash__`` and ``__eq__``; a registry or a ``LogicData`` would
+    #: not survive the pickle.
+    card_stats: tuple[tuple[float, ...], ...] = ()
+    #: Hidden width of the card-stat encoder. A field rather than a literal so
+    #: it can be swept without a source edit.
+    card_encoder_hidden: int = 32
 
     @property
     def num_cells(self) -> int:
@@ -155,12 +191,21 @@ def _orthogonal(module: nn.Module, gain: float) -> nn.Module:
 def net_config_for(env, **overrides) -> NetConfig:
     """The shapes a network needs, read off an environment.
 
-    One place, because there are five: the trainer, the evaluator, the cloner,
-    the worker processes and the browser server all build a network for the
-    same environment, and a field added in four of them is a shape mismatch
-    that only shows up when the fifth loads a checkpoint. The card-conditioned
-    head in particular needs the encoder's own hand layout, which is not
-    something a caller should be restating.
+    One place, because there are four: the trainer, the evaluator, the cloner
+    and the worker processes all build a network for the same environment, and
+    a field added in three of them is a shape mismatch that only shows up when
+    the fourth loads a checkpoint. The card-conditioned head in particular
+    needs the encoder's own hand layout, which is not something a caller
+    should be restating.
+
+    The browser server is the exception, and not a happy one:
+    :meth:`cr_sim.play.policy.PolicyOpponent._ensure` has a battle rather than
+    an environment and restates every field by hand. It restated eight of them
+    and not ``card_stats``, which built a ``"factored-stats"`` head with no
+    table -- a ``ValueError`` raised on the first move, swallowed by
+    ``PlaySession._think``, and an opponent that played nothing for the rest
+    of the match. Anything added here has to be added there too, until that
+    path can be given a real environment.
     """
     from ..api.encoding import NUM_CARD_SLOTS, hand_onehot_layout, observation_shapes
 
@@ -168,6 +213,20 @@ def net_config_for(env, **overrides) -> NetConfig:
     offset, stride, _count, width = hand_onehot_layout(env.encoding)
     nvec = [int(v) for v in env.action_space.nvec]
     grid = shapes["grid"]
+    # The stat table is the whole expensive part of the card-stat head --
+    # resolving every card, following its projectile chain, scaling to level --
+    # and it is a function of static data, so it is computed exactly once here
+    # and carried on the config. Nothing on the per-decision path touches the
+    # data layer. Built only for the head that reads it: every other head
+    # would pay the resolve cost for a field it never looks at.
+    #
+    # Keyed on the *encoding's* vocab, in the encoding's order, because that
+    # is the order the observation's one-hot bits are set in.
+    if overrides.get("head") == "factored-stats" and "card_stats" not in overrides:
+        from ..data.card_features import card_feature_table
+
+        overrides["card_stats"] = card_feature_table(
+            env.data, env.levels, env.registry, env.encoding.vocab)
     return NetConfig(
         grid_channels=int(grid[0]),
         grid_height=int(grid[1]),
@@ -282,6 +341,131 @@ class FactoredHead(nn.Module):
         return _apply_mask(joint.reshape(batch, -1), mask)
 
 
+class FactoredStatsHead(FactoredHead):
+    """The same head, conditioned on what a card *does* rather than which it is.
+
+    :class:`FactoredHead` has one free column of ``card_embedding.weight`` per
+    vocabulary entry. The vocabulary is this episode's deck union, so column
+    ``i`` means whatever ``vocab[i]`` happens to be -- and playing a different
+    deck of the same size silently hands the Knight's learned column to
+    whatever card sorts into position 4. No error, no shape mismatch, just a
+    head conditioned on the wrong card.
+
+    Here the columns are *computed* instead: each is a small MLP applied to
+    that card's own statistics -- hitpoints, damage per second, reach, speed,
+    what it targets, what it leaves behind -- so the head learns "slow, tanky,
+    ground-only goes at the bridge" rather than "card 4 goes at the bridge",
+    and a card that was never in a training deck gets a column for free. See
+    :mod:`cr_sim.data.card_features` for the features and why each is
+    there.
+
+    **The mix order is the thing that must not be got wrong.**
+    ``onehots @ encoder(table)``: encode the table, *then* mix. Never
+    ``encoder(onehots @ table)``. An empty hand slot is an all-zero one-hot,
+    and a ``bias=False`` matmul maps that to an exactly-zero conditioning
+    vector, which is the semantics the base head has and every downstream
+    thing assumes. ``encoder(0)`` instead returns the encoder's bias and the
+    LayerNorm's shift, so an empty slot would quietly start meaning something.
+
+    **The trap is invisible at initialisation**, which is what makes it worth
+    this much prose. :func:`_orthogonal` zeroes every bias, ``nn.LayerNorm``
+    starts at beta 0, and LayerNorm of an all-zero row is all-zero -- so on a
+    freshly built head ``card_encoder(zeros(47))`` measures exactly 0.0 and
+    the wrong mix order is indistinguishable from the right one. One Adam step
+    ends that: measured on the test deck at seed 0, ``|encoder(0)|`` goes from
+    0.0 to 5.61 against a real card's 5.68. So from step 1 of any real run an
+    empty hand slot would condition on a vector the size of a card's, and a
+    check made at initialisation cannot see it.
+    ``tests/test_action_head_stats.py`` moves the encoder's biases off zero
+    before asserting, for exactly that reason.
+
+    **No runtime cache, deliberately.** The table is 8 rows through a 47-32-32
+    MLP and is recomputed every forward. Measured on this machine while an
+    8-worker training run had the cores: 272us at batch 1 against 4992us for
+    the whole ``policy_logits``, which is 5.5% of it, and 544us at batch 256
+    against 89.3ms, which is 0.6%. Both ratios move with whatever else the box
+    is doing -- the same measurement with a test suite running as well read
+    8.3% and 0.7% -- and stay a rounding error either way, against a decision
+    that also has to encode an observation and build a legality mask. A cache
+    would buy nothing and cost the failure this codebase specialises in: a
+    table computed once and never invalidated leaves the head frozen from step
+    1 while a "the parameters moved" test stays green, because the encoder's
+    weights still move. ``tests/test_action_head_stats.py`` counts
+    the encoder's forward passes per decision, so a cache added later has to
+    turn that test red before it can be believed.
+
+    Shapes: ``(47) -> Linear -> (32) -> Tanh -> Linear -> (32) -> LayerNorm``.
+    The output width **must** stay ``config.card_embedding``: ``place_in`` is
+    ``Linear(hidden + width, place_hidden)`` and the width is baked into it.
+    Holding it there keeps ``place_in``, ``place_out``, ``slot_head`` and
+    ``pass_embedding`` byte-identical to the factored head's, which leaves
+    warm-starting from a factored checkpoint's tile weights possible later.
+
+    Depth one and tanh rather than ReLU: the inputs are clipped to ``[-1, 1]``
+    and tanh keeps the hidden activations bounded too, so an unseen
+    combination of stats lands inside the region the second layer was trained
+    over instead of arbitrarily far outside it. The ``LayerNorm`` makes the
+    conditioning's scale independent of how extreme an unseen card is; it is
+    applied per row, to the table, so it couples no card to any other.
+    """
+
+    def __init__(self, config: NetConfig) -> None:
+        if config.vocab_size <= 0 or not config.card_stats:
+            raise ValueError(
+                "the 'factored-stats' head needs a card stat table; "
+                "net_config_for builds it from the environment's vocabulary. "
+                "A NetConfig built by hand has to pass card_stats itself.")
+        if len(config.card_stats) != config.vocab_size:
+            raise ValueError(
+                f"card_stats has {len(config.card_stats)} rows against a "
+                f"vocabulary of {config.vocab_size}. Row i is what slot i's "
+                "one-hot bit selects; a table of a different length is a head "
+                "conditioned on the wrong cards.")
+        super().__init__(config)
+        # The identity lookup the base class just built is exactly the thing
+        # this head exists to remove. Assigning None drops it from
+        # named_parameters() and from state_dict() -- and leaves the attribute
+        # in place, so the inherited _context's `is not None` branch is the one
+        # this class overrides rather than a fallback it might fall into.
+        self.card_embedding = None
+
+        width, hidden = config.card_embedding, config.card_encoder_hidden
+        features = len(config.card_stats[0])
+        self.card_encoder = nn.Sequential(
+            _orthogonal(nn.Linear(features, hidden), 5 / 3),   # tanh's gain
+            nn.Tanh(),
+            _orthogonal(nn.Linear(hidden, width), 1.0),        # the lookup's
+            nn.LayerNorm(width),
+        )
+        #: The stat table, non-persistent on purpose. A persistent buffer or a
+        #: parameter would put it in ``state_dict()`` and turn strict loading
+        #: of this head's own checkpoints into a versioning problem the day a
+        #: feature is added or a normalisation constant changes.
+        self.register_buffer(
+            "card_stats",
+            torch.tensor(config.card_stats, dtype=torch.float32),
+            persistent=False,
+        )
+
+    def _context(self, vector: torch.Tensor) -> torch.Tensor:
+        config = self.config
+        start, stride, width = config.hand_offset, config.hand_stride, config.vocab_size
+        onehots = torch.stack(
+            [vector[:, start + i * stride: start + i * stride + width]
+             for i in range(self.play_slots)],
+            dim=1,
+        )                                            # (batch, play_slots, vocab)
+        table = self.card_encoder(self.card_stats)   # (vocab, width)
+        cards = onehots @ table                      # (batch, play_slots, width)
+        # The pass slot stays a learned parameter and is not run through the
+        # encoder. It has no card, so there is nothing to encode -- and a zero
+        # stat row put through the encoder would come out identical to an empty
+        # hand slot's conditioning, which is wrong in the one way that matters:
+        # pass is unconditionally legal and an empty slot is never legal.
+        return torch.cat(
+            [cards, self.pass_embedding.unsqueeze(0).expand(vector.shape[0], -1, -1)],
+            dim=1)
+
 
 class ConvPlacementHead(nn.Module):
     """Placement logits as a 1x1 convolution over the trunk's own feature map.
@@ -370,6 +554,8 @@ class ActorCritic(nn.Module):
         # a return estimate, not a logit.
         if config.head == "factored":
             self.policy_head = FactoredHead(config)
+        elif config.head == "factored-stats":
+            self.policy_head = FactoredStatsHead(config)
         elif config.head == "conv":
             self.policy_head = ConvPlacementHead(config)
         elif config.head == "flat":
@@ -377,8 +563,8 @@ class ActorCritic(nn.Module):
                 nn.Linear(config.hidden, config.num_actions), 0.01)
         else:
             raise ValueError(
-                f"unknown policy head {config.head!r}; "
-                "expected 'flat', 'factored' or 'conv'")
+                f"unknown policy head {config.head!r}; expected one of "
+                + ", ".join(repr(name) for name in POLICY_HEADS))
         self.value_head = _orthogonal(nn.Linear(config.hidden, 1), 1.0)
 
     #: Index into ``self.conv`` just past the first stride-2 convolution and

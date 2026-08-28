@@ -95,6 +95,28 @@ class PolicyOpponent:
         from ..api.encoding import NUM_CARD_SLOTS, hand_onehot_layout
 
         offset, stride, _count, width = hand_onehot_layout(self._config)
+        head = (self._payload.get("head", "flat")
+                if isinstance(self._payload, dict) else "flat")
+        # The stat-conditioned head reads a table of card statistics, one row
+        # per vocabulary entry, and the config it is built from has to carry
+        # it -- ``net_config_for`` does that for the trainer, the evaluator,
+        # the cloner and the workers, and this is the one load path that
+        # restates the config by hand instead. Without it the head raises on
+        # the *first move* rather than at load, and ``PlaySession._think``
+        # catches that by setting ``self.controller = None``: the opponent
+        # stops playing for the rest of the match instead of falling back to
+        # random, which reads as a policy that decided to pass 60 times.
+        #
+        # Keyed on ``self._config.vocab``, which is what the observation's
+        # one-hot bits are indexed by; anything else conditions the head on
+        # the wrong card.
+        card_stats: tuple[tuple[float, ...], ...] = ()
+        if head == "factored-stats":
+            from ..data.card_features import card_feature_table
+
+            card_stats = card_feature_table(
+                self.server.data, self.server.levels, self.server.registry,
+                self._config.vocab)
         net = self._net_cls(
             self._net_config_cls(
                 grid_channels=observation["grid"].shape[0],
@@ -110,8 +132,8 @@ class PolicyOpponent:
                 # checkpoint; a factored head's parameters do not fit a flat
                 # one and load_state_dict would fail on a tensor name the
                 # player has no way to interpret.
-                head=self._payload.get("head", "flat")
-                if isinstance(self._payload, dict) else "flat",
+                head=head,
+                card_stats=card_stats,
             )
         )
         state = self._payload.get("state_dict", self._payload)
