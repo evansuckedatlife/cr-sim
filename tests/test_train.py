@@ -17,6 +17,7 @@ learns nothing.
 from __future__ import annotations
 
 import json
+import pathlib
 
 import numpy as np
 import pytest
@@ -599,3 +600,89 @@ def test_the_worker_config_agrees_with_the_probe_env_field_for_field(tmp_path,
     assert config.frame_skip == 30
     assert config.max_ticks == 20 * 20
     assert config.reward_shaping_weight == pytest.approx(0.02)
+
+
+# --------------------------------- the demonstrations are harvested under the
+# --------------------------------- reward they will later be fine-tuned with
+
+
+def test_make_demos_builds_the_reward_the_fine_tune_will_use():
+    """The clone's critic is what reinforcement learning inherits.
+
+    make_demos built its env with no reward_weights at all, so every
+    demonstration set carried value targets from the simple shaped reward
+    while every fine-tune ran `projected`. The inherited critic arrived
+    predicting +1.48 where PPO's returns averaged +0.47 -- a quantity nobody
+    was optimising.
+    """
+    from types import SimpleNamespace
+
+    from cr_sim.api.reward import ProjectionWeights
+    from cr_sim.train.run import _reward_weights
+
+    weights = _reward_weights(SimpleNamespace(
+        reward="projected", horizon_seconds=3.0, elixir_weight=0.0))
+    assert isinstance(weights, ProjectionWeights)
+    assert weights.horizon_seconds == 3.0
+    assert weights.elixir == 0.0
+
+
+def test_every_reward_a_run_can_train_under_can_also_be_recorded():
+    """The two parsers are written separately, and drifted once already.
+
+    run.py defaults to five-term and every real run passes --reward projected
+    explicitly, so pinning the *defaults* together would pin a fiction. What
+    has to hold is that a reward the fine-tune can be launched with is one the
+    demonstrations can be harvested under -- otherwise the value targets and
+    the objective are different quantities and nothing says so.
+    """
+    from cr_sim.train.run import build_parser
+
+    import scripts.make_demos as make_demos
+
+    def choices_for(parser, flag):
+        for action in parser._actions:
+            if flag in action.option_strings:
+                return set(action.choices or ())
+        raise AssertionError(f"{flag} is not a flag on this parser")
+
+    run_rewards = choices_for(build_parser(), "--reward")
+    demo_rewards = choices_for(make_demos.build_parser(), "--reward")
+    missing = run_rewards - demo_rewards
+    assert not missing, (
+        f"a run can train under {sorted(missing)} but demonstrations cannot "
+        "be recorded under it, so its value targets would come from a "
+        "different reward than the objective")
+
+
+def test_the_demo_generator_exposes_the_reward_knobs_the_run_does():
+    from cr_sim.train.run import build_parser
+
+    import scripts.make_demos as make_demos
+
+    demo_flags = {s for a in make_demos.build_parser()._actions
+                  for s in a.option_strings}
+    for flag in ("--reward", "--elixir-weight", "--tower-level"):
+        assert flag in demo_flags, (
+            f"{flag} changes what the demonstrations mean and must be "
+            "settable when recording them")
+    assert "--reward-horizon-seconds" in demo_flags
+
+
+def test_make_demos_does_not_confuse_the_search_horizon_with_the_rewards():
+    """Two different quantities that share a name and a unit.
+
+    --horizon-seconds is how far the SEARCH projects each candidate (15s);
+    --reward-horizon-seconds is the projected reward's lookahead (3s). Passing
+    the parser's namespace straight to _reward_weights, which reads
+    `horizon_seconds`, would build the reward with a five-times-too-long
+    lookahead.
+    """
+    import scripts.make_demos as make_demos
+
+    source = pathlib.Path(make_demos.__file__).read_text(encoding="utf-8")
+    assert "horizon_seconds=args.reward_horizon_seconds" in source, (
+        "the reward must be built from --reward-horizon-seconds, not from "
+        "--horizon-seconds, which is the search's own lookahead")
+    assert "_reward_weights(args)" not in source, (
+        "passing args directly picks up the search horizon as the reward's")

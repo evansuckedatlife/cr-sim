@@ -64,6 +64,26 @@ class Demonstrations:
     #: an expert that mostly passes teaches a policy to mostly pass, and that
     #: is a comfortable local optimum this environment rewards.
     play_rate: float = 0.0
+    #: The encoding these grids are in, by the name
+    #: :func:`~cr_sim.api.encoding.parse_observation` accepts.
+    #:
+    #: Recorded because ``clone_policy --observation`` was a *declaration*
+    #: about a file rather than a fact read from it. Most mismatches happen to
+    #: crash on the channel count, but two variants with the same width and
+    #: different meaning train quietly and stamp the wrong name onto the
+    #: checkpoint -- and from there the run's ``check_observation`` agrees with
+    #: it, because it is comparing a shape. Empty means a shard written before
+    #: this field existed, which is not the same as "v1" and must not be
+    #: silently treated as it.
+    observation: str = ""
+    #: Which reward the ``value`` column was harvested under.
+    #:
+    #: The value head is the part of the clone reinforcement learning
+    #: inherits, so a critic trained on one reward and fine-tuned under
+    #: another arrives predicting the wrong quantity: this set was collected
+    #: under the simple shaped reward while every fine-tune ran ``projected``,
+    #: and the arriving critic predicted +1.48 where returns averaged +0.47.
+    reward: str = ""
 
     def __len__(self) -> int:
         return len(self.action)
@@ -73,7 +93,8 @@ class Demonstrations:
         payload = dict(
             grid=self.grid, vector=self.vector, mask=self.mask,
             action=self.action, value=self.value,
-            episodes=self.episodes, play_rate=self.play_rate)
+            episodes=self.episodes, play_rate=self.play_rate,
+            observation=self.observation, reward=self.reward)
         if self.target is not None:
             payload["target"] = self.target
         np.savez_compressed(path, **payload)
@@ -85,7 +106,13 @@ class Demonstrations:
             grid=raw["grid"], vector=raw["vector"], mask=raw["mask"],
             action=raw["action"], value=raw["value"],
             episodes=int(raw["episodes"]), play_rate=float(raw["play_rate"]),
-            target=raw["target"] if "target" in raw.files else None)
+            target=raw["target"] if "target" in raw.files else None,
+            # str() through numpy's 0-d unicode array. Absent on any shard
+            # written before provenance existed, and left empty there rather
+            # than guessed at.
+            observation=(str(raw["observation"])
+                         if "observation" in raw.files else ""),
+            reward=(str(raw["reward"]) if "reward" in raw.files else ""))
 
 
 
@@ -157,6 +184,19 @@ def collect(
     #: card at every single decision, against the expert's 56%.
     min_spread: float = 1e-3,
     variants: "dict[str, Any] | None" = None,
+    #: Stamped onto every set this returns, so the file on disk states what it
+    #: is instead of relying on whoever loads it to declare correctly. With
+    #: ``variants`` the observation name comes from the variant's own key.
+    #:
+    #: Both are ``_name`` on purpose. This function's own loop binds
+    #: ``observation`` and ``reward`` once per step -- ``observation, reward,
+    #: terminated, truncated, _ = env.step(choice)`` -- so a parameter by
+    #: either name is silently overwritten before it is ever read. The first
+    #: version of this stamped 0.0 into every shard's reward and the last
+    #: observation *dict* into its encoding name, which numpy then wrote as an
+    #: object array that would not load back without allow_pickle.
+    reward_name: str = "",
+    observation_name: str = "v1",
 ):
     """Watch an expert play and write down every decision it faced.
 
@@ -178,7 +218,7 @@ def collect(
     if variants:
         return _collect_variants(make_env, make_expert, episodes, gamma,
                                  on_episode, target_temperature, min_spread,
-                                 variants)
+                                 variants, reward_name)
     grids: list[np.ndarray] = []
     vectors: list[np.ndarray] = []
     masks: list[np.ndarray] = []
@@ -264,12 +304,15 @@ def collect(
         episodes=episodes,
         play_rate=(played / total) if total else 0.0,
         target=np.asarray(targets, dtype=np.float32) if targets else None,
+        observation=observation_name,
+        reward=reward_name,
     )
 
 
 
 def _collect_variants(make_env, make_expert, episodes, gamma, on_episode,
-                      target_temperature, min_spread, variants):
+                      target_temperature, min_spread, variants,
+                      reward_name=""):
     """:func:`collect`, recording every observation variant off one playthrough.
 
     Implemented by re-encoding the live battle once per variant at each
@@ -354,11 +397,15 @@ def _collect_variants(make_env, make_expert, episodes, gamma, on_episode,
         episodes=episodes,
         play_rate=(played / total) if total else 0.0,
         target=np.asarray(targets, dtype=np.float32) if targets else None,
+        reward=reward_name,
     )
     return {
         name: Demonstrations(
             grid=np.asarray(parts["grid"], dtype=np.float32),
             vector=np.asarray(parts["vector"], dtype=np.float32),
+            # The variant's own key, not the caller's default: this is the one
+            # place that knows which encoding produced these grids.
+            observation=name,
             **shared,
         )
         for name, parts in out.items()

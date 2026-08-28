@@ -476,3 +476,179 @@ def test_the_soft_target_is_what_the_cloner_actually_fits():
                         torch.ones(1, NUM_ACTIONS, dtype=torch.bool))
     assert int(logits.argmax()) == wanted, (
         "the cloner fitted the recorded action, not the search's distribution")
+
+
+# ------------------------------------------- a demonstration set states what it is
+
+
+def _demo(observation="v1", reward="projected", channels=9, rows=3):
+    import numpy as np
+    from cr_sim.train.clone import Demonstrations
+    return Demonstrations(
+        grid=np.zeros((rows, channels, 32, 18), dtype=np.float32),
+        vector=np.zeros((rows, 102), dtype=np.float32),
+        mask=np.ones((rows, 720), dtype=bool),
+        action=np.zeros(rows, dtype=np.int64),
+        value=np.zeros(rows, dtype=np.float32),
+        episodes=1, play_rate=0.5,
+        observation=observation, reward=reward)
+
+
+def test_a_shard_records_the_encoding_and_reward_it_was_written_under(tmp_path):
+    """--observation used to be a claim about a file, not a fact read from it.
+
+    Most mismatches die on the channel count, but two variants of equal width
+    and different meaning train quietly, stamp the wrong name onto the
+    checkpoint, and then every run trusts it -- check_observation compares a
+    shape, so it agrees.
+    """
+    from cr_sim.train.clone import Demonstrations
+
+    path = tmp_path / "shard-00.npz"
+    _demo(observation="v3", reward="projected").save(path)
+    back = Demonstrations.load(path)
+    assert back.observation == "v3"
+    assert back.reward == "projected"
+
+
+def test_a_shard_written_before_provenance_reports_empty_not_v1(tmp_path):
+    """An unstamped shard is unknown, which is not the same as v1.
+
+    Defaulting it to "v1" would make every legacy set assert something nobody
+    recorded, and the check downstream would then pass on a guess.
+    """
+    import numpy as np
+    from cr_sim.train.clone import Demonstrations
+
+    path = tmp_path / "shard-00.npz"
+    np.savez_compressed(
+        path,
+        grid=np.zeros((2, 9, 32, 18), dtype=np.float32),
+        vector=np.zeros((2, 102), dtype=np.float32),
+        mask=np.ones((2, 720), dtype=bool),
+        action=np.zeros(2, dtype=np.int64),
+        value=np.zeros(2, dtype=np.float32),
+        episodes=1, play_rate=0.5)
+    back = Demonstrations.load(path)
+    assert back.observation == "", "an unstamped shard must not claim an encoding"
+    assert back.reward == ""
+
+
+def test_merging_shards_recorded_under_different_encodings_is_refused(tmp_path):
+    """The row-to-row hazard nothing downstream could ever detect."""
+    import pytest as _pytest
+    from scripts.clone_policy import merge
+
+    a, b = tmp_path / "shard-00.npz", tmp_path / "shard-01.npz"
+    _demo(observation="v1").save(a)
+    _demo(observation="spells").save(b)
+    with _pytest.raises(SystemExit) as caught:
+        merge([a, b])
+    message = str(caught.value)
+    assert "observation" in message
+    assert "shard-00.npz" in message and "shard-01.npz" in message
+
+
+def test_merging_a_stamped_shard_with_an_unstamped_one_is_refused(tmp_path):
+    """Mixing a known encoding with an unknown one is the same hazard."""
+    import numpy as np
+    import pytest as _pytest
+    from scripts.clone_policy import merge
+
+    a, b = tmp_path / "shard-00.npz", tmp_path / "shard-01.npz"
+    _demo(observation="v3").save(a)
+    np.savez_compressed(
+        b,
+        grid=np.zeros((2, 9, 32, 18), dtype=np.float32),
+        vector=np.zeros((2, 102), dtype=np.float32),
+        mask=np.ones((2, 720), dtype=bool),
+        action=np.zeros(2, dtype=np.int64),
+        value=np.zeros(2, dtype=np.float32),
+        episodes=1, play_rate=0.5)
+    with _pytest.raises(SystemExit):
+        merge([a, b])
+
+
+def test_shards_that_agree_merge_and_carry_their_provenance(tmp_path):
+    from scripts.clone_policy import merge
+
+    a, b = tmp_path / "shard-00.npz", tmp_path / "shard-01.npz"
+    _demo(observation="v3", reward="projected").save(a)
+    _demo(observation="v3", reward="projected").save(b)
+    merged = merge([a, b])
+    assert merged.observation == "v3"
+    assert merged.reward == "projected"
+    assert len(merged) == 6
+
+
+def test_collect_stamps_names_not_the_loop_variables_that_shadow_them(tmp_path):
+    """collect's step loop rebinds both names, once per step.
+
+    `observation, reward, terminated, truncated, _ = env.step(choice)` means a
+    parameter called `reward` or `observation` is silently overwritten before
+    the payload is built. The first version of this stamped the last step's
+    float into every shard's reward, and an actual observation dict into its
+    encoding name -- which numpy wrote as an object array that would not load
+    back without allow_pickle. A provenance field that round-trips perfectly
+    while carrying the wrong kind of thing is this codebase's signature bug.
+    """
+    import inspect
+
+    from cr_sim.train import clone as clone_module
+
+    signature = inspect.signature(clone_module.collect)
+    for shadowed in ("reward", "observation"):
+        assert shadowed not in signature.parameters, (
+            f"`{shadowed}` is rebound by collect's step loop; a parameter of "
+            "that name is overwritten before it is ever stamped")
+        assert f"{shadowed}_name" in signature.parameters
+
+    source = inspect.getsource(clone_module.collect)
+    assert "reward=reward_name" in source
+    assert "observation=observation_name" in source
+
+
+def test_collect_actually_stamps_what_it_was_told(tmp_path):
+    """The behavioural half: the source check above cannot see a wrong value.
+
+    Runs the real collect over the module's toy environment and reads the
+    stamps back off disk, which is what caught the object-array failure.
+    """
+    import numpy as np
+
+    from cr_sim.train.clone import Demonstrations
+
+    data = collect(lambda i: _Env(), _expert, episodes=2,
+                   reward_name="projected", observation_name="v3")
+    assert data.observation == "v3"
+    assert data.reward == "projected"
+
+    path = tmp_path / "stamped.npz"
+    data.save(path)
+    raw = np.load(path)  # allow_pickle=False: an object array fails here
+    assert raw["observation"].dtype != object
+    assert raw["reward"].dtype != object
+    back = Demonstrations.load(path)
+    assert back.observation == "v3"
+    assert back.reward == "projected"
+
+
+def test_both_collect_paths_stamp_provenance(tmp_path):
+    """The single-variant and variants paths build their payloads separately.
+
+    They have drifted before -- `merge` once dropped `target` by omitting one
+    keyword -- so both are pinned rather than one standing in for both.
+    """
+    import inspect
+
+    from cr_sim.train import clone as clone_module
+
+    plain = inspect.getsource(clone_module.collect)
+    variants = inspect.getsource(clone_module._collect_variants)
+    assert "reward=reward_name" in plain, "single-variant payload"
+    assert "reward=reward_name" in variants, "variants payload"
+    assert "observation=observation_name," in plain, "single-variant path"
+    assert "observation=name," in variants, "variants path uses the variant key"
+    assert "reward_name" in inspect.signature(
+        clone_module._collect_variants).parameters, (
+        "the helper must receive it; collect's local is not in its scope")

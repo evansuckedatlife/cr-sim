@@ -45,6 +45,9 @@ from cr_sim.train.run import DEFAULT_BUILD, DEFAULT_DECK, _random_opponent
 from cr_sim.train.selfplay import check_lift_is_named, opponent_name
 
 
+UNRECORDED = "(unrecorded)"
+
+
 def merge(paths: list[Path]) -> Demonstrations:
     """Concatenate shards into one training set.
 
@@ -75,7 +78,32 @@ def merge(paths: list[Path]) -> Demonstrations:
                 if all(t is not None for t in targets) else None),
         episodes=sum(p.episodes for p in parts),
         play_rate=float(np.mean([p.play_rate for p in parts])),
+        observation=_agree(parts, "observation", paths),
+        reward=_agree(parts, "reward", paths),
     )
+
+
+def _agree(parts: "list[Demonstrations]", field: str, paths: list[Path]) -> str:
+    """The value every shard agrees on, or a refusal.
+
+    Merging shards recorded under different encodings makes a set whose grids
+    mean different things row to row, and nothing downstream can detect it:
+    the channel count matches, the training converges, and the checkpoint
+    carries whichever name was declared. Shards written before provenance
+    existed report an empty string, and mixing those with stamped ones is the
+    same hazard, so that is refused too -- naming the files, because the fix
+    is to re-record the odd one out.
+    """
+    seen = {getattr(p, field) for p in parts}
+    if len(seen) == 1:
+        return seen.pop()
+    where = {getattr(p, field): q.name for p, q in zip(parts, paths)}
+    raise SystemExit(
+        f"shards disagree on {field}: "
+        + ", ".join(f"{v!r} (e.g. {n})" for v, n in sorted(where.items()))
+        + f". They cannot be merged: a set whose {field} varies row to row is"
+        " undetectable downstream. Re-record the odd shards, or point --demos"
+        " at one consistent directory.")
 
 
 
@@ -158,9 +186,29 @@ def main(argv: list[str] | None = None) -> int:
         data = subset(data, args.fraction, args.seed)
     if args.targets == "hard":
         data.target = None
+    # --observation names the encoding the net is built for. Until now that
+    # was an unverified claim about a file: most mismatches happen to die on
+    # the channel count, but two variants of equal width and different meaning
+    # train quietly and stamp the wrong name onto the checkpoint, after which
+    # a run's check_observation agrees with it because it compares a shape.
+    if data.observation and data.observation != args.observation:
+        raise SystemExit(
+            f"--observation says {args.observation!r} but these shards were "
+            f"recorded under {data.observation!r}. This flag is written into "
+            "the checkpoint and every later run trusts it, so it is not a "
+            f"preference. Pass --observation {data.observation}, or point "
+            f"--demos at a set recorded under {args.observation}.")
+    if not data.observation:
+        print(f"WARNING: these shards record no observation, so --observation "
+              f"{args.observation!r} cannot be checked against them. They "
+              "predate provenance; re-record to make this verifiable.",
+              flush=True)
     print(f"{len(shards)} shards, {len(data):,} decisions from "
           f"{data.episodes} episodes, expert played on "
-          f"{data.play_rate:.0%} of them\n", flush=True)
+          f"{data.play_rate:.0%} of them, "
+          f"observation {data.observation or UNRECORDED}, "
+          f"reward {data.reward or UNRECORDED}", flush=True)
+    print(flush=True)
 
     build = LogicData.load(DEFAULT_BUILD)
     levels, registry = build_level_table(build), build_card_registry(build)

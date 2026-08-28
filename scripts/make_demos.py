@@ -18,6 +18,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -30,11 +31,18 @@ from cr_sim.data.leveling import build_level_table
 from cr_sim.data.source import LogicData
 from cr_sim.engine.entity import Team
 from cr_sim.train.clone import Demonstrations, collect
-from cr_sim.train.run import DEFAULT_BUILD, DEFAULT_DECK, _random_opponent
+from cr_sim.train.run import (
+    DEFAULT_BUILD, DEFAULT_DECK, _random_opponent, _reward_weights)
 from cr_sim.train.scripted import SearchBot, SearchBotConfig
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Exposed so a test can compare these flags against run.py's.
+
+    The two parsers are written separately and drifted once already: this one
+    built its environment with no reward at all, so every demonstration set
+    carried value targets from a reward no fine-tune ever optimised.
+    """
     parser = argparse.ArgumentParser(prog="make-demos")
     parser.add_argument("--episodes", type=int, default=60)
     parser.add_argument("--shard", type=int, default=0)
@@ -53,7 +61,33 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--match-seconds", type=int, default=120)
     parser.add_argument("--frame-skip", type=int, default=30)
-    parser.add_argument("--horizon-seconds", type=float, default=15.0)
+    parser.add_argument("--tps", type=int, default=20)
+    parser.add_argument(
+        "--horizon-seconds", type=float, default=15.0,
+        help="how far the SEARCH projects each candidate. Not the reward's "
+             "projection horizon -- that is --reward-horizon-seconds, and the "
+             "two are different quantities that happen to share a unit.",
+    )
+    # The reward the value column is harvested under. It had none: this script
+    # built its env with no reward_weights at all, so every demonstration set
+    # ever collected carried value targets from the simple shaped reward while
+    # every fine-tune ran `projected`. The clone's critic is the part
+    # reinforcement learning inherits, so it arrived predicting a quantity
+    # nobody was optimising -- +1.48 against returns averaging +0.47. The
+    # defaults here match cr_sim.train.run's, which is the point.
+    parser.add_argument(
+        "--reward", choices=("simple", "five-term", "projected"),
+        default="projected",
+        help="which reward the recorded value targets are computed under. "
+             "Must match the reward the clone is later fine-tuned with, or "
+             "the inherited critic predicts the wrong quantity.",
+    )
+    parser.add_argument("--elixir-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--reward-horizon-seconds", type=float, default=3.0,
+        help="the projected reward's lookahead, matching run.py's "
+             "--horizon-seconds. 0 disables the projection.",
+    )
     parser.add_argument("--candidates", type=int, default=14)
     parser.add_argument(
         "--opponent", choices=("random", "bot"), default="random",
@@ -61,7 +95,11 @@ def main(argv: list[str] | None = None) -> int:
              "measured; 'bot' produces harder positions but takes twice as "
              "long, since both sides then search.",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     data = LogicData.load(DEFAULT_BUILD)
     levels, registry = build_level_table(data), build_card_registry(data)
@@ -84,8 +122,19 @@ def main(argv: list[str] | None = None) -> int:
             opponent.wants_battle = True
         return CRSimEnv(
             data, levels, registry, DEFAULT_DECK, DEFAULT_DECK,
-            ticks_per_second=20, frame_skip=args.frame_skip,
-            max_ticks=20 * args.match_seconds, tower_level=args.tower_level,
+            ticks_per_second=args.tps, frame_skip=args.frame_skip,
+            max_ticks=args.tps * args.match_seconds,
+            tower_level=args.tower_level,
+            # Through a shim, because _reward_weights reads
+            # `horizon_seconds` and in this script that name is the *search*
+            # horizon (15s), not the reward's projection horizon (3s). Passing
+            # args directly would silently build the projection with a
+            # five-times-too-long lookahead -- the same shape of bug as the
+            # one this flag exists to fix.
+            reward_weights=_reward_weights(SimpleNamespace(
+                reward=args.reward,
+                horizon_seconds=args.reward_horizon_seconds,
+                elixir_weight=args.elixir_weight)),
             opponent_policy=opponent)
 
     def make_expert(env):
@@ -111,11 +160,14 @@ def main(argv: list[str] | None = None) -> int:
     names = [n.strip() for n in args.observations.split(",") if n.strip()]
     if names == ["v1"]:
         demos = collect(make_env, make_expert, episodes=args.episodes,
-                        on_episode=progress)
+                        on_episode=progress,
+                        reward_name=args.reward,
+                        observation_name="v1")
         results = {"": demos}
     else:
         results = collect(
             make_env, make_expert, episodes=args.episodes, on_episode=progress,
+            reward_name=args.reward,
             variants={name: parse_observation(name) for name in names})
 
     for name, demos in results.items():
@@ -126,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"shard {args.shard}: wrote {len(demos)} decisions from "
               f"{demos.episodes} episodes to {path} "
               f"(play rate {demos.play_rate:.0%}, "
+              f"observation {demos.observation!r}, reward {demos.reward!r}, "
               f"{(time.perf_counter() - started) / 60:.0f} min)", flush=True)
     return 0
 
