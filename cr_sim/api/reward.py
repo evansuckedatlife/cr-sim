@@ -304,6 +304,17 @@ class ProjectionWeights:
     #: of that. This is the one real tuning decision here.
     horizon_seconds: float | None = 3.0
 
+    def as_dict(self) -> dict[str, Any]:
+        """Every knob, literally, for a run directory to record.
+
+        The counterpart of :meth:`RewardWeights.as_dict`, and it did not
+        exist -- which is why ``tower`` had never been written down anywhere.
+        It has no CLI flag either, so a run's config.json recorded ``shaping``
+        (inert under this reward) and not the coefficient that was actually
+        scaling the tower term.
+        """
+        return asdict(self)
+
 
 class ProjectedReward:
     """Reward as the change in what the board is already worth.

@@ -47,7 +47,8 @@ from cr_sim.train.evaluate import (
 )
 from cr_sim.train.run import DEFAULT_BUILD, DEFAULT_DECK, _random_opponent
 from cr_sim.train.scripted import SearchBot, SearchBotConfig
-from cr_sim.train.selfplay import check_lift_is_named, opponent_name
+from cr_sim.train.selfplay import (check_lift_is_named, opponent_name,
+                                   reward_name)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -145,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
     arm = paired_lift(measured, control)
     control_crowns = np.asarray(control["crowns"], dtype=float)
     faced = opponent_name(make_env(0))
+    # The unit the lift is denominated in, read off the same env.
+    scale = reward_name(make_env(0))
 
     print(f"{'arm':<18}{'win':>8}{'loss':>8}{'draw':>8}{'lift sd':>10}"
           f"{'95% CI':>20}")
@@ -222,7 +225,8 @@ def main(argv: list[str] | None = None) -> int:
         "control_win": float(np.mean(control_crowns > 0)),
         "eval_return": arm["return"],
         "control_return": float(np.mean(control["returns"])),
-        "eval_opponent": faced, "eval_episodes": args.episodes,
+        "eval_opponent": faced, "eval_reward": scale,
+        "eval_episodes": args.episodes,
         "eval_block": int(args.block),
     })
     with (args.out / "metrics.jsonl").open("w", encoding="utf-8") as stream:

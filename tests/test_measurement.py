@@ -72,7 +72,8 @@ def test_a_lift_cannot_be_recorded_without_naming_its_opponent():
     with pytest.raises(ValueError, match="eval_opponent"):
         check_lift_is_named({"updates": 3, "eval_lift_sd": 0.42, "eval_opponent": ""})
 
-    named = {"updates": 3, "eval_lift_sd": 0.42, "eval_opponent": "random"}
+    named = {"updates": 3, "eval_lift_sd": 0.42, "eval_opponent": "random",
+             "eval_reward": "projected:elixir=0.3,horizon_seconds=3,tower=1"}
     assert check_lift_is_named(named) is named
     # A row with no lift on it is not a measurement and needs no label.
     plain = {"updates": 4, "entropy": 3.1}
@@ -545,6 +546,7 @@ def test_a_ladder_row_cannot_be_recorded_without_naming_both_sides():
     # arrived on a row claiming it was played against the rating ladder's
     # anchors. So each family names its own side.
     three = {"eval_lift_sd": 0.4, "eval_opponent": "random",
+             "eval_reward": "projected:elixir=0.3,horizon_seconds=3,tower=1",
              "ancestor_score": 0.6, "ancestor_opponent": "pool",
              "ancestor_opponent_ref": "gen3",
              "ladder_elo": 120.0, "ladder_opponent": "ladder",

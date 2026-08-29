@@ -34,6 +34,7 @@ from cr_sim.engine.entity import Team
 from cr_sim.train.clone import Demonstrations, collect
 from cr_sim.train.run import (
     DEFAULT_BUILD, DEFAULT_DECK, _random_opponent, _reward_weights)
+from cr_sim.train.selfplay import reward_name
 from cr_sim.train.proposal import proposer_factory, proposer_identity
 from cr_sim.train.scripted import SearchBot, SearchBotConfig
 
@@ -99,6 +100,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="which reward the recorded value targets are computed under. "
              "Must match the reward the clone is later fine-tuned with, or "
              "the inherited critic predicts the wrong quantity.",
+    )
+    parser.add_argument(
+        "--tower-weight", type=float, default=1.0,
+        help="weight on the surviving-tower-health difference inside "
+             "--reward projected's potential. Mirrors cr_sim.train.run's flag "
+             "of the same name so a demonstration set can be harvested under "
+             "the weights a fine-tune will start from -- the value column is a "
+             "return under this reward, and the clone's critic is what PPO "
+             "inherits.",
     )
     parser.add_argument("--elixir-weight", type=float, default=0.0)
     parser.add_argument(
@@ -177,7 +187,13 @@ def main(argv: list[str] | None = None) -> int:
             reward_weights=_reward_weights(SimpleNamespace(
                 reward=args.reward,
                 horizon_seconds=args.reward_horizon_seconds,
-                elixir_weight=args.elixir_weight)),
+                elixir_weight=args.elixir_weight,
+                # Named explicitly rather than defaulted with getattr. A shim
+                # that quietly tolerates a missing field is how a caller ends
+                # up building a different reward from the one it thinks it is;
+                # if _reward_weights grows a knob, this must fail loudly and
+                # be told what to do with it.
+                tower_weight=args.tower_weight)),
             opponent_policy=opponent)
 
     # --------------------------------------------------- who proposes what
@@ -243,6 +259,15 @@ def main(argv: list[str] | None = None) -> int:
         temperature=args.proposer_temperature,
         policy_candidates=effective)
     meta = {
+        # The full weight tuple these value targets were harvested under,
+        # read off a real environment rather than asserted. Demonstrations
+        # records only the variant *name*, and the shipped shards say
+        # reward='projected' while docs/training.md records that they were
+        # collected under --elixir-weight 0 -- which is not in the file. The
+        # clone's critic is what PPO inherits, and that exact mismatch has
+        # already cost this project once: an inherited critic predicting +1.48
+        # against returns averaging +0.47.
+        "reward_weights": reward_name(make_env(0)),
         "proposer": stamp,
         "proposer_checkpoint": args.proposer if guided else "",
         "proposer_temperature": float(args.proposer_temperature),

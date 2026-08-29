@@ -131,7 +131,9 @@ def _worker(config: VecEnvConfig, conn) -> None:
 
     Everything is rebuilt from ``config`` rather than received pre-built; see
     the module docstring. The loop is a minimal RPC server over the pipe:
-    ``("reset", seeds)``, ``("step", actions)`` and ``("close", None)``.
+    ``("reset", seeds)``, ``("step", actions)``,
+    ``("set_opponent", state_dict)``, ``("set_reward_weights", (weights,
+    shaping))`` and ``("close", None)``.
 
     A worker owns ``config.shard`` environments and steps all of them per
     message, because the round trip costs about as much as a decision does and
@@ -207,6 +209,18 @@ def _worker(config: VecEnvConfig, conn) -> None:
                 net = ActorCritic(NetConfig(**config.net_config))
                 net.load_state_dict(payload)
                 holder[:] = [FrozenOpponent(net, nvec, seed=config.opponent_seed or 0)]
+                conn.send(True)
+            elif command == "set_reward_weights":
+                # Pending on every env this worker owns, adopted at that
+                # env's own next reset. A frozen VecEnvConfig is pickled once
+                # per worker, so without this RPC there is no way to move a
+                # worker's reward at all -- and a field the parent's _env()
+                # sets while the workers do not is exactly the shape of the
+                # --tower-level bug, which trained every rollout at level 11
+                # while config.json recorded 5.
+                weights, shaping = payload
+                for env in envs:
+                    env.set_reward_weights(weights, shaping_weight=shaping)
                 conn.send(True)
             elif command == "close":
                 return
@@ -363,6 +377,28 @@ class CRSimVecEnv:
         payload = {k: v.detach().cpu().clone() for k, v in state_dict.items()}
         for conn in self._conns:
             conn.send(("set_opponent", payload))
+        for conn, proc in zip(self._conns, self._procs):
+            self._recv(conn, proc)
+
+    def set_reward_weights(self, weights, *,
+                           shaping_weight: float | None = None) -> None:
+        """Push new reward weights to every worker's environments.
+
+        Adopted at each environment's own next reset, never mid-episode --
+        see :meth:`cr_sim.api.env.CRSimEnv.set_reward_weights` for why that
+        boundary is a correctness requirement and not a nicety.
+
+        **A rollout that spans a schedule step therefore contains two
+        weights**, because the workers reset inside ``step`` when an episode
+        ends and each env adopts at its own next one. At horizon 256 across 8
+        envs an update is 2048 steps, roughly 25 episodes, so a linear
+        schedule moves a fraction of a percent across the boundary. Avoiding
+        it entirely would mean discarding every episode in flight. Recorded
+        rather than hidden: a metrics row carries the weight *pushed* at that
+        update, which is a target, not a per-battle fact.
+        """
+        for conn in self._conns:
+            conn.send(("set_reward_weights", (weights, shaping_weight)))
         for conn, proc in zip(self._conns, self._procs):
             self._recv(conn, proc)
 

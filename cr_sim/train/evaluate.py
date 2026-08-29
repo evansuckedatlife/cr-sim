@@ -534,9 +534,9 @@ def rotating_probe(
     ``_BEST_WINDOW``, the promotion block and the printed ``eval:`` line all
     read the same keys they read now.
     """
-    from .selfplay import opponent_name
+    from .selfplay import opponent_name, reward_name
 
-    cache: dict[int, tuple[Result, str]] = {}
+    cache: dict[int, tuple[Result, str, str]] = {}
     readings = {"n": 0}
 
     def probe(net: ActorCritic) -> dict[str, Any]:
@@ -549,8 +549,12 @@ def rotating_probe(
             cache[block] = (
                 evaluate(control_env, None, episodes=episodes, seeds=block_seeds),
                 opponent_name(control_env),
+                # The scale, from the environment the control actually played
+                # in. Cached with the control because the control's returns
+                # and the spread underneath them are denominated in it.
+                reward_name(control_env),
             )
-        control, faced = cache[block]
+        control, faced, scale = cache[block]
         control_return = float(np.mean(control["returns"]))
         spread = float(np.std(control["returns"])) or 1.0
 
@@ -570,6 +574,7 @@ def rotating_probe(
             # nothing without knowing how noisy the control is.
             "eval_lift_sd": (float(np.mean(sampled["returns"])) - control_return) / spread,
             "eval_opponent": faced,
+            "eval_reward": scale,
             "eval_episodes": int(episodes),
             # Which battles this reading was played on. Without it a series of
             # rotating readings is indistinguishable from a noisy fixed one,

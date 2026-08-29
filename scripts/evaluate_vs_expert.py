@@ -53,7 +53,8 @@ from cr_sim.train.evaluate import (
 )
 from cr_sim.train.run import DEFAULT_BUILD, DEFAULT_DECK, _random_opponent
 from cr_sim.train.scripted import SearchBotConfig
-from cr_sim.train.selfplay import check_lift_is_named, opponent_name
+from cr_sim.train.selfplay import (check_lift_is_named, opponent_name,
+                                   reward_name)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -136,6 +137,9 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.perf_counter()
     faced = opponent_name(make_env())
+    # The scale the lift is denominated in, read off the same
+    # environment. See check_lift_is_named.
+    scale = reward_name(make_env())
     print(f"{args.episodes} paired battles against the {faced} opponent, "
           f"seed block {args.block}", flush=True)
     verdict = evaluate_paired(make_env, net, episodes=args.episodes,
@@ -213,7 +217,8 @@ def main(argv: list[str] | None = None) -> int:
         # Named, because a lift compared against one measured on a different
         # opponent is not a comparison. See
         # cr_sim.train.selfplay.check_lift_is_named.
-        "eval_opponent": faced, "eval_episodes": args.episodes,
+        "eval_opponent": faced, "eval_reward": scale,
+        "eval_episodes": args.episodes,
         "observation": verdict["observation"], "head": verdict["head"],
     }
     check_lift_is_named(row)

@@ -42,7 +42,8 @@ from cr_sim.train.clone import CloneConfig, Demonstrations, clone
 from cr_sim.train.evaluate import evaluate, write_verdict
 from cr_sim.train.nets import POLICY_HEADS, ActorCritic, net_config_for
 from cr_sim.train.run import DEFAULT_BUILD, DEFAULT_DECK, _random_opponent
-from cr_sim.train.selfplay import check_lift_is_named, opponent_name
+from cr_sim.train.selfplay import (check_lift_is_named, opponent_name,
+                                   reward_name)
 
 
 UNRECORDED = "(unrecorded)"
@@ -394,6 +395,9 @@ def main(argv: list[str] | None = None) -> int:
         # Named, because a lift compared against one measured on a different
         # opponent is not a comparison. See cr_sim.train.selfplay.check_lift_is_named.
         "eval_opponent": opponent_name(make_env()),
+        # And the scale, for the same reason: a lift is a difference of
+        # returns, and a return is denominated in the reward that scored it.
+        "eval_reward": reward_name(make_env()),
         "eval_episodes": args.episodes,
         "observation": args.observation, "head": args.head,
         "proposer": data.proposer,

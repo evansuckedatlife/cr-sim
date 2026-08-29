@@ -33,6 +33,7 @@ from ..api.env import CRSimEnv
 from ..api.reward import ProjectionWeights, RewardWeights
 from .nets import POLICY_HEADS, net_config_for
 from .ppo import PPOConfig, train
+from .schedule import anneal_to_zero, constant_schedule, knob_for_reward
 from .selfplay import (
     FrozenOpponent, OpponentPool, PooledOpponent,
     ancestor_probe, check_lift_is_named, evaluation_probe, opponent_name,
@@ -189,9 +190,50 @@ def build_parser() -> argparse.ArgumentParser:
              "for the same reason: at 0.3 it never played a card at all.",
     )
     parser.add_argument(
+        "--tower-weight", type=float, default=1.0,
+        help="weight on the surviving-tower-health difference inside "
+             "--reward projected's potential, against 1.0 for a crown. This "
+             "had no flag at all and was pinned at 1.0, so it was neither "
+             "reachable nor recorded -- a run's config.json wrote down "
+             "--shaping, which that reward never reads, and not the "
+             "coefficient actually scaling its tower term.",
+    )
+    parser.add_argument(
+        "--anneal", action="store_true",
+        help="drive the shaping to zero over training, ending on the sparse "
+             "crown objective. Which coefficient that is depends on --reward "
+             "and is NOT --shaping: 'projected' anneals tower and elixir, "
+             "'five-term' the five non-crown weights, 'simple' the shaping "
+             "weight itself -- the only reward that reads it. crowns is never "
+             "annealed; it is the objective, not shaping. The reason: the "
+             "projected reward is an exact potential, so return-to-go "
+             "telescopes to a near-martingale and GAE's advantages are mostly "
+             "noise -- which is why a million steps moved greedy by +0.024. "
+             "Off by default, and off is bit-identical to a run without it.",
+    )
+    parser.add_argument(
+        "--anneal-start", type=int, default=0,
+        help="step the anneal begins at; before it the weights are held at "
+             "their starting values.",
+    )
+    parser.add_argument(
+        "--anneal-end", type=int, default=0,
+        help="step the anneal reaches zero at. 0 means 80%% of --steps, "
+             "leaving the last fifth of the run stationary on the sparse "
+             "objective -- otherwise the final checkpoint is measured under a "
+             "weight that was still moving, and the objective the whole "
+             "schedule exists to reach never gets a stretch to be measured "
+             "on.",
+    )
+    parser.add_argument(
         "--shaping", type=float, default=0.01,
-        help="weight on tower-health difference. At 0.01 a whole match's tower "
-             "damage is worth about 0.02 against 1.0 per crown, so the reward is "
+        help="weight on tower-health difference, under --reward simple ONLY. "
+             "Inert under 'projected' and 'five-term': every call site sits "
+             "inside the branch those two rewards do not take, and 0.01 "
+             "against 5.00 -- a five hundred fold change -- is bit-identical "
+             "under both. Use --tower-weight and --elixir-weight for "
+             "'projected'. At 0.01 a whole match's tower damage is worth "
+             "about 0.02 against 1.0 per crown, so the simple reward is "
              "effectively sparse; raise it to give credit between crowns.",
     )
     parser.add_argument(
@@ -279,6 +321,32 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+#: The scale the in-run probe measures returns on, fixed for every run and
+#: independent of whatever the training reward is doing.
+#:
+#: ``_eval_env`` used to build from ``_reward_weights(args)`` -- the *training*
+#: reward -- and that quietly makes the promotion criterion a function of the
+#: training schedule. ``eval_lift_sd`` is a difference of returns against a
+#: control that is evaluated once and cached, spread and all. Anneal the
+#: training shaping and the policy arm's returns shrink while the cached
+#: control keeps the scale it was measured on, so the lift series drifts from
+#: nothing but the reward scale, and the run promotes toward its own earliest,
+#: highest-shaping checkpoints. watch.py's run-wide ``best_lift = max`` would
+#: then be systematically the first evaluation.
+#:
+#: Pinning removes that whole class of drift, and buys something the lift
+#: never had: two runs trained under different rewards now measure their lift
+#: on the same scale. It does mean a run whose *training* reward is not this
+#: one reports a lift on a different scale from the one it would have reported
+#: before -- which is why every row now carries ``eval_reward`` saying so.
+EVAL_REWARD = ProjectionWeights()
+
+#: Distinguishes 'the reward --reward selected' from an explicit None,
+#: which is itself a valid weights argument -- it selects the simple
+#: reward. A default of None could not tell the two apart.
+_TRAINING_REWARD = object()
+
+
 def _resolve_device(name: str) -> str:
     """Pick a device, and say plainly when the asked-for one is unavailable.
 
@@ -340,8 +408,31 @@ def _reward_weights(args):
         return ProjectionWeights(
             horizon_seconds=args.horizon_seconds if args.horizon_seconds > 0 else None,
             elixir=args.elixir_weight,
+            tower=args.tower_weight,
         )
     return None
+
+
+def _reward_schedule(args):
+    """How the shaping moves over this run -- constant unless asked.
+
+    The default is a constant schedule, which is today's behaviour exactly:
+    nothing is ever pushed, so no reward object is ever rebuilt and no RPC is
+    ever sent. ``--anneal`` drives the shaping fields of whichever knob
+    ``--reward`` actually selects to zero, leaving ``crowns`` and
+    ``horizon_seconds`` alone. See cr_sim.train.schedule for why the knob is
+    not ``--shaping``.
+    """
+    knob = knob_for_reward(args.reward)
+    weights = _reward_weights(args)
+    values = (weights.as_dict() if weights is not None
+              else {"shaping": args.shaping})
+    if not args.anneal:
+        return constant_schedule(knob, values).resolved(args.steps)
+    return anneal_to_zero(
+        knob, values,
+        start_step=args.anneal_start, end_step=args.anneal_end,
+    ).resolved(args.steps)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -367,7 +458,7 @@ def main(argv: list[str] | None = None) -> int:
 
     observation = parse_observation(args.observation)
 
-    def _env(opponent=None) -> CRSimEnv:
+    def _env(opponent=None, *, reward_weights=_TRAINING_REWARD) -> CRSimEnv:
         return CRSimEnv(
             data, levels, registry, DEFAULT_DECK, DEFAULT_DECK,
             observation=observation,
@@ -376,7 +467,9 @@ def main(argv: list[str] | None = None) -> int:
             max_ticks=args.tps * args.match_seconds,
             tower_level=args.tower_level,
             reward_shaping_weight=args.shaping,
-            reward_weights=_reward_weights(args),
+            reward_weights=(_reward_weights(args)
+                            if reward_weights is _TRAINING_REWARD
+                            else reward_weights),
             opponent_policy=opponent,
         )
 
@@ -388,22 +481,44 @@ def main(argv: list[str] | None = None) -> int:
         random agent -- and both were reported as "lift" and compared to each
         other. They were never comparable: the control wins 92% of the idle
         matches and 26% of the random ones.
+
+        And a *pinned* reward, not the training one. See EVAL_REWARD: a probe
+        whose scale follows the training schedule turns the promotion
+        criterion into a function of that schedule.
         """
-        return _env(_random_opponent(90_000))
+        return _env(_random_opponent(90_000), reward_weights=EVAL_REWARD)
+
+    #: The environments the rollout actually steps, so a scheduled weight can
+    #: be pushed to them. Under --workers they live in other processes and
+    #: this holds only the shape probe, which is why CRSimVecEnv needs the
+    #: same push over its own pipe.
+    local_envs: list[CRSimEnv] = []
 
     def make_env(index: int) -> CRSimEnv:
         # Each environment gets its own opponent, so eight parallel battles do
         # not face an identical sequence of placements and report a smoother
         # result than the policy has earned.
         if args.opponent == "random":
-            return _env(_random_opponent(args.seed * 1000 + index))
+            built = _env(_random_opponent(args.seed * 1000 + index))
+            local_envs.append(built)
+            return built
         if args.opponent == "self":
             # Filled in once the network exists; until then the environment
             # faces an idle side, which only affects the first rollout.
             holder: list = []
             opponents.append(holder)
-            return _env(lambda obs, mask, h=holder: h[0](obs, mask) if h else (NOOP_SLOT, 0, 0))
-        return _env(None)
+            built = _env(
+                lambda obs, mask, h=holder: h[0](obs, mask) if h else (NOOP_SLOT, 0, 0))
+            local_envs.append(built)
+            return built
+        built = _env(None)
+        local_envs.append(built)
+        return built
+
+    # Resolved before config.json, because config.json records it -- and
+    # resolved once, so the endpoints a reader sees are the endpoints the run
+    # used rather than a flag they have to re-derive from.
+    schedule = _reward_schedule(args)
 
     config = PPOConfig(
         total_steps=args.steps,
@@ -449,6 +564,20 @@ def main(argv: list[str] | None = None) -> int:
                     # only while their config key sets differ by at most four,
                     # so every field added here is spent out of that budget.
                     "probe": args.probe,
+                    # Two new keys, nested, and that is the whole budget:
+                    # watch.py pairs two runs for A/B only while their config
+                    # key sets differ by at most four. "shaping" above stays
+                    # where it is for the same reason -- deleting a key
+                    # changes the key set and would make every new run
+                    # unpairable with every old one -- but shaping_is_inert
+                    # inside here finally says what it is.
+                    "reward_schedule": {
+                        **schedule.as_dict(),
+                        "shaping_is_inert": args.reward != "simple",
+                    },
+                    # The scale the in-run lift is measured on, which is now a
+                    # constant rather than whatever --reward happened to be.
+                    "eval_reward": {"kind": "projected", **EVAL_REWARD.as_dict()},
                     "eval_episodes": args.eval_episodes}, indent=2),
         encoding="utf-8",
     )
@@ -530,7 +659,53 @@ def main(argv: list[str] | None = None) -> int:
     # run had already recorded, and "w" would delete the hours being
     # recovered.
     with metrics_path.open("a" if args.resume else "w", encoding="utf-8") as stream:
+        #: The weight tuple most recently handed to the environments. Compared
+        #: rather than pushed blindly, so a constant schedule -- the default --
+        #: sends nothing at all and a run without --anneal is bit-identical to
+        #: one from before this existed.
+        #:
+        #: Seeded from step 0 because that is what ``_env()`` built the
+        #: environments with, whatever step the run is starting at. On a
+        #: resume that is a *stale* value, which is the point -- see
+        #: ``_push_reward_weights``.
+        pushed = {"weights": schedule.at(0)}
+
+        def _push_reward_weights(step: int) -> None:
+            """Hand the schedule's weights at ``step`` to every environment.
+
+            One guard, not two. A schedule that has not moved is not pushed,
+            and that single condition is what makes a constant schedule -- the
+            default -- cost nothing and change nothing. An ``if not
+            schedule.is_constant`` short-circuit as well read as defensive and
+            was worse than that: with two independent conditions guarding one
+            behaviour, neither can be broken on its own, so no test could hold
+            either of them to account.
+            """
+            values = schedule.at(step)
+            if values == pushed["weights"]:
+                return
+            weights, shaping = schedule.weights_at(step)
+            # Both, always. A field _env() sets and the workers do not is the
+            # exact shape of the --tower-level bug, which trained every
+            # rollout at level 11 while config.json recorded 5.
+            for env in local_envs:
+                env.set_reward_weights(weights, shaping_weight=shaping)
+            if parallel is not None:
+                parallel.set_reward_weights(weights, shaping_weight=shaping)
+            pushed["weights"] = values
+
         def record(stats: dict) -> None:
+            # The schedule, before anything else this update does. Steps, not
+            # updates, because --resume keeps the step count and replays
+            # update indices.
+            _push_reward_weights(int(stats["steps"]))
+            # On every row, not only the ones that moved. A schedule in
+            # config.json plus a --resume that began at a different step does
+            # not reconstruct what each row was measured under. It is the
+            # weight *pushed* at this update: each env adopts at its own next
+            # reset, so a row is a target rather than a per-battle fact.
+            stats["reward_weights"] = dict(pushed["weights"])
+
             # No write here. Every exit from this function ends at _write, and
             # writing on the way in as well emitted each update twice -- once
             # without the eval fields and once with, which read as two trainers
@@ -687,6 +862,16 @@ def main(argv: list[str] | None = None) -> int:
 
         def _on_net(built) -> None:
             net_holder["net"] = built
+            # Before the first rollout, not after it. `record` runs at the end
+            # of an update, so on a --resume the opening update would collect
+            # under the weights _env() was constructed with -- the schedule's
+            # step-zero values -- while every row and every later rollout used
+            # the resumed step's. Steps was chosen as the axis precisely so a
+            # resumed run agrees with a fresh one about where it is; an
+            # opening update at the wrong weight would give that away for the
+            # sake of one hook.
+            _push_reward_weights(
+                int(resume_state.get("steps", 0)) if resume_state else 0)
             if args.opponent == "self":
                 nvec = (5, config_nvec[0], config_nvec[1])
                 # The starting policy is the pool's first member, so the ladder

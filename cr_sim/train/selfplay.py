@@ -36,7 +36,7 @@ from .nets import ActorCritic
 
 __all__ = [
     "FrozenOpponent", "OpponentPool", "PooledOpponent",
-    "evaluation_probe", "ancestor_probe", "opponent_name",
+    "evaluation_probe", "ancestor_probe", "opponent_name", "reward_name",
     "check_lift_is_named", "SCORED_FAMILIES",
 ]
 
@@ -65,6 +65,18 @@ def check_lift_is_named(stats: dict) -> dict:
     Every writer of a metrics row goes through here, so a lift without its
     opponent cannot reach the file at all. Rows written before the field
     existed have no ``eval_opponent`` and are the idle ones.
+
+    **And what was counted, not only who was played.** A lift is a difference
+    of *returns*, and a return is denominated in whatever reward the
+    environment was scoring, so the same two policies produce a different lift
+    under ``projected`` than under ``five-term`` -- and a run that anneals its
+    shaping produces both within itself, its own arm shrinking against a
+    control that was evaluated once and cached with the scale it had then.
+    That is the identical mistake one axis over, so it gets the identical
+    refusal: ``eval_reward``, written by :func:`reward_name` off the
+    environment that actually played. Pinning the in-run probe's reward
+    (``cr_sim.train.run.EVAL_REWARD``) is what removes the drift; this is what
+    makes the omission unrecordable.
 
     **A ladder row needs a second door, because it would walk past the first
     one.** A ladder reports a *score* -- the fraction of a mirrored pairing a
@@ -102,6 +114,18 @@ def check_lift_is_named(stats: dict) -> dict:
             "the same policy scores wildly differently against an idle and a "
             "random one. See cr_sim.train.selfplay.opponent_name."
         )
+    if "eval_lift_sd" in stats and not stats.get("eval_reward"):
+        raise ValueError(
+            "a metrics row carries eval_lift_sd but no eval_reward. A lift is "
+            "a difference of *returns*, and a return is denominated in "
+            "whatever reward the environment was scoring -- so the same two "
+            "policies produce a different lift under `projected` than under "
+            "`five-term`, and a run that anneals its shaping shrinks its own "
+            "arm's returns while a cached control keeps the scale it was "
+            "measured on. This is the identical mistake eval_opponent already "
+            "refuses, one axis over: naming who was played and not what was "
+            "counted. See cr_sim.train.selfplay.reward_name."
+        )
     for prefix in SCORED_FAMILIES:
         if f"{prefix}score" not in stats and f"{prefix}elo" not in stats:
             continue
@@ -121,6 +145,31 @@ def check_lift_is_named(stats: dict) -> dict:
                 "'runs/clone-v3-paired/cloned.pt' is."
             )
     return stats
+
+
+def reward_name(env: CRSimEnv) -> str:
+    """The scale ``env`` measures returns on, as a label to record beside a lift.
+
+    Read off the environment rather than taken as an argument, for exactly the
+    reason :func:`opponent_name` is: a caller cannot then label a measurement
+    with a scale it was not taken on.
+
+    The full weight tuple, not the variant name. "projected" alone does not
+    identify a scale -- the same variant at ``tower=1.0`` and at ``tower=0.0``
+    produces returns an order of magnitude apart, and under an anneal it
+    produces both within one run. The variant name is what
+    ``Demonstrations.reward`` recorded, and the set collected under
+    ``--elixir-weight 0`` is indistinguishable in that file from one collected
+    at 0.3.
+    """
+    weights = getattr(env, "reward_weights", None)
+    if weights is None:
+        return f"simple:shaping={getattr(env, 'reward_shaping_weight', 0.0):g}"
+    kind = ("projected" if type(weights).__name__ == "ProjectionWeights"
+            else "five-term")
+    terms = ",".join(f"{k}={v!r}" if v is None else f"{k}={v:g}"
+                     for k, v in sorted(weights.as_dict().items()))
+    return f"{kind}:{terms}"
 
 
 def opponent_name(env: CRSimEnv) -> str:
@@ -384,6 +433,10 @@ def evaluation_probe(
     # every lift this probe produces arrives with the scale it was measured
     # on attached. See :func:`opponent_name`.
     faced = opponent_name(control_env)
+    # And the scale it was measured on, from the same environment. A lift is
+    # a difference of returns, so it is denominated in whatever reward the
+    # env was scoring -- see check_lift_is_named.
+    scale = reward_name(control_env)
 
     def probe(net: ActorCritic) -> dict[str, Any]:
         result = evaluate(make_env(), net, episodes=episodes, seeds=seeds, greedy=False)
@@ -398,6 +451,7 @@ def evaluation_probe(
             # nothing without knowing how noisy the control is.
             "eval_lift_sd": (float(np.mean(result["returns"])) - control_return) / spread,
             "eval_opponent": faced,
+            "eval_reward": scale,
             "eval_episodes": int(episodes),
         }
 

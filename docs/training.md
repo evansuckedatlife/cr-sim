@@ -381,6 +381,116 @@ Knight are off.
 That is the case for `v3`. It is also why the level-5 fix matters twice: it
 roughly doubles the variance that is knowable at all.
 
+## Annealing the shaping, and the knob that is not `--shaping`
+
+Straight out of the section above. If the explained-variance ceiling is a
+property of the *reward* — Φ near-martingale, R²(return-to-go | Φ_t) = 0.0027
+— then no critic and no observation fixes it, and the way out is to stop
+paying the shaping at all by the end of the run. Episode-return variance
+decomposes 77.4% crowns / 8.4% tower health, so the sparse objective is where
+the signal already is.
+
+**`--shaping` is not that knob and never was.** It is read at five places,
+every one inside the `else` of `if self._reward is not None:`, so it does
+nothing unless `--reward simple`. Measured on identical seeds and an identical
+action stream, 0.01 against 5.00:
+
+```
+projected: 0.01 vs 5.00 -> IDENTICAL
+five-term: 0.01 vs 5.00 -> IDENTICAL
+simple:    0.01 vs 5.00 -> DIFFERS
+```
+
+A 500× change is bit-identical under both rewards anyone trains with, and
+`CRSimEnv`'s own class docstring used to recommend annealing it — "a one-line
+change wherever this constructor is called". Following that under `--reward
+projected` gives a run that reports an anneal and performs none. The docstring
+is corrected; `config.json` now records `reward_schedule.shaping_is_inert`.
+
+What `--anneal` actually moves, per reward:
+
+| `--reward` | annealed to zero | held |
+|---|---|---|
+| `projected` | `ProjectionWeights.tower`, `.elixir` | `horizon_seconds` |
+| `five-term` | the five non-crown `RewardWeights` | `crowns` |
+| `simple` | `--shaping` — the one case it is real | — |
+
+`crowns` is never annealed: that is the objective, not shaping. At the zero
+endpoint the episode return equals the final crown difference *exactly* —
+returns 2.0/3.0/3.0/2.0 against crown differences 2/3/3/2 — so the schedule
+terminates on the sparse objective through the same code path, not a special
+case. `ProjectionWeights.tower` had no flag at all and was pinned at 1.0; it
+is now `--tower-weight` and is recorded.
+
+Linear, on the steps axis, ending at 80% of `--steps`. Linear because the only
+consumer that cares about the *shape* is the critic, which carries its scale
+across updates while the actor is scale-free (advantages are normalised per
+minibatch); a constant drift is trackable, an exponential dumps the change
+where the critic is furthest behind. Steps because `--resume` keeps the step
+count and replays update indices. Ending early because otherwise the final
+checkpoint is measured under a weight that was still moving.
+
+**The weight changes only at `reset()`.** Mid-episode the reward stops being
+potential-based: `_previous` holds Φ under the old weight, so one arbitrary
+action is paid Φ_new(s') − Φ_old(s). Measured switching to (0, 0) at step 5:
+
+```
+step 5 reward:  no-switch -0.007802   switched -0.159656   spurious -0.151854
+```
+
+19× the genuine reward, and invisible in aggregate — the episode return still
+telescopes correctly to its own endpoint weights, so the existing telescoping
+test stays green over it. `CRSimVecEnv.set_reward_weights` is a fifth worker
+RPC for the same reason `set_opponent` is one: `VecEnvConfig` is frozen and
+pickled once per worker, and a field `_env()` sets while the workers do not is
+exactly the `--tower-level` bug. Each env adopts at its own next reset, so an
+update straddling a schedule step carries two weights — a row records the
+weight *pushed*, which is a target, not a per-battle fact.
+
+**The probe's reward is now pinned** (`run.EVAL_REWARD`), not built from the
+training reward. Otherwise the policy arm's returns shrink with the schedule
+while the cached control keeps its own scale, and promotion walks back toward
+the earliest, highest-shaping checkpoints. As a side effect `eval_lift_sd` is
+comparable across runs with different training rewards for the first time —
+and `check_lift_is_named` now refuses a lift with no `eval_reward`, the same
+guard one axis over.
+
+**Free win, landed first so the anneal is not credited with it.** `env.step`
+scored the board and then the run-out scored it again: exactly **2.00 score
+calls per non-terminal decision** under `projected`. `score()` is a pure
+function of state, so (Φ_mid − Φ_prev) + (Φ_end − Φ_mid) = Φ_end − Φ_prev and
+the first is waste. Skipping it is bit-identical — measured 2.09/2.04/2.06/2.05
+score calls per step before, 1.09/1.04/1.06/1.05 after, episode sums equal to
+twelve decimal places — and removes 48.7% of all projections, about 26% of
+environment wall time.
+
+**What is not shown.** That annealing produces a better policy. That needs a
+paired A/B of two full 1M-step runs at 28.0 steps/s: ~9.9 h each, ~20 h
+sequential, and they cannot overlap because one run already occupies eight
+workers. The tests prove application, boundary, worker delivery, endpoint
+exactness and probe pinning, and nothing more.
+
+The cheap falsification is available at 80% of a single run, not at the end of
+two. With the shaping gone, return-to-go is the sparse crown outcome and is no
+longer a telescoped martingale, so `explained_variance` should *rise above
+0.29*; early in the anneal it should *fall*, the critic chasing a moving
+scale. If EV is still pinned near 0.29 with the weight at exactly zero, the
+anneal did nothing and the ceiling was the critic or the observation after
+all. Every row carries `explained_variance`, `ret_std` and the active
+`reward_weights`, so that reading is taken off the data rather than argued
+about.
+
+**Not done, deliberately: the γ-correct potential.** `r = γΦ(s′) − Φ(s)` is
+the policy-invariant form for γ<1, and it was written and reverted here once
+already. The revert was right. Applied inside `RewardTracker.step` /
+`ProjectedReward.step` it charges γ per *score*, and a score is not a PPO
+timestep — 2 scores per decision under `projected` and ~9 under `five-term`,
+against PPO's one γ per `env.step`. That is up to 9× too much discount on the
+shaping term alone, and the run-out scores are not decisions at all, so it
+prices time the agent never chose. If it is wanted it belongs at the single
+point the reward crosses into the trainer, and it is a separate change, not a
+prerequisite for this one.
+
 ## What to do next
 
 Specific to one machine at roughly 46 decisions a second, not a literature

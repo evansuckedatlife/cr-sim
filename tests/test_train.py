@@ -589,7 +589,8 @@ def test_the_worker_config_agrees_with_the_probe_env_field_for_field(tmp_path,
         "--steps", "64", "--horizon", "8", "--envs", "2", "--workers", "1",
         "--match-seconds", "20", "--tower-level", "5", "--tps", "20",
         "--frame-skip", "30", "--shaping", "0.02", "--device", "cpu",
-        "--out", str(tmp_path), "--name", "agree",
+        "--reward", "projected", "--tower-weight", "0.4",
+        "--elixir-weight", "0.7", "--out", str(tmp_path), "--name", "agree",
     ]
     with pytest.raises(_Stop):
         main(argv)
@@ -600,6 +601,31 @@ def test_the_worker_config_agrees_with_the_probe_env_field_for_field(tmp_path,
     assert config.frame_skip == 30
     assert config.max_ticks == 20 * 20
     assert config.reward_shaping_weight == pytest.approx(0.02)
+
+    # The field that actually decides what the workers are paid, which is not
+    # the one above. --shaping reaches VecEnvConfig faithfully and is then
+    # never read: every _shaped_value call site sits inside the branch
+    # `projected` does not take, and 0.01 against 5.00 is bit-identical under
+    # it. Asserting only on that field's transit is a green test over a knob
+    # the run ignores -- so assert on the weights the reward is actually built
+    # from, and on the effect: the worker's env pays the reward these weights
+    # define.
+    from cr_sim.api.reward import ProjectionWeights
+    from cr_sim.api.vec import _build_env
+    from cr_sim.train.selfplay import reward_name
+
+    assert config.reward_weights == ProjectionWeights(
+        tower=0.4, elixir=0.7, horizon_seconds=3.0)
+
+    from cr_sim.data.cards import build_card_registry
+    from cr_sim.data.leveling import build_level_table
+    from cr_sim.data.source import LogicData
+
+    data = LogicData.load(config.build)
+    worker_env = _build_env(config, data, build_level_table(data),
+                            build_card_registry(data), 0)
+    assert reward_name(worker_env) == (
+        "projected:elixir=0.7,horizon_seconds=3,tower=0.4")
 
 
 # --------------------------------- the demonstrations are harvested under the
@@ -621,10 +647,25 @@ def test_make_demos_builds_the_reward_the_fine_tune_will_use():
     from cr_sim.train.run import _reward_weights
 
     weights = _reward_weights(SimpleNamespace(
-        reward="projected", horizon_seconds=3.0, elixir_weight=0.0))
+        reward="projected", horizon_seconds=3.0, elixir_weight=0.0,
+        tower_weight=0.5))
     assert isinstance(weights, ProjectionWeights)
     assert weights.horizon_seconds == 3.0
     assert weights.elixir == 0.0
+    # The tower coefficient reaches the weights too. It had no flag anywhere
+    # and was pinned at 1.0, so a demonstration set could not be harvested
+    # under the shaping a fine-tune starts from even in principle.
+    assert weights.tower == 0.5
+
+    # And a caller that does not name the knob is told so, rather than being
+    # handed a default. make_demos passes a hand-built namespace here -- the
+    # search's horizon is not the reward's -- and a getattr default there
+    # would let it build a reward it did not ask for and say nothing. Loud is
+    # the whole point: this project has already trained a run at tower level
+    # 11 while its config recorded 5.
+    with pytest.raises(AttributeError):
+        _reward_weights(SimpleNamespace(
+            reward="projected", horizon_seconds=3.0, elixir_weight=0.0))
 
 
 def test_every_head_the_network_can_build_is_reachable_from_both_entry_points():
@@ -718,7 +759,8 @@ def test_the_demo_generator_exposes_the_reward_knobs_the_run_does():
 
     demo_flags = {s for a in make_demos.build_parser()._actions
                   for s in a.option_strings}
-    for flag in ("--reward", "--elixir-weight", "--tower-level"):
+    for flag in ("--reward", "--elixir-weight", "--tower-weight",
+                 "--tower-level"):
         assert flag in demo_flags, (
             f"{flag} changes what the demonstrations mean and must be "
             "settable when recording them")
