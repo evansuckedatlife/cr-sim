@@ -237,6 +237,7 @@ def search_opponent(
     *,
     team: Team = Team.RED,
     seed: int = 3,
+    proposer: "Callable[[int], Any] | None" = None,
 ) -> Callable[..., Sequence[int]]:
     """The one-ply search expert, on the other side of the net.
 
@@ -269,7 +270,13 @@ def search_opponent(
         if state["bot"] is None or key != state["seed"]:
             state["seed"] = key
             derived = seed if key is None else (seed * 1_000_003 + key) % (2 ** 31 - 1)
-            state["bot"] = SearchBot(team, replace(base, seed=derived))
+            # The proposer is rebuilt with the bot and from the same derived
+            # seed. Its stream is then a function of the battle and the
+            # decision number, which is the same property the bot's own
+            # candidate draw has and for the same reason.
+            state["bot"] = SearchBot(
+                team, replace(base, seed=derived),
+                None if proposer is None else proposer(derived))
         return state["bot"](observation, mask, battle)
 
     # The bot branches the battle to score placements, so it needs the board

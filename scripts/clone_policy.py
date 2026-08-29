@@ -80,6 +80,18 @@ def merge(paths: list[Path]) -> Demonstrations:
         play_rate=float(np.mean([p.play_rate for p in parts])),
         observation=_agree(parts, "observation", paths),
         reward=_agree(parts, "reward", paths),
+        # The third field, and the one whose mismatch is hardest to see. A
+        # different proposer is a different *label*: the target is the
+        # search's distribution over the candidates it scored, so shards from
+        # two proposers train some rows against one supervision signal and the
+        # rest against another, with the same shapes, the same channel count
+        # and a training curve that converges either way.
+        proposer=_agree(parts, "proposer", paths),
+        # One entry per shard rather than one merged number: the collapse rate
+        # is a property of a collection run, and averaging six of them would
+        # hide the one shard that ran away.
+        meta=json.dumps({"shards": [
+            {"path": str(q), "meta": p.meta} for p, q in zip(parts, paths)]}),
     )
 
 
@@ -132,7 +144,8 @@ def subset(data: Demonstrations, fraction: float, seed: int) -> Demonstrations:
         action=data.action[order], value=data.value[order],
         target=None if data.target is None else data.target[order],
         episodes=data.episodes, play_rate=data.play_rate,
-        observation=data.observation, reward=data.reward)
+        observation=data.observation, reward=data.reward,
+        proposer=data.proposer, meta=data.meta)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -232,7 +245,8 @@ def main(argv: list[str] | None = None) -> int:
           f"{data.episodes} episodes, expert played on "
           f"{data.play_rate:.0%} of them, "
           f"observation {data.observation or UNRECORDED}, "
-          f"reward {data.reward or UNRECORDED}", flush=True)
+          f"reward {data.reward or UNRECORDED}, "
+          f"proposer {data.proposer or UNRECORDED}", flush=True)
     print(flush=True)
 
     build = LogicData.load(DEFAULT_BUILD)
@@ -272,6 +286,12 @@ def main(argv: list[str] | None = None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     torch.save({"state_dict": net.state_dict(),
                 "observation": args.observation,
+                # Which expert taught this network. A clone of a
+                # policy-guided search is a clone of a different teacher, and
+                # the whole point of expert iteration is that the teacher
+                # moves between rounds.
+                "proposer": data.proposer,
+                "demo_meta": data.meta,
                 "targets": args.targets, "pass_weight": args.pass_weight,
                 # Which head these weights are. A factored head's parameters
                 # do not fit a flat one, and whatever loads this needs to
@@ -376,6 +396,7 @@ def main(argv: list[str] | None = None) -> int:
         "eval_opponent": opponent_name(make_env()),
         "eval_episodes": args.episodes,
         "observation": args.observation, "head": args.head,
+        "proposer": data.proposer,
         "targets": args.targets, "pass_weight": args.pass_weight,
         "fraction": args.fraction,
     }

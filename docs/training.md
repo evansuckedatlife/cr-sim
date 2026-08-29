@@ -436,3 +436,72 @@ which is the wrong bottleneck while the critic explains nothing.
 1.0 is nearly random when the policy's entropy is near uniform, which leaves the
 outcome as unpredictable as it was against a random agent. `--opponent-temperature`
 exists; it has never been swept.
+
+## The policy proposes, and the search still decides
+
+`SearchBot` drew about fourteen stratified-random placements per decision out
+of a mean of **104 legal actions** -- 13.5% coverage, measured -- and the other
+86.5% were never scored. The one object in the system holding an opinion about
+*which* fourteen deserve an exact engine branch is the policy, and until now it
+was never asked. AlphaZero's improvement operator is three arrows; this project
+had the second and the third.
+
+`SearchBot(team, config, proposer)` takes the missing one.
+`cr_sim.train.proposal.policy_proposer` ranks the legal actions by the policy's
+own logits, and `SearchBotConfig.policy_candidates` says how many of the
+budget's placements come from that ranking. Everything is off by default:
+`policy_candidates=0` with `proposer=None` is byte-for-byte the old bot, which
+is checked against a golden captured by running the pre-change source.
+
+**Measured, at the shipped `candidates=14, horizon_seconds=15`, one thread.**
+
+| | random proposal | policy proposal |
+|---|---|---|
+| branches per decision | 13.47 | 13.50 |
+| seconds per decision | 0.511 | 0.402 |
+| one `policy_logits` forward | 1.34 ms | 1.34 ms |
+| forward as a share of a decision | -- | **0.26%** |
+| candidate overlap between the two | -- | 0.34 |
+
+Board for board -- both bots asked about the same 43 positions -- the branch
+counts matched on **43 of 43 decisions with no mismatches**. That is the equal
+budget claim, and it is arithmetic rather than a promise: the random draw is
+taken first and in full, and the proposal *replaces* the front of it. Filling
+the remainder at a reduced budget instead does not work, and looks like it
+does: `per_slot` is `max(1, budget // slots)`, so asking for two placements
+across four legal cards still returns four, and a bot built that way took **63
+branches where the unguided one took 32**.
+
+**The labels move with the proposal, which is the part that can quietly poison
+a clone.** The cloner trains against the search's distribution over the
+candidates it actually scored, so changing which placements are scored changes
+the supervision. Three defences, all on: a floor of `max(2, candidates // 3)`
+random candidates that no proposer can displace; the candidate spread and the
+`min_spread` fallback rate recorded into every shard's `meta`; and a refusal
+printed by `make_demos.py` when a shard's fallback rate runs more than ten
+points past the unguided baseline. `Demonstrations.proposer` joins `observation`
+and `reward` in `clone_policy`'s merge guard, because a set whose proposer
+varies row to row is undetectable downstream.
+
+The feared failure is support collapse -- the proposer nominates what the
+policy already likes, alike placements score alike, the spread falls, the row
+collapses to a one-hot on the chosen action, and the clone sharpens a
+preference instead of improving one. **It has not happened yet.** Four episodes
+at the shipped settings: mean candidate spread **0.0585 unguided against 0.0936
+guided**, both at a 0% fallback rate, and the guided expert played on 64% of
+its decisions against 50%. One checkpoint, four episodes; the gate stays.
+
+**Determinism.** `temperature=0.0` is a stable numpy argsort and touches no
+generator at all, so ties break by ascending flat index --- `torch.topk`
+promises no ordering among equal values and the factored head produces exact
+ties routinely. Above zero the draw comes from a `torch.Generator` the proposer
+owns, seeded arithmetically from (proposer seed, battle seed, decision index),
+never from `hash()` and never from torch's global stream. The proposer is
+rebuilt per battle alongside the bot, so it is a function of the battle and the
+decision number rather than of how many episodes came before.
+
+`scripts/expert_iterate.py` is the loop: collect with round *n-1*'s clone
+proposing, clone, rate, repeat. Measured cost of one round at 360 episodes
+across six shards is 17-20 minutes of collection, minutes of cloning and about
+fifteen of rating --- **under an hour a turn**, which is what makes expert
+iteration worth building here rather than describing.

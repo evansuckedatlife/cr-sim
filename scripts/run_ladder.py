@@ -54,6 +54,7 @@ from cr_sim.train.evaluate import (
 from cr_sim.train.ladder import (
     expected_score, fit_ratings, parse_player, play_pairing,
 )
+from cr_sim.train.proposal import check_equal_branch_budget
 from cr_sim.train.run import DEFAULT_BUILD, DEFAULT_DECK, _random_opponent
 from cr_sim.train.selfplay import check_lift_is_named
 
@@ -221,6 +222,21 @@ def main(argv: list[str] | None = None) -> int:
     for a, b in args.pairing:
         tasks.append({"a": spec_of.get(a, a), "b": spec_of.get(b, b),
                       "seeds": seeds, "mode": args.mode, "settings": settings})
+
+    # An equal branch budget, enforced rather than assumed, and enforced over
+    # every pairing rather than only the explicit ones -- a guided expert
+    # usually enters as an --anchor, which is the star and not a --pairing.
+    #
+    # Only where the claim needs it, though. A guided search against an
+    # unguided one is a claim about *which* fourteen placements the branches
+    # were spent on, and a bot that quietly took sixteen would win on the
+    # budget alone; two unguided searches at different budgets are a
+    # legitimate rung on the ladder and are left alone.
+    for task in tasks:
+        left, right = parse_player(task["a"]), parse_player(task["b"])
+        if left.kind == "search" and right.kind == "search" and (
+                left.proposer is not None or right.proposer is not None):
+            check_equal_branch_budget(left, right)
 
     out = args.out / args.name
     out.mkdir(parents=True, exist_ok=True)

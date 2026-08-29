@@ -84,6 +84,38 @@ class Demonstrations:
     #: under the simple shaped reward while every fine-tune ran ``projected``,
     #: and the arriving critic predicted +1.48 where returns averaged +0.47.
     reward: str = ""
+    #: Who proposed the candidates the search then scored.
+    #:
+    #: ``"random"`` is the stratified draw that produced every shard on this
+    #: machine; ``"policy:<sha12>@t<temperature>p<policy_candidates>"`` is a
+    #: policy-guided proposal, named by the *content* of the weights rather
+    #: than by their path -- ``runs/iter-2/cloned.pt`` is a different network
+    #: on Tuesday than it was on Monday.
+    #:
+    #: Recorded for the same reason ``observation`` and ``reward`` are, and
+    #: the reason is sharper here: changing the proposal changes the
+    #: **labels**. The target is a distribution over the candidates that were
+    #: actually scored, so two shards from two proposers carry two different
+    #: supervision signals, and merging them makes a set whose target means
+    #: something different row to row with nothing downstream able to detect
+    #: it. Empty means a shard written before this field existed, which is not
+    #: the same as "random" and must not be silently treated as it.
+    proposer: str = ""
+    #: What the collection measured about its own targets, as a JSON object:
+    #: the candidate spread, how often the ``min_spread`` fallback fired, and
+    #: the proposer's full identity including the thread count its forwards
+    #: ran under.
+    #:
+    #: The fallback rate is the number that matters and it is why this field
+    #: exists. Support collapse under a policy proposer is a *measured*
+    #: quantity rather than a worry to be argued about: a proposer nominates
+    #: placements the policy already likes, alike placements score alike, the
+    #: spread falls below ``min_spread``, and the row collapses onto the
+    #: single chosen action -- at which point the policy is training on its
+    #: own preference wearing the search's clothes. ``scripts/make_demos.py``
+    #: refuses to recommend merging a shard whose rate has run away from the
+    #: unguided baseline.
+    meta: str = ""
 
     def __len__(self) -> int:
         return len(self.action)
@@ -94,7 +126,8 @@ class Demonstrations:
             grid=self.grid, vector=self.vector, mask=self.mask,
             action=self.action, value=self.value,
             episodes=self.episodes, play_rate=self.play_rate,
-            observation=self.observation, reward=self.reward)
+            observation=self.observation, reward=self.reward,
+            proposer=self.proposer, meta=self.meta)
         if self.target is not None:
             payload["target"] = self.target
         np.savez_compressed(path, **payload)
@@ -112,7 +145,15 @@ class Demonstrations:
             # than guessed at.
             observation=(str(raw["observation"])
                          if "observation" in raw.files else ""),
-            reward=(str(raw["reward"]) if "reward" in raw.files else ""))
+            reward=(str(raw["reward"]) if "reward" in raw.files else ""),
+            # Left empty on a shard written before the field existed. The six
+            # shards in data_cache/demos were in fact all collected by the
+            # unguided bot, but "" and "random" must stay different strings:
+            # the merge guard's whole job is to refuse a set it cannot vouch
+            # for, and filling the gap in with a true-but-unrecorded guess is
+            # how it would quietly stop doing that job.
+            proposer=(str(raw["proposer"]) if "proposer" in raw.files else ""),
+            meta=(str(raw["meta"]) if "meta" in raw.files else ""))
 
 
 
@@ -132,15 +173,23 @@ def _target_row(scores, index, width, height, slots, patience, temperature,
                 min_spread, size):
     """The search's beliefs about one decision, as a distribution.
 
-    Falls back to the action actually taken in the two cases where the scores
-    say nothing: when there are none, and when they are all within
-    ``min_spread`` of each other. See :func:`collect`'s ``min_spread`` for the
-    measurement behind the second.
+    Returns ``(row, spread)``. Falls back to the action actually taken in the
+    two cases where the scores say nothing: when there are none, and when they
+    are all within ``min_spread`` of each other. See :func:`collect`'s
+    ``min_spread`` for the measurement behind the second.
+
+    The spread comes back with the row because it is the collapse diagnostic,
+    and the only place it can be computed honestly is here, where the patience
+    margin has already been added to the waiting entry. A caller recomputing
+    it from the candidate values alone would get a different number and would
+    not know it. See :attr:`Demonstrations.meta`: a policy proposer nominates
+    placements that are more alike than a stratified draw, so this is the
+    quantity that says whether the target still spans anything.
     """
     row = np.zeros(size, dtype=np.float32)
     if not scores:
         row[index] = 1.0
-        return row
+        return row, 0.0
     indices = np.array([i for i, _ in scores])
     raw = np.array([v for _, v in scores], dtype=np.float64)
     # Waiting is scored the way the bot scored it: with its patience margin.
@@ -148,11 +197,45 @@ def _target_row(scores, index, width, height, slots, patience, temperature,
     spread = float(raw.std())
     if spread < min_spread:
         row[index] = 1.0
-        return row
+        return row, spread
     scale = max(1e-6, temperature * spread)
     weights = np.exp((raw - raw.max()) / scale)
     row[indices] = (weights / weights.sum()).astype(np.float32)
-    return row
+    return row, spread
+
+
+def _target_meta(spreads, collapsed, min_spread, temperature, extra):
+    """What the targets looked like, as the JSON blob a shard carries.
+
+    ``min_spread_fallback_rate`` is the one that gates a merge. A row that
+    fell back is a one-hot: the search could not separate its candidates, so
+    the only label left is the move it happened to make.
+
+    The feared direction is that a policy proposer drives this up, because it
+    nominates placements the policy already likes and alike placements score
+    alike. **Measured, it went the other way**: four episodes at the shipped
+    settings came back at a mean candidate spread of 0.0585 unguided and
+    0.0936 with nine of fourteen placements proposed by
+    ``checkpoints/headablate-flat.pt``, both with a 0% fallback rate. The
+    policy nominates placements that differ in value rather than placements
+    that are alike. That is one checkpoint on four episodes and does not
+    generalise on its own -- which is exactly why the number is recorded on
+    every shard instead of being argued about.
+    """
+    import json
+
+    values = np.asarray(spreads, dtype=np.float64)
+    body = {
+        "decisions": int(len(values)),
+        "min_spread": float(min_spread),
+        "target_temperature": float(temperature),
+        "min_spread_fallback_rate": (float(collapsed) / len(values)
+                                     if len(values) else 0.0),
+        "spread_mean": float(values.mean()) if len(values) else 0.0,
+        "spread_median": float(np.median(values)) if len(values) else 0.0,
+    }
+    body.update(extra or {})
+    return json.dumps(body, sort_keys=True)
 
 
 def collect(
@@ -197,6 +280,14 @@ def collect(
     #: object array that would not load back without allow_pickle.
     reward_name: str = "",
     observation_name: str = "v1",
+    #: Who proposed the candidates the search scored, as
+    #: :func:`cr_sim.train.proposal.proposer_identity` writes it. Stamped onto
+    #: the set so the file states it, rather than leaving whoever merges the
+    #: shards to remember which run used which network.
+    proposer_name: str = "",
+    #: Merged into the recorded :attr:`Demonstrations.meta` beside the spread
+    #: statistics this function measures for itself.
+    meta: "dict[str, Any] | None" = None,
 ):
     """Watch an expert play and write down every decision it faced.
 
@@ -218,13 +309,17 @@ def collect(
     if variants:
         return _collect_variants(make_env, make_expert, episodes, gamma,
                                  on_episode, target_temperature, min_spread,
-                                 variants, reward_name)
+                                 variants, reward_name, proposer_name, meta)
     grids: list[np.ndarray] = []
     vectors: list[np.ndarray] = []
     masks: list[np.ndarray] = []
     actions: list[int] = []
     values: list[float] = []
     targets: list[np.ndarray] = []
+    # How separable the search found its own candidates, decision by decision,
+    # and how often it found them inseparable. See Demonstrations.meta.
+    spreads: list[float] = []
+    collapsed = 0
     played = total = 0
 
     for episode in range(episodes):
@@ -267,10 +362,13 @@ def collect(
                 scores = list(getattr(expert, "last_scores", None)
                               or getattr(getattr(expert, "bot", None),
                                          "last_scores", []) or [])
-                targets.append(_target_row(
+                row, spread = _target_row(
                     scores, index, width, height, slots,
                     _expert_patience(expert), target_temperature, min_spread,
-                    len(flat)))
+                    len(flat))
+                targets.append(row)
+                spreads.append(spread)
+                collapsed += int(spread < min_spread)
             observation, reward, terminated, truncated, _ = env.step(choice)
             rewards.append(float(reward))
             if terminated or truncated:
@@ -306,13 +404,16 @@ def collect(
         target=np.asarray(targets, dtype=np.float32) if targets else None,
         observation=observation_name,
         reward=reward_name,
+        proposer=proposer_name,
+        meta=_target_meta(spreads, collapsed, min_spread, target_temperature,
+                          meta),
     )
 
 
 
 def _collect_variants(make_env, make_expert, episodes, gamma, on_episode,
                       target_temperature, min_spread, variants,
-                      reward_name=""):
+                      reward_name="", proposer_name="", meta=None):
     """:func:`collect`, recording every observation variant off one playthrough.
 
     Implemented by re-encoding the live battle once per variant at each
@@ -329,6 +430,8 @@ def _collect_variants(make_env, make_expert, episodes, gamma, on_episode,
     actions: list[int] = []
     values: list[float] = []
     targets: list = []
+    spreads: list[float] = []
+    collapsed = 0
     played = total = 0
 
     for episode in range(episodes):
@@ -370,10 +473,13 @@ def _collect_variants(make_env, make_expert, episodes, gamma, on_episode,
                 scores = list(getattr(expert, "last_scores", None)
                               or getattr(getattr(expert, "bot", None),
                                          "last_scores", []) or [])
-                targets.append(_target_row(
+                row, spread = _target_row(
                     scores, index, width, height, slots,
                     _expert_patience(expert), target_temperature, min_spread,
-                    len(flat)))
+                    len(flat))
+                targets.append(row)
+                spreads.append(spread)
+                collapsed += int(spread < min_spread)
             observation, reward, terminated, truncated, _ = env.step(choice)
             rewards.append(float(reward))
             if terminated or truncated:
@@ -398,6 +504,9 @@ def _collect_variants(make_env, make_expert, episodes, gamma, on_episode,
         play_rate=(played / total) if total else 0.0,
         target=np.asarray(targets, dtype=np.float32) if targets else None,
         reward=reward_name,
+        proposer=proposer_name,
+        meta=_target_meta(spreads, collapsed, min_spread, target_temperature,
+                          meta),
     )
     return {
         name: Demonstrations(

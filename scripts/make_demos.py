@@ -15,6 +15,7 @@ forward. Run several shards at once and merge them.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -33,7 +34,24 @@ from cr_sim.engine.entity import Team
 from cr_sim.train.clone import Demonstrations, collect
 from cr_sim.train.run import (
     DEFAULT_BUILD, DEFAULT_DECK, _random_opponent, _reward_weights)
+from cr_sim.train.proposal import proposer_factory, proposer_identity
 from cr_sim.train.scripted import SearchBot, SearchBotConfig
+
+#: How often the *unguided* search finds its candidates inseparable and the
+#: target collapses onto the move it happened to make.
+#:
+#: Measured on this machine rather than guessed. Zero, on two samples: 0 of
+#: 4,494 rows across the three shards in ``data_cache/demos_fixed`` are
+#: one-hot, and a fresh four-episode collection at the shipped defaults
+#: (candidates 14, horizon 15 s) fell back on 0 of 109 decisions, with a mean
+#: candidate spread of 0.0585 against a floor of 1e-3. The unguided draw
+#: spreads its candidates across the cards in hand, so the search almost
+#: always has something to prefer.
+#:
+#: It is the reference :func:`collapse_refusal` compares a policy-proposed
+#: shard against, because the number that matters is not the rate itself but
+#: how far guiding the proposal moved it.
+BASELINE_FALLBACK_RATE = 0.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -90,6 +108,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--candidates", type=int, default=14)
     parser.add_argument(
+        "--proposer", default="none",
+        help="a checkpoint whose policy proposes which placements the search "
+             "spends its branches on, or 'none' for the stratified random "
+             "draw that produced every shard on this machine. 'none' is the "
+             "default and the fallback: it is byte-for-byte the old bot, so "
+             "an unflagged run reproduces exactly.")
+    parser.add_argument(
+        "--proposer-temperature", type=float, default=0.0,
+        help="0 ranks by the policy's logits with a stable argsort and "
+             "touches no random number generator at all. Above zero it "
+             "samples without replacement from a generator this proposer "
+             "owns -- never torch's global stream, which is unseeded and is "
+             "why every sampled number in runs/_anchor is unreproducible.")
+    parser.add_argument(
+        "--policy-candidates", type=int, default=9,
+        help="how many of --candidates the proposer supplies. Clamped to "
+             "candidates - max(2, candidates // 3), so the target's support "
+             "always spans placements the policy did not choose. Ignored "
+             "without --proposer.")
+    parser.add_argument(
+        "--baseline-fallback", type=float, default=BASELINE_FALLBACK_RATE,
+        help="the unguided bot's min_spread fallback rate. A guided shard "
+             "more than ten points above it has collapsed its own target and "
+             "the run says so rather than letting it be merged.")
+    parser.add_argument(
         "--opponent", choices=("random", "bot"), default="random",
         help="who the expert plays. 'random' matches how the result is "
              "measured; 'bot' produces harder positions but takes twice as "
@@ -137,10 +180,36 @@ def main(argv: list[str] | None = None) -> int:
                 elixir_weight=args.elixir_weight)),
             opponent_policy=opponent)
 
+    # --------------------------------------------------- who proposes what
+
+    guided = args.proposer not in ("", "none", "None")
+    build_proposer = None
+    if guided:
+        from cr_sim.train.evaluate import load_policy
+
+        probe = make_env(0)
+        probe.reset(seed=offset)
+        proposer_net = load_policy(Path(args.proposer), probe)
+        build_proposer = proposer_factory(
+            proposer_net, probe.action_space.nvec,
+            temperature=args.proposer_temperature, seed=args.shard)
+        print(f"shard {args.shard}: candidates proposed by {args.proposer} "
+              f"at temperature {args.proposer_temperature:g}, "
+              f"{args.policy_candidates} of {args.candidates} placements",
+              flush=True)
+
+    search = SearchBotConfig(
+        horizon_seconds=args.horizon_seconds,
+        candidates=args.candidates, seed=args.shard,
+        policy_candidates=args.policy_candidates if guided else 0)
+
     def make_expert(env):
-        bot = SearchBot(Team.BLUE, SearchBotConfig(
-            horizon_seconds=args.horizon_seconds,
-            candidates=args.candidates, seed=args.shard))
+        # A proposer per battle, keyed by the battle's own seed, so its stream
+        # is a function of (shard, battle seed, decision) and never of how many
+        # episodes came before -- the flaw _random_opponent still has.
+        proposer = (None if build_proposer is None
+                    else build_proposer(int(env.battle.config.seed)))
+        bot = SearchBot(Team.BLUE, search, proposer)
 
         def expert(observation, mask, battle=None):
             return bot(observation, mask, battle)
@@ -157,17 +226,49 @@ def main(argv: list[str] | None = None) -> int:
               f"{samples} decisions, {rate:.0f}s/episode, "
               f"{(args.episodes - done) * rate / 60:.0f} min left", flush=True)
 
+    # The *effective* count, not the flag's. SearchBot clamps the proposal to
+    # leave the random floor intact, and a shard stamped with the number that
+    # was asked for over a bot that took fewer is a file declaring something
+    # about itself rather than recording it -- the exact failure
+    # Demonstrations.observation exists to prevent.
+    effective = search.effective_policy_candidates if guided else 0
+    if guided and effective != args.policy_candidates:
+        print(f"shard {args.shard}: --policy-candidates "
+              f"{args.policy_candidates} clamped to {effective}, keeping "
+              f"{search.random_floor} random candidates so the target's "
+              "support still spans placements the policy did not choose",
+              flush=True)
+    stamp = proposer_identity(
+        Path(args.proposer) if guided else None,
+        temperature=args.proposer_temperature,
+        policy_candidates=effective)
+    meta = {
+        "proposer": stamp,
+        "proposer_checkpoint": args.proposer if guided else "",
+        "proposer_temperature": float(args.proposer_temperature),
+        "candidates": int(args.candidates),
+        "policy_candidates": int(effective),
+        "policy_candidates_requested": int(args.policy_candidates if guided else 0),
+        "min_random_candidates": int(search.random_floor),
+        "search_horizon_seconds": float(args.horizon_seconds),
+        # A forward is not bit-stable across thread counts, so a different
+        # reduction order can flip a near-tie and change which placements were
+        # proposed. Recorded, so a divergence is detectable rather than silent.
+        "torch_threads": _torch_threads(),
+    }
+
     names = [n.strip() for n in args.observations.split(",") if n.strip()]
     if names == ["v1"]:
         demos = collect(make_env, make_expert, episodes=args.episodes,
                         on_episode=progress,
                         reward_name=args.reward,
-                        observation_name="v1")
+                        observation_name="v1",
+                        proposer_name=stamp, meta=meta)
         results = {"": demos}
     else:
         results = collect(
             make_env, make_expert, episodes=args.episodes, on_episode=progress,
-            reward_name=args.reward,
+            reward_name=args.reward, proposer_name=stamp, meta=meta,
             variants={name: parse_observation(name) for name in names})
 
     for name, demos in results.items():
@@ -175,12 +276,72 @@ def main(argv: list[str] | None = None) -> int:
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"shard-{args.shard:02d}.npz"
         demos.save(path)
+        measured = json.loads(demos.meta) if demos.meta else {}
         print(f"shard {args.shard}: wrote {len(demos)} decisions from "
               f"{demos.episodes} episodes to {path} "
               f"(play rate {demos.play_rate:.0%}, "
               f"observation {demos.observation!r}, reward {demos.reward!r}, "
+              f"proposer {demos.proposer!r}, "
               f"{(time.perf_counter() - started) / 60:.0f} min)", flush=True)
+        print(f"shard {args.shard}: candidate spread "
+              f"{measured.get('spread_mean', 0.0):.4f} mean, min_spread "
+              f"fallback {measured.get('min_spread_fallback_rate', 0.0):.1%}",
+              flush=True)
+        refusal = collapse_refusal(demos, args.baseline_fallback)
+        if refusal:
+            print(refusal, flush=True)
     return 0
+
+
+def _torch_threads() -> int:
+    try:
+        import torch
+
+        return int(torch.get_num_threads())
+    except Exception:                                   # pragma: no cover
+        return 0
+
+
+def collapse_refusal(demos: Demonstrations, baseline: float,
+                     margin: float = 0.10) -> str:
+    """A refusal to merge a shard whose target has collapsed, or "".
+
+    The shard is written either way -- throwing away a twenty-minute
+    collection because a diagnostic tripped is how a number stops being
+    measured at all -- but the run says plainly that it must not be merged,
+    and says what it measured.
+
+    The failure this catches is self-reinforcing and would otherwise be
+    invisible. A policy proposer nominates placements the policy already
+    rates highly, so their engine-scored values sit closer together, so more
+    rows fall below ``min_spread`` and collapse to a one-hot on the chosen
+    action, so the clone trains on the policy's own preference dressed as the
+    search's belief -- and the next round's proposer is more confident still.
+    That is the shape of the measured disaster the ``min_spread`` floor was
+    added for: 86% of wait-states carrying a uniform target, the pass action
+    never the argmax in 10,940 decisions, and a clone that played a card at
+    every single decision.
+
+    It has not happened yet. The first guided collection on this machine came
+    back at a *higher* mean spread than the unguided one -- 0.0936 against
+    0.0585, both at a 0% fallback rate -- so the proposer is nominating
+    placements that differ in value rather than placements that are alike.
+    That is four episodes and one checkpoint. The gate stays.
+    """
+    if not demos.meta:
+        return ""
+    rate = float(json.loads(demos.meta).get("min_spread_fallback_rate", 0.0))
+    if rate <= baseline + margin:
+        return ""
+    return (
+        f"REFUSED FOR MERGING: {rate:.1%} of this shard's targets fell back "
+        f"to the single chosen action, against {baseline:.1%} for the "
+        f"unguided draw -- {rate - baseline:+.1%}, past the {margin:.0%} "
+        "margin. The proposal has collapsed the target's support onto what "
+        "the policy already believed, and a clone trained on it sharpens a "
+        "preference rather than improving one. The shard is on disk; do not "
+        "merge it. Lower --policy-candidates or raise "
+        "--min-random-candidates and collect again.")
 
 
 if __name__ == "__main__":

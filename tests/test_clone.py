@@ -331,10 +331,13 @@ def _row(scores, choice, **kwargs):
     expert = _ScoringExpert(scores, choice, kwargs.pop("patience", 0.01))
     slots, width, height = NVEC
     index = (choice[0] * width * height + choice[1] * height + choice[2])
+    # The row only; _target_row also returns the candidates' spread, which is
+    # the collapse diagnostic a policy-proposed shard is gated on and which
+    # these cases are not about.
     return _target_row(scores, index, width, height, slots,
                        _expert_patience(expert),
                        kwargs.pop("temperature", 0.35),
-                       kwargs.pop("min_spread", 1e-3), NUM_ACTIONS)
+                       kwargs.pop("min_spread", 1e-3), NUM_ACTIONS)[0]
 
 
 def test_a_target_the_search_could_not_separate_falls_back_to_what_it_did():

@@ -54,6 +54,7 @@ from typing import Any, Callable, Sequence
 
 import numpy as np
 
+from ..api.encoding import NOOP_SLOT
 from ..api.env import CRSimEnv
 from ..engine.entity import Team
 from .evaluate import EVAL_BLOCKS, check_observation, evaluation_seeds
@@ -69,8 +70,12 @@ __all__ = [
     "play_pairing", "fit_ratings", "expected_score", "ladder_probe",
 ]
 
-#: ``search-c6h8`` -- six candidates, eight seconds a branch.
-_SEARCH_SPEC = re.compile(r"^search-c(\d+)h([\d.]+)$")
+#: ``search-c6h8`` -- six candidates, eight seconds a branch. Optionally
+#: ``search-c14h15-p9@runs/clone-v1-paired/cloned.pt``: the same budget, with
+#: nine of the fourteen placements proposed by that checkpoint's policy
+#: instead of drawn at random.
+_SEARCH_SPEC = re.compile(
+    r"^search-c(\d+)h([\d.]+)(?:-p(\d+)@(.+))?$")
 
 #: Elo's natural-scale constant: a 400-point gap is 10:1 odds.
 _C = math.log(10.0) / 400.0
@@ -135,13 +140,20 @@ class Player:
     head: str = "flat"
     observation: str = "v1"
     search: SearchBotConfig | None = None
+    #: For a search player, the checkpoint whose policy proposes its
+    #: candidates. ``None`` is the stratified random draw -- the bot that
+    #: produced every result on this machine, and the fallback.
+    proposer: Path | None = None
+    proposer_temperature: float = 0.0
     #: Whether ``head`` came out of the file or out of the parameter count.
     #: Recorded on every player, so a reader can see which ratings rest on an
     #: inference.
     head_source: str = "recorded"
     #: A live network, for the in-run probe, which rates weights that are not
     #: on disk yet. Excluded from equality: two Players are the same entrant
-    #: when they name the same weights.
+    #: when they name the same weights. On a search player this holds the
+    #: *proposer's* weights instead, which is the only network a search bot
+    #: has; ``kind`` says which reading applies.
     net: Any = field(default=None, compare=False, repr=False)
     seed: int = 0
 
@@ -151,8 +163,19 @@ class Player:
         if self.checkpoint is not None:
             return str(self.checkpoint)
         if self.kind == "search" and self.search is not None:
-            return (f"c{self.search.candidates}"
-                    f"h{self.search.horizon_seconds:g}")
+            budget = (f"c{self.search.candidates}"
+                      f"h{self.search.horizon_seconds:g}")
+            if self.proposer is None:
+                return budget
+            # The proposer is part of which player this is, not a detail of
+            # how it was run: the same fourteen branches proposed by two
+            # different networks are two different opponents, and a rating
+            # keyed by the budget alone would merge them into one row.
+            from .proposal import proposer_identity
+
+            return budget + "-" + proposer_identity(
+                self.proposer, temperature=self.proposer_temperature,
+                policy_candidates=self.search.policy_candidates)
         if self.kind == "random":
             return "random"
         return "live"
@@ -164,7 +187,15 @@ class Player:
         what makes a mismatch fail loudly here instead of quietly scoring a
         policy against an observation it was never trained on.
         """
-        if self.kind != "net" or self.net is not None:
+        if self.net is not None:
+            return self
+        if self.kind == "search":
+            if self.proposer is None:
+                return self
+            from .evaluate import load_policy
+
+            return replace(self, net=load_policy(self.proposer, env))
+        if self.kind != "net":
             return self
         import torch
 
@@ -246,10 +277,15 @@ def parse_player(spec: str) -> Player:
         return Player(name=name or "random", kind="random")
     found = _SEARCH_SPEC.match(rest)
     if found:
+        proposer = Path(found.group(4)) if found.group(4) else None
         return Player(
             name=name or rest, kind="search", seed=3,
-            search=SearchBotConfig(candidates=int(found.group(1)),
-                                   horizon_seconds=float(found.group(2))))
+            proposer=proposer,
+            search=SearchBotConfig(
+                candidates=int(found.group(1)),
+                horizon_seconds=float(found.group(2)),
+                policy_candidates=(int(found.group(3))
+                                   if found.group(3) else 0)))
     return player_from_checkpoint(Path(rest), name=name or None)
 
 
@@ -338,6 +374,28 @@ class Rating:
 # --------------------------------------------------------- playing a pairing
 
 
+def _proposer_of(player: Player, nvec):
+    """The per-battle proposer builder for a search player, or ``None``.
+
+    ``None`` for every player that does not name a proposer, which is every
+    player that has ever been rated on this machine. The search bot's default
+    is the random draw and so is the ladder's.
+    """
+    if player.kind != "search" or player.proposer is None:
+        return None
+    if player.net is None:
+        raise ValueError(
+            f"{player.name} proposes its candidates from {player.proposer} "
+            "but its weights were never loaded. Call Player.load(env) first: "
+            "the network's shapes come from the environment, so a mismatch "
+            "has to fail there rather than here.")
+    from .proposal import proposer_factory
+
+    return proposer_factory(player.net, nvec,
+                            temperature=player.proposer_temperature,
+                            seed=player.seed)
+
+
 def _random_driver(rng: np.random.Generator):
     def act(observation, mask, battle):
         legal = np.flatnonzero(mask.reshape(-1))
@@ -378,6 +436,7 @@ def _search_driver(player: Player, team: Team, width: int, height: int):
     the seed.
     """
     state: dict[str, Any] = {"bot": None, "seed": object()}
+    build_proposer = _proposer_of(player, (NOOP_SLOT + 1, width, height))
 
     def act(observation, mask, battle):
         key = int(battle.config.seed)
@@ -385,7 +444,9 @@ def _search_driver(player: Player, team: Team, width: int, height: int):
             base = player.search or SearchBotConfig()
             derived = (player.seed * 1_000_003 + key) % (2 ** 31 - 1)
             state["seed"] = key
-            state["bot"] = SearchBot(team, replace(base, seed=derived))
+            state["bot"] = SearchBot(
+                team, replace(base, seed=derived),
+                None if build_proposer is None else build_proposer(derived))
         slot, gx, gy = state["bot"](observation, mask, battle)
         return int(slot) * width * height + int(gx) * height + int(gy)
 
@@ -409,7 +470,8 @@ def _opponent_policy(player: Player, nvec, *, mode: str, stream_seed: int):
         from .evaluate import search_opponent
 
         policy = search_opponent(player.search or SearchBotConfig(),
-                                 seed=player.seed)
+                                 seed=player.seed,
+                                 proposer=_proposer_of(player, nvec))
         # The player's own name, not the bare "search". A thinned expert is a
         # *different opponent* -- 4s wins 31%, 8s 94%, 15s 100%, and a 2s
         # horizon is an idle opponent still wearing the label -- so inheriting
