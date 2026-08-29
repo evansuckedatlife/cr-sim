@@ -91,8 +91,10 @@ def _drift(kl: float, updates: int = 4) -> float:
     config = PPOConfig(kl_coefficient=kl, entropy_coefficient=0.0,
                        epochs=2, minibatches=2)
     before = _pass_probability(net, rollout)
+    shuffler = np.random.default_rng(0)
     for _ in range(updates):
-        _update(net, optimiser, rollout, config, "cpu", anchor)
+        _update(net, optimiser, rollout, config, "cpu", anchor,
+                shuffler=shuffler)
     return _pass_probability(net, rollout) - before
 
 
@@ -123,11 +125,13 @@ def test_the_divergence_is_reported_and_starts_at_zero():
     # A zero learning rate so the first minibatch's divergence is measured
     # before anything has moved.
     optimiser = torch.optim.Adam(net.parameters(), lr=0.0)
-    stats = _update(net, optimiser, rollout, config, "cpu", anchor)
+    stats = _update(net, optimiser, rollout, config, "cpu", anchor,
+                    shuffler=np.random.default_rng(0))
     assert "reference_kl" in stats
     assert stats["reference_kl"] == pytest.approx(0.0, abs=1e-5)
 
-    stats = _update(net, optimiser, rollout, config, "cpu", None)
+    stats = _update(net, optimiser, rollout, config, "cpu", None,
+                    shuffler=np.random.default_rng(0))
     assert stats["reference_kl"] == 0.0, "no anchor should report no divergence"
 
 
@@ -142,8 +146,13 @@ def test_the_coefficient_at_zero_changes_nothing():
     def weights_after(anchor):
         net = _net()
         optimiser = torch.optim.Adam(net.parameters(), lr=1e-3, eps=1e-5)
-        np.random.seed(0)
-        _update(net, optimiser, rollout, config_off, "cpu", anchor)
+        # The minibatch permutation comes from a stream this call owns.
+        # It used to come from numpy's global legacy RandomState, which this
+        # line had to reseed by hand -- and which a real run never seeded at
+        # all, so two runs of one command with one --seed took different
+        # update paths.
+        _update(net, optimiser, rollout, config_off, "cpu", anchor,
+                shuffler=np.random.default_rng(0))
         return [p.detach().clone() for p in net.parameters()]
 
     without = weights_after(None)

@@ -272,6 +272,11 @@ def main(argv: list[str] | None = None) -> int:
     (out / "ladder.json").write_text(json.dumps({
         "mode": args.mode, "episodes": args.episodes, "block": args.block,
         "observation": observation, "prior_sd": args.prior_sd,
+        # The arena these ratings were fitted in. Without it,
+        # `--ladder-ratings` could not check that the table it is pinning a
+        # run against was measured on the same game -- at level 11 the towers
+        # outlast the match and 90% of battles draw.
+        "tower_level": args.tower_level,
         "anchor": "random",
         "players": [{"name": p.name, "kind": p.kind,
                      "checkpoint": str(p.checkpoint) if p.checkpoint else None,
@@ -291,6 +296,14 @@ def main(argv: list[str] | None = None) -> int:
                               for r in records},
     }, indent=2), encoding="utf-8")
 
+    # One row per pairing direction, carrying that direction's own score --
+    # and nothing else. The rating used to ride along on these rows, so the
+    # same whole-graph number appeared beside several different
+    # eval_opponents, none of which produced it: in runs/agent-ladder-v1,
+    # headablate-flat's +309.4 sits on a row naming "random" and on another
+    # naming "clone-v1-paired:cloned", while the number is a Bradley-Terry fit
+    # over four pairings. And four of the twelve rows read `player=random
+    # elo=+0.0`, a pinned constant in the same field as a fitted rating.
     rows = []
     for record in records:
         for direction, index in zip(record["directions"], (0, 1)):
@@ -301,8 +314,6 @@ def main(argv: list[str] | None = None) -> int:
                 "mean_return": 0.0, "noop_fraction": 0.0,
                 "win_rate": direction["wins"] / max(1, args.episodes),
                 "ladder_score": direction["score"],
-                "ladder_elo": ratings[direction["blue"]].elo
-                if direction["blue"] in ratings else 0.0,
                 "ladder_player": direction["blue"],
                 # Who, and which weights. A rating is transitive, so a row
                 # naming only the kind cannot be placed on the graph at all.
@@ -314,6 +325,36 @@ def main(argv: list[str] | None = None) -> int:
                 "mode": record["mode"], "direction": index,
                 "seeds": direction["seeds"],
             }))
+
+    # And one row per player for the rating itself, which is a property of
+    # the whole graph and names the whole roster as what it was measured
+    # against -- the way ladder_probe does.
+    pinned = {name: rating.elo for name, rating in ratings.items()
+              if rating.pinned}
+    for name, rating in sorted(ratings.items(), key=lambda kv: -kv[1].elo):
+        others = sorted({p.ref for other, p in by_name.items()
+                         if other != name})
+        rows.append(check_lift_is_named({
+            "updates": len(rows) + 1, "steps": 0,
+            "episodes": args.episodes, "steps_per_second": 0.0,
+            "entropy": 0.0, "value_loss": 0.0, "policy_loss": 0.0,
+            "mean_return": 0.0, "noop_fraction": 0.0, "win_rate": 0.0,
+            "ladder_elo": rating.elo,
+            "ladder_elo_error": (rating.error if np.isfinite(rating.error)
+                                 else None),
+            # Whether this number was fitted or held fixed. Rating.pinned has
+            # always existed and was dropped when the row was written, so an
+            # anchor's constant 0.0 was indistinguishable from a fit.
+            "ladder_elo_pinned": bool(rating.pinned),
+            "ladder_pinned": pinned,
+            "ladder_player": name,
+            "ladder_games": rating.games,
+            "eval_opponent": "ladder",
+            "ladder_opponent": "ladder",
+            "ladder_opponent_ref": "|".join(others),
+            "eval_episodes": args.episodes,
+            "mode": args.mode,
+        }))
 
     arms = []
     if not args.no_arms:
@@ -353,6 +394,27 @@ def main(argv: list[str] | None = None) -> int:
                                        encoding="utf-8")
 
     top = max(ratings.values(), key=lambda r: r.elo)
+    # The flattened lift keys, and only where there is exactly one arm to
+    # flatten. arms[0] is one player's lift against the random control, and
+    # the file's headline Elo is the top-rated player's -- usually somebody
+    # else. runs/agent-ladder-v1 pairs `ladder_player: clone-v1-paired:cloned`
+    # with `lift: +1.732`, which is headablate-flat's; runs/audit-ladder-greedy
+    # pairs `ladder_player: headablate-factored` with the worst-rated
+    # entrant's +0.781, under `eval_opponent: "ladder"` for a number measured
+    # against random. arms.json carries every arm correctly, one per player
+    # with its own eval_opponent, so nothing is lost by declining to guess.
+    flattened = {}
+    if len(arms) == 1:
+        flattened = {
+            "lift": arms[0]["lift"], "ci_low": arms[0]["ci_low"],
+            "ci_high": arms[0]["ci_high"], "win": arms[0]["win"],
+            "loss": arms[0]["loss"],
+            # Whose lift, and against whom -- neither of which the top-level
+            # ladder_player and eval_opponent can say, because they belong to
+            # the rating.
+            "lift_player": arms[0]["name"],
+            "lift_opponent": arms[0]["eval_opponent"],
+        }
     write_verdict(out / "verdict.json", {
         "episodes": args.episodes,
         "eval_opponent": "ladder",
@@ -360,15 +422,20 @@ def main(argv: list[str] | None = None) -> int:
         "seeds": seeds,
         "ladder_opponent_ref": "|".join(sorted(p.ref for p in anchors)),
         "ladder_elo": top.elo, "ladder_player": top.name,
+        "ladder_elo_pinned": bool(top.pinned),
+        "ladder_pinned": pinned,
         "ratings": [{"name": r.name, "elo": r.elo, "error": r.error,
-                     "games": r.games} for r in
+                     "games": r.games, "pinned": r.pinned} for r in
                     sorted(ratings.values(), key=lambda r: -r.elo)],
-        **({"lift": arms[0]["lift"], "ci_low": arms[0]["ci_low"],
-            "ci_high": arms[0]["ci_high"], "win": arms[0]["win"],
-            "loss": arms[0]["loss"]} if arms else {}),
+        **flattened,
         "note": (f"Elo, anchored at random = 0, fitted from "
                  f"{len(records)} mirrored pairings. Not a lift: the two "
-                 "scales are unrelated and must not be plotted on one axis."),
+                 "scales are unrelated and must not be plotted on one axis."
+                 + ("" if flattened else
+                    f" The per-player lifts against the random control are in "
+                    f"arms.json, one per player with its own eval_opponent; "
+                    f"none is flattened here because {len(arms)} of them "
+                    "would have to be represented by one.")),
     })
 
     with (out / "metrics.jsonl").open("w", encoding="utf-8") as stream:

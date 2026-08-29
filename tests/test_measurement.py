@@ -550,7 +550,11 @@ def test_a_ladder_row_cannot_be_recorded_without_naming_both_sides():
              "ancestor_score": 0.6, "ancestor_opponent": "pool",
              "ancestor_opponent_ref": "gen3",
              "ladder_elo": 120.0, "ladder_opponent": "ladder",
-             "ladder_opponent_ref": "random@random"}
+             "ladder_opponent_ref": "random@random",
+             # And what the rating was pinned to: an Elo fitted against
+             # differently-pinned anchors is on a different scale, and the
+             # same battles came out 377 points apart over that alone.
+             "ladder_pinned": {"random": 0.0}}
     assert check_lift_is_named(three) is three
     for missing in ("ancestor_opponent_ref", "ladder_opponent_ref"):
         with pytest.raises(ValueError, match="which weights"):
@@ -600,10 +604,18 @@ def test_the_expert_verdict_is_measured_on_the_shared_seed_set(tmp_path):
     # used to build wanders an order of magnitude further than that, which is
     # why the old +2.716 and the clone's +2.167 were never in the same unit.
     returns = verdict["control"]["returns"]
-    crowns = verdict["control"]["crowns"]
+    # Per battle, under its own key. It used to be "crowns", written twice
+    # into the same dict literal: the mean this script computes lost to the
+    # list, so the summary never reached the file and the field's type
+    # disagreed with evaluate_paired's control block, which writes the float.
+    crowns = verdict["control"]["crowns_per_battle"]
     assert len(returns) == len(crowns) == 2
     assert any(r != 0.0 for r in returns), "no reward accrued; nothing measured"
     assert max(abs(r - c) for r, c in zip(returns, crowns)) <= 0.0101
+    # And the mean is there too, agreeing with the list beside it and with
+    # what every other paired verdict on this machine means by "crowns".
+    assert verdict["control"]["crowns"] == pytest.approx(
+        sum(crowns) / len(crowns))
 
     # And the row it registers on the progress page goes through the guard.
     from cr_sim.train.selfplay import check_lift_is_named
@@ -658,6 +670,168 @@ def test_the_ancestor_ladder_names_which_ancestor_it_played(world):
         row["ancestor_win"] + 0.5 * (1.0 - row["ancestor_win"]
                                      - row["ancestor_loss"]))
     assert check_lift_is_named(row) is row
+
+
+def test_the_default_probe_is_a_function_of_the_policy_and_the_seeds(world):
+    """The number promotion is decided on has to be the same number twice.
+
+    ``evaluation_probe`` is ``run.py``'s default ``--probe`` and the source of
+    every ``eval_lift_sd`` in the record. Its sampled arm called ``evaluate``
+    with no generator, so the draw came off torch's global stream: three
+    consecutive readings of one checkpoint, one net object and one seed list
+    -- after a single ``torch.manual_seed(0)`` -- measured +0.905, +1.228 and
+    +0.970, a 0.32 sd spread. Re-running the same three calls each preceded by
+    ``torch.manual_seed(0)`` returned +0.905 three times exactly, which pins
+    the cause on stream position rather than on the battles. The repo's own
+    sampled noise floor is 0.062 sd and the last full PPO run moved greedy by
+    0.024; ``run.py`` averages three of these readings and promotes on the
+    mean.
+    """
+    import torch
+
+    from cr_sim.train.nets import ActorCritic, net_config_for
+    from cr_sim.train.run import _random_opponent
+    from cr_sim.train.selfplay import evaluation_probe
+
+    def make_env():
+        return _tiny(world, opponent_policy=_random_opponent(90_000))
+
+    shape = make_env()
+    shape.reset(seed=0)
+    torch.manual_seed(0)
+    net = ActorCritic(net_config_for(shape, head="flat"))
+    net.eval()
+
+    probe = evaluation_probe(make_env, episodes=3, seed=4)
+    first, second = probe(net), probe(net)
+
+    # Sampling really is what this arm does, so two readings differing would
+    # be the generator and not the battles: the greedy argmax would agree
+    # whatever stream it was on.
+    assert first["eval_return"] != first["control_return"]
+    assert first == second, (
+        "two readings of one net over one seed list disagreed, so the number "
+        "run.py promotes on is not a function of the policy")
+
+
+def test_the_ancestor_probe_is_a_function_of_the_policy_and_the_seeds(world):
+    """Both sides of it: the ancestor samples from its policy too.
+
+    ``ancestor_probe`` built its ``FrozenOpponent`` with no generator and
+    called ``evaluate`` with none either, so a self-play run's most readable
+    progress signal was two draws off torch's global stream.
+    """
+    import torch
+
+    from cr_sim.train.nets import ActorCritic, net_config_for
+    from cr_sim.train.selfplay import OpponentPool, ancestor_probe
+
+    probe_env = _tiny(world)
+    probe_env.reset(seed=0)
+    torch.manual_seed(1)
+    ancestor = ActorCritic(net_config_for(probe_env, head="flat"))
+    ancestor.eval()
+    torch.manual_seed(2)
+    net = ActorCritic(net_config_for(probe_env, head="flat"))
+    net.eval()
+    pool = OpponentPool(capacity=4, seed=0)
+    pool.add(ancestor)
+
+    def make_env(opponent=None):
+        return _tiny(world, opponent_policy=opponent)
+
+    nvec = tuple(int(v) for v in probe_env.action_space.nvec)
+    probe = ancestor_probe(make_env, pool, nvec, episodes=3, seed=5)
+    first, second = probe(net), probe(net)
+
+    assert 0.0 < first["ancestor_score"] < 1.0 or first["ancestor_return"] != 0.0
+    assert first == second
+
+
+def test_a_paired_arm_measures_the_same_thing_whatever_else_was_asked_for(world):
+    """The sampled arm's stream is keyed on the mode, not on its position.
+
+    ``evaluate_paired`` derived each arm's generator from ``enumerate(modes)``,
+    so the sampled arm drew one stream when greedy was also requested (index
+    1) and a different one when it was asked for alone (index 0). Measured on
+    checkpoints/headablate-factored.pt over 40 seeds against the same random
+    control, the same weights and the same battles gave sampled lifts of
+    +1.3198 and +1.1971 -- 0.123 sd apart, twice the sampled noise floor
+    ``evaluate``'s own docstring documents, decided entirely by what else the
+    caller wanted. Both single-arm callers are live: scripts/run_ladder.py
+    passes ``modes=(args.mode,)`` and scripts/evaluate_vs_expert.py passes
+    ``modes=tuple(args.modes)``.
+    """
+    import torch
+
+    from cr_sim.train.evaluate import evaluate_paired, evaluation_seeds
+    from cr_sim.train.nets import ActorCritic, net_config_for
+    from cr_sim.train.run import _random_opponent
+
+    def make_env():
+        return _tiny(world, opponent_policy=_random_opponent(60_000))
+
+    shape = make_env()
+    shape.reset(seed=0)
+    torch.manual_seed(0)
+    net = ActorCritic(net_config_for(shape, head="flat"))
+    net.eval()
+    seeds = evaluation_seeds(3, block=0)
+
+    both = evaluate_paired(make_env, net, episodes=3, seeds=seeds,
+                           modes=("greedy", "sampled"))
+    alone = evaluate_paired(make_env, net, episodes=3, seeds=seeds,
+                            modes=("sampled",))
+
+    # The two arms are genuinely different policies over these battles, so a
+    # sampled arm that had quietly become the greedy one would show here.
+    assert both["sampled"]["lift"] != both["greedy"]["lift"]
+    assert alone["sampled"]["lift"] == both["sampled"]["lift"], (
+        "asking for the sampled arm alone measured a different number from "
+        "asking for it beside greedy, on the same battles")
+
+
+def test_no_dict_literal_writes_the_same_key_twice():
+    """A repeated key silently discards the earlier value, and one did.
+
+    ``scripts/measure_expert.py`` wrote ``"crowns"`` twice into one verdict
+    dict: the mean crown difference the code above it computes, and then the
+    per-battle list. The list won, so the summary that file's own comment
+    describes never reached disk -- and the field's *type* then disagreed with
+    ``evaluate_paired``'s control block, which writes the float, leaving two
+    verdicts on this machine that mean different things by ``control.crowns``.
+
+    Checked over the whole tree rather than that one literal, because the
+    consequence -- a value computed, written, and thrown away, with no error
+    anywhere -- is the same wherever it happens, and because a test pinned to
+    one line would go green the moment the same mistake moved.
+    """
+    import ast
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parents[1]
+    sources = sorted(
+        list((root / "cr_sim").rglob("*.py"))
+        + list((root / "scripts").glob("*.py"))
+        + list((root / "tests").glob("*.py")))
+    assert len(sources) > 40, "the scan found almost nothing to scan"
+
+    offenders = []
+    for path in sources:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            keys = [k.value for k in node.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+            repeated = sorted({k for k in keys if keys.count(k) > 1})
+            if repeated:
+                offenders.append(
+                    f"{path.relative_to(root)}:{node.lineno} {repeated}")
+
+    assert not offenders, (
+        "these dict literals write a key twice, so the first value is "
+        f"computed and discarded: {offenders}")
 
 
 def test_the_expert_evaluation_survives_a_caller_who_wants_one_arm(tmp_path):

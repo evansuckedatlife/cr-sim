@@ -63,6 +63,23 @@ def build_parser() -> argparse.ArgumentParser:
              "max(2, candidates // 3) from the random draw, whatever is asked "
              "for here: without that floor the target's support collapses "
              "onto what the policy already believed.")
+    parser.add_argument(
+        "--min-random-candidates", type=int, default=0,
+        help="candidates the random draw keeps whatever the proposer wants, "
+             "passed straight to make_demos.py. 0 is its default floor, "
+             "max(2, candidates // 3). This is the other half of the remedy "
+             "the collapse refusal names.")
+    parser.add_argument(
+        "--targets", choices=("soft", "hard"), default="soft",
+        help="what the clone fits. 'soft' is the search's own distribution "
+             "over the placements it evaluated -- the third arrow of the loop "
+             "this script exists to close, and the only reason the round "
+             "computes a target at all. It was not passed, so clone_policy's "
+             "own default of 'hard' applied and `data.target = None` threw "
+             "the distribution away after collecting it: a real round wrote "
+             "runs/iter-1/cloned.pt recording targets='hard' over a shard "
+             "whose min_spread_fallback_rate was 0.0. 'hard' is for the "
+             "shards already on disk, which cannot support soft targets.")
     parser.add_argument("--proposer-temperature", type=float, default=0.0)
     parser.add_argument("--horizon-seconds", type=float, default=15.0)
     parser.add_argument("--tower-level", type=int, default=5)
@@ -109,6 +126,33 @@ def _run(command: list[str], *, dry: bool, log: Path | None = None) -> None:
     print(f"    {(time.perf_counter() - started) / 60:.1f} min", flush=True)
 
 
+def demo_command(args, shard: int, demos, proposer) -> list:
+    """One shard's collection, as the command that runs it.
+
+    Built here rather than inline so a test can parse it back through
+    ``make_demos.build_parser()``: a flag this driver forgets is a knob the
+    round silently takes the default of, which is how the search's own value
+    distribution came to be computed and discarded in the same round.
+    """
+    return [sys.executable, "scripts/make_demos.py",
+            "--episodes", args.episodes, "--shard", shard,
+            "--out", demos, "--candidates", args.candidates,
+            "--horizon-seconds", args.horizon_seconds,
+            "--tower-level", args.tower_level,
+            "--proposer", proposer,
+            "--proposer-temperature", args.proposer_temperature,
+            "--policy-candidates", args.policy_candidates,
+            "--min-random-candidates", args.min_random_candidates]
+
+
+def clone_command(args, demos, out) -> list:
+    """The round's clone, as the command that runs it. See ``demo_command``."""
+    return [sys.executable, "scripts/clone_policy.py",
+            "--demos", demos, "--out", out, "--head", args.head,
+            "--observation", args.observation, "--epochs", args.epochs,
+            "--targets", args.targets]
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not args.dry_run and not args.seed_policy.exists():
@@ -124,20 +168,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n=== round {index}: proposals from {proposer} ===", flush=True)
 
         for shard in range(args.shards):
-            _run([sys.executable, "scripts/make_demos.py",
-                  "--episodes", args.episodes, "--shard", shard,
-                  "--out", demos, "--candidates", args.candidates,
-                  "--horizon-seconds", args.horizon_seconds,
-                  "--tower-level", args.tower_level,
-                  "--proposer", proposer,
-                  "--proposer-temperature", args.proposer_temperature,
-                  "--policy-candidates", args.policy_candidates],
-                 dry=args.dry_run)
+            _run(demo_command(args, shard, demos, proposer), dry=args.dry_run)
 
-        _run([sys.executable, "scripts/clone_policy.py",
-              "--demos", demos, "--out", out, "--head", args.head,
-              "--observation", args.observation, "--epochs", args.epochs],
-             dry=args.dry_run)
+        _run(clone_command(args, demos, out), dry=args.dry_run)
 
         if not args.skip_ladder:
             ladder = [sys.executable, "scripts/run_ladder.py",

@@ -144,7 +144,12 @@ class RewardSchedule:
             raise ValueError(
                 "a schedule's endpoints must describe the same weight tuple; "
                 f"start has {sorted(self.start)} and end has {sorted(self.end)}")
-        if self.end_step < self.start_step:
+        # 0 is the unset sentinel, not a step. :meth:`resolved` fills it in
+        # from the run's total, and rejecting it here made that path
+        # unreachable for every nonzero --anneal-start: `--anneal
+        # --anneal-start 500` died in the constructor before run.py could
+        # call resolved(), with an unhandled ValueError at startup.
+        if self.end_step and self.end_step < self.start_step:
             raise ValueError(
                 f"end_step {self.end_step} is before start_step {self.start_step}")
         for key, low in self.start.items():

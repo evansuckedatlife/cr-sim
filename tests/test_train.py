@@ -628,11 +628,284 @@ def test_the_worker_config_agrees_with_the_probe_env_field_for_field(tmp_path,
         "projected:elixir=0.7,horizon_seconds=3,tower=0.4")
 
 
+def _tiny_rollout(horizon=8, envs=4, actions=12, seed=0):
+    """A batch big enough to have several distinct minibatch orders."""
+    from cr_sim.train.ppo import Rollout, compute_gae
+
+    generator = torch.Generator().manual_seed(seed)
+    grid = torch.rand((horizon, envs, 2, 4, 3), generator=generator)
+    vector = torch.rand((horizon, envs, 6), generator=generator)
+    mask = torch.ones((horizon, envs, actions), dtype=torch.bool)
+    action = torch.randint(0, actions, (horizon, envs), generator=generator)
+    log_prob = torch.full((horizon, envs), -float(np.log(actions)))
+    value = torch.zeros((horizon, envs))
+    done = torch.zeros((horizon, envs))
+    advantage = torch.rand((horizon, envs), generator=generator) - 0.5
+    reward = advantage.clone()
+    _, ret = compute_gae(reward, value, done, torch.zeros(envs), 0.99, 0.95)
+    return Rollout(grid=grid, vector=vector, mask=mask, action=action,
+                   log_prob=log_prob, value=value, reward=reward, done=done,
+                   advantage=advantage, ret=ret)
+
+
+class _RecordingShuffler:
+    """A shuffler that keeps every permutation it produced."""
+
+    def __init__(self, seed: int) -> None:
+        self._rng = np.random.default_rng(seed)
+        self.orders: list[list[int]] = []
+
+    def shuffle(self, indices) -> None:
+        self._rng.shuffle(indices)
+        self.orders.append([int(i) for i in indices])
+
+
+def test_the_minibatch_order_comes_from_a_stream_the_update_owns():
+    """``np.random.shuffle`` draws from numpy's *global legacy* RandomState.
+
+    ``train`` seeds torch and builds a local ``default_rng``; nothing seeds
+    that global RandomState, which is initialised from OS entropy at import.
+    Three fresh processes doing exactly what ``train`` does first and then one
+    ``np.random.shuffle(np.arange(12))`` produced [6,5,1,7,3,0,11,9,10,4,8,2],
+    [10,2,1,11,3,7,6,0,9,4,5,8] and [3,11,7,9,1,2,4,10,5,6,0,8].
+
+    So a run reproduced its rollout and not its update: at ``--workers 0``
+    with byte-identical config.json, two runs of one command agreed on
+    update-1 mean_return to the last digit and disagreed on policy_loss
+    (-0.080 against -0.121) and value_loss (0.056 against 0.092), and by
+    update 2 the entropy and the explained variance had parted company.
+    """
+    from cr_sim.train.ppo import PPOConfig, _update
+
+    def two_updates(shuffler):
+        torch.manual_seed(0)
+        net = ActorCritic(NetConfig(
+            grid_channels=2, grid_height=4, grid_width=3,
+            vector_size=6, num_actions=12))
+        optimiser = torch.optim.Adam(net.parameters(), lr=1e-3)
+        rollout = _tiny_rollout()
+        config = PPOConfig(epochs=2, minibatches=2, entropy_coefficient=0.0)
+        stats = [_update(net, optimiser, rollout, config, "cpu", None,
+                         shuffler=shuffler) for _ in range(2)]
+        return stats
+
+    first, second = _RecordingShuffler(0), _RecordingShuffler(0)
+    stats_a, stats_b = two_updates(first), two_updates(second)
+
+    # The update really drew its order from the object it was handed. Without
+    # this the equality below holds vacuously over an update that shuffles
+    # from somewhere else entirely.
+    assert len(first.orders) == 4, "the update did not shuffle through its own stream"
+    assert len({tuple(o) for o in first.orders}) > 1, (
+        "every epoch saw the identical order, so the shuffle is inert")
+
+    assert first.orders == second.orders
+    assert stats_a == stats_b
+
+
+def test_two_runs_of_one_seed_take_the_same_update_path(world):
+    """The end-to-end form: same command, same seed, same numbers.
+
+    Two ``train`` calls in one process, which is the case the global
+    RandomState fails: the first advances it and the second starts wherever
+    the first stopped, so the losses diverge while the rollout does not.
+    """
+    def run() -> list[dict]:
+        stats: list[dict] = []
+        train(
+            lambda index: _env(world),
+            PPOConfig(total_steps=64, horizon=16, num_envs=2, epochs=2,
+                      minibatches=2, seed=0),
+            on_update=stats.append,
+        )
+        return [{k: v for k, v in s.items()
+                 if k in ("policy_loss", "value_loss", "entropy",
+                          "explained_variance")} for s in stats]
+
+    first, second = run(), run()
+    assert first, "no update ran"
+    assert first == second, (
+        "two runs of one seed took different update paths, so no A/B on this "
+        "machine measures the change it was launched for")
+
+
+def test_two_identical_self_play_runs_face_the_same_opponent(world):
+    """A ``--seed`` that does not reach the workers is not a seed at all.
+
+    The self-play opponent samples from its own policy, and inside a spawned
+    worker that draw came off torch's *global* stream, which ``_worker`` never
+    seeded -- it sets the thread count and stops. Windows spawns rather than
+    forks, so every worker imported torch fresh and seeded itself from OS
+    entropy: three fresh processes running the identical construction on one
+    fixed board reported ``torch.initial_seed()`` of 81036942797900,
+    81144705125800 and 81234665151700 and shared none of their first twenty
+    opponent actions. End to end, ``--steps 1600 --workers 4 --seed 0`` run
+    twice from one tree gave update-1 mean_return +0.2556 and -0.1125, while
+    the same command at ``--workers 0`` -- where the rollout runs in the
+    seeded parent -- matched to the last digit.
+
+    That is what made runs/learn-lvl5-kl01 unreplayable, and it is what a
+    paired A/B of two full runs would have measured instead of the change it
+    was testing.
+
+    Two separately spawned workers, because one process reused within a test
+    would share whatever stream the first play left behind and prove nothing.
+    """
+    from dataclasses import asdict
+
+    from cr_sim.api.vec import CRSimVecEnv, VecEnvConfig
+    from cr_sim.train.nets import net_config_for
+
+    probe = _env(world, frame_skip=30, max_ticks=20 * 60, tower_level=5)
+    probe.reset(seed=0)
+    torch.manual_seed(7)
+    shape = net_config_for(probe, head="flat")
+    state = {k: v.clone() for k, v in ActorCritic(shape).state_dict().items()}
+
+    config = VecEnvConfig(
+        build=BUILD, blue_deck=DECK, red_deck=DECK, ticks_per_second=20,
+        frame_skip=30, tower_level=5, max_ticks=20 * 60,
+        net_config=asdict(shape), seed=4)
+
+    def play() -> list[float]:
+        vec = CRSimVecEnv(config, num_envs=1, workers=1)
+        try:
+            vec.set_opponent(state)
+            vec.reset([11])
+            rewards = []
+            for _ in range(20):
+                _, step_rewards, _, _, _ = vec.step([(NOOP_SLOT, 0, 0)])
+                rewards.append(float(step_rewards[0]))
+            return rewards
+        finally:
+            vec.close()
+
+    first = play()
+    # The agent passes every decision, so every reward on this list is the
+    # opponent's doing. Without this the assertion below would hold over a
+    # worker whose opponent never placed anything at all.
+    assert len(set(first)) > 1, "the opponent did nothing worth reproducing"
+
+    assert first == play(), (
+        "two identically configured workers played different battles, so the "
+        "run's seed does not reach the opponent and no --workers run can be "
+        "replayed or paired against another")
+
+
 # --------------------------------- the demonstrations are harvested under the
 # --------------------------------- reward they will later be fine-tuned with
 
 
-def test_make_demos_builds_the_reward_the_fine_tune_will_use():
+def test_make_demos_builds_the_reward_the_fine_tune_will_use(world):
+    """Read off the environment make_demos actually builds.
+
+    The test that used to carry this name never imported make_demos at all:
+    it called ``run._reward_weights`` on a hand-built namespace, which is the
+    function make_demos happens to call, and asserted on its return value. So
+    make_demos could accept ``--tower-weight``, stamp it into the shard's
+    meta, and hand 1.0 to the reward, with the whole of this file green.
+    Measured under that mutation: the shard's own meta read
+    ``projected:elixir=0,horizon_seconds=3,tower=1`` for a run launched with
+    ``--tower-weight 0.5``, because the meta is read back off the same wrong
+    environment.
+
+    (The namespace-level assertions still exist, one test down, under a name
+    that says what they test.)
+    """
+    import scripts.make_demos as make_demos
+    from cr_sim.train.selfplay import reward_name
+
+    args = make_demos.build_parser().parse_args([
+        "--reward", "projected", "--tower-weight", "0.5",
+        "--elixir-weight", "0.2", "--reward-horizon-seconds", "3",
+        # The search's own lookahead, which is a different quantity that
+        # shares a name and a unit. It must not reach the reward.
+        "--horizon-seconds", "15"])
+    env = make_demos.env_factory(args, 0, world)(0)
+
+    assert reward_name(env) == (
+        "projected:elixir=0.2,horizon_seconds=3,tower=0.5")
+
+
+def test_the_collapse_refusal_names_flags_that_exist():
+    """``--min-random-candidates`` is half the documented remedy for target
+    collapse and no command line exposed it.
+
+    ``make_demos`` printed "Lower --policy-candidates or raise
+    --min-random-candidates and collect again", and
+    ``make_demos.py --min-random-candidates 8`` exited 2 on an unrecognised
+    argument: a repo-wide grep found ``min_random_candidates`` set only inside
+    SearchBot's own clamp, so ``SearchBotConfig.random_floor`` was permanently
+    ``max(2, candidates // 3)`` -- the floor the whole collapse defence rests
+    on, untunable by the operator the message is addressed to.
+    """
+    import json as _json
+    import re
+    from types import SimpleNamespace
+
+    import scripts.make_demos as make_demos
+
+    refusal = make_demos.collapse_refusal(
+        SimpleNamespace(meta=_json.dumps({"min_spread_fallback_rate": 1.0})),
+        0.0)
+    assert refusal, "a fully collapsed shard was not refused"
+    named = set(re.findall(r"--[a-z][a-z-]+", refusal))
+    assert named, "the refusal names no remedy at all"
+    assert named <= make_demos._flag_names(), (
+        f"the refusal tells the operator to use {sorted(named - make_demos._flag_names())}, "
+        "which this script's parser does not accept")
+
+    # And the flag reaches the floor rather than only the parser.
+    parser = make_demos.build_parser()
+    raised = make_demos.search_config(
+        parser.parse_args(["--min-random-candidates", "8"]), guided=True)
+    assert raised.random_floor == 8
+    # Which is what it is for: the floor is taken out of the proposer's share.
+    assert raised.effective_policy_candidates == 6
+
+    default = make_demos.search_config(parser.parse_args([]), guided=True)
+    assert default.random_floor == 4, "the default floor moved"
+
+
+def test_the_iteration_driver_passes_the_knobs_its_round_depends_on():
+    """``expert_iterate`` computed the search's own distribution and threw it
+    away in the same round.
+
+    It invoked clone_policy without ``--targets``, so that script's default of
+    ``hard`` applied and ``data.target = None`` discarded the soft target --
+    the third arrow of the loop this driver exists to close. Measured on a
+    real round: ``--rounds 1 --shards 1 --episodes 2`` wrote
+    runs/iter-1/cloned.pt recording ``targets: 'hard'`` over a shard whose
+    ``min_spread_fallback_rate`` was 0.0, i.e. whose targets were healthy.
+
+    Parsed back through the two scripts' own parsers rather than compared as
+    strings, so a renamed or retyped flag fails here too.
+    """
+    import scripts.clone_policy as clone_policy
+    import scripts.expert_iterate as expert_iterate
+    import scripts.make_demos as make_demos
+
+    args = expert_iterate.build_parser().parse_args([
+        "--seed-policy", "runs/clone-v1-paired/cloned.pt",
+        "--candidates", "6", "--min-random-candidates", "3"])
+
+    collected = make_demos.build_parser().parse_args(
+        [str(v) for v in expert_iterate.demo_command(
+            args, 0, "data_cache/demos-iter1", "seed.pt")][2:])
+    assert collected.candidates == 6
+    assert collected.min_random_candidates == 3
+
+    cloned = clone_policy.build_parser().parse_args(
+        [str(v) for v in expert_iterate.clone_command(
+            args, "data_cache/demos-iter1", "runs/iter-1")][2:])
+    assert cloned.targets == "soft"
+
+    # The default the driver was silently taking, pinned so this test says
+    # why passing the flag matters rather than merely that it is passed.
+    assert clone_policy.build_parser().parse_args([]).targets == "hard"
+
+
+def test_run_reward_weights_builds_what_the_flags_ask_for():
     """The clone's critic is what reinforcement learning inherits.
 
     make_demos built its env with no reward_weights at all, so every
@@ -640,6 +913,9 @@ def test_make_demos_builds_the_reward_the_fine_tune_will_use():
     while every fine-tune ran `projected`. The inherited critic arrived
     predicting +1.48 where PPO's returns averaged +0.47 -- a quantity nobody
     was optimising.
+
+    This tests ``run._reward_weights`` and nothing else; whether make_demos
+    calls it with the right arguments is the test above.
     """
     from types import SimpleNamespace
 

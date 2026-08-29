@@ -207,7 +207,12 @@ def main(argv: list[str] | None = None) -> int:
             # one it does not, and that is a fact about the numbers rather
             # than about the label.
             "returns": [float(v) for v in control["returns"]],
-            "crowns": [int(v) for v in control["crowns"]],
+            # Named apart from the mean above it. Both used to be "crowns" in
+            # one dict literal, so the later key won and the mean this code
+            # computes never reached the file -- while evaluate_paired's own
+            # control block writes the float, leaving two verdicts disagreeing
+            # about what control.crowns means.
+            "crowns_per_battle": [int(v) for v in control["crowns"]],
         },
         "greedy": dict(arm),
         "mode": "greedy",

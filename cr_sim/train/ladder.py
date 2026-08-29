@@ -173,9 +173,19 @@ class Player:
             # keyed by the budget alone would merge them into one row.
             from .proposal import proposer_identity
 
+            # The count the bot will actually take, not the one the spec
+            # asked for. SearchBot clamps the proposal to leave the random
+            # floor intact, so ``-p12`` and ``-p10`` at fourteen candidates
+            # build the identical bot -- and stamped by the request they
+            # entered one ladder as two entrants splitting one bot's games,
+            # while scripts/make_demos.py stamped its shards with the clamped
+            # value and disagreed with this string about the same run. One
+            # implementation, which is what effective_policy_candidates is
+            # for; see cr_sim.train.proposal on the "declared rather than
+            # read" mistake.
             return budget + "-" + proposer_identity(
                 self.proposer, temperature=self.proposer_temperature,
-                policy_candidates=self.search.policy_candidates)
+                policy_candidates=self.search.effective_policy_candidates)
         if self.kind == "random":
             return "random"
         return "live"
@@ -623,6 +633,22 @@ def fit_ratings(pairings: Sequence[Pairing], *, prior_sd: float = 400.0,
             names.append(name)
     if anchor in names:
         pinned.setdefault(anchor, 0.0)
+    elif anchor and names and not pinned:
+        # Nothing is held fixed, so the fit floats on the prior's centre and
+        # the scale the caller asked for does not exist. Measured: a roster of
+        # two checkpoints and the clone, fitted with anchor="random" and no
+        # random in the graph, rated a checkpoint at -71 Elo -- printed under
+        # a "vs random" column as 0.399, i.e. losing to a uniform random
+        # agent, where the same checkpoint on the same thirty seeds scores
+        # 0.665 against random and rates +200 in a ladder that contains it.
+        # Every rating in that file was 400+ Elo off the scale it claimed and
+        # nothing said so.
+        raise ValueError(
+            f"anchor {anchor!r} is not among the players {sorted(names)} and "
+            "nothing else is pinned, so this fit is not on the scale it was "
+            "asked for: every rating would float on the Gaussian prior's "
+            "centre rather than sit relative to the anchor. Add the anchor to "
+            "the roster, or pass `pinned` with a rating fitted elsewhere.")
     if not names:
         return {}
     index = {name: i for i, name in enumerate(names)}
@@ -712,7 +738,8 @@ def ladder_probe(make_env, anchors: Sequence[Player], *, episodes: int = 40,
                  blocks: int = EVAL_BLOCKS,
                  ratings: "dict[str, float] | None" = None,
                  mode: str = "greedy", seed: int = 12345,
-                 expert: str = "search-c18h15"
+                 expert: str = "search-c18h15",
+                 ratings_source: str = ""
                  ) -> Callable[[ActorCritic], dict[str, Any]]:
     """Score the live policy against a few cheap anchors and rate it.
 
@@ -731,6 +758,29 @@ def ladder_probe(make_env, anchors: Sequence[Player], *, episodes: int = 40,
     blocks is 120 seeds a direction, +/-48 Elo.
     """
     ratings = dict(ratings or {})
+    # An anchor the rating table does not name is pinned at 0 Elo, which is
+    # exactly as strong as a uniform random agent, and every recorded field on
+    # the row is identical either way. Measured on one real edge: the clone
+    # anchor pinned at its offline +382 gives ladder_elo +314 and
+    # ladder_elo_vs_expert -586; the same battles with that anchor absent from
+    # the table give -64 and -964. It is one keystroke away -- the documented
+    # `name=path` spec renames the player, so `clone=runs/.../cloned.pt`
+    # matches nothing in a ladder.json that keys the same weights as
+    # `clone-v1-paired:cloned`. Eleven lines below, the expert is already
+    # reported as *absent* rather than as zero for this reason; an anchor gets
+    # the same treatment.
+    missing = [a.name for a in anchors if a.name not in ratings]
+    if ratings and missing:
+        raise ValueError(
+            f"these anchors have no rating in the table: {sorted(missing)}. "
+            f"It holds {sorted(ratings)}. Pinning an unrated anchor at 0 Elo "
+            "silently puts it level with a uniform random agent and shifts "
+            "every ladder_elo this probe writes by that anchor's true "
+            "rating, with no field saying so. Name the anchor as the table "
+            "names it -- parse_player('runs/x/cloned.pt') is 'x:cloned', "
+            "while 'clone=runs/x/cloned.pt' is 'clone' -- or drop the "
+            "--ladder-ratings table and rate against the anchors alone.")
+    pinned = {a.name: float(ratings.get(a.name, 0.0)) for a in anchors}
     readings = {"n": 0}
 
     def probe(net: ActorCritic) -> dict[str, Any]:
@@ -753,9 +803,7 @@ def ladder_probe(make_env, anchors: Sequence[Player], *, episodes: int = 40,
             stats[f"ladder_score_{label}"] = pairing.score
             refs.append(f"{label}@{anchor.ref}")
 
-        fitted = fit_ratings(
-            pairings, pinned={a.name: float(ratings.get(a.name, 0.0))
-                              for a in anchors})
+        fitted = fit_ratings(pairings, pinned=pinned)
         elo = fitted["policy"].elo if "policy" in fitted else 0.0
         stats.update({
             "ladder_elo": float(elo),
@@ -768,6 +816,16 @@ def ladder_probe(make_env, anchors: Sequence[Player], *, episodes: int = 40,
             **({"ladder_elo_vs_expert": float(elo) - float(ratings[expert])}
                if expert in ratings else {}),
             "ladder_mode": mode,
+            # What the scale rests on, on every row. Two ladder_elo values
+            # fitted against differently-pinned anchors are not on one scale,
+            # and without this key they are indistinguishable -- same
+            # ladder_opponent, same ladder_opponent_ref, same ladder_mode,
+            # 377 Elo apart. check_lift_is_named demands it wherever a
+            # ladder_elo appears.
+            "ladder_pinned": {k: float(v) for k, v in sorted(pinned.items())},
+            # And which file those pinned values came from, so a reading can
+            # be traced to the table that set its scale.
+            "ladder_ratings_source": str(ratings_source),
             "ladder_opponent": "ladder",
             "eval_opponent": "ladder",
             "ladder_opponent_ref": "|".join(refs),

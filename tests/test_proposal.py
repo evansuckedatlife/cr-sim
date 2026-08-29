@@ -585,6 +585,15 @@ def test_the_collection_records_how_far_its_targets_collapsed(make_env):
 
     ``make_demos`` gates a merge on this number, so it has to be in the file
     rather than in somebody's memory of the run.
+
+    Asserted against ground truth rather than against a range. The version of
+    this test that shipped checked only ``0 <= rate <= 1`` and
+    ``spread_mean >= 0``, so hardcoding both call sites in
+    ``cr_sim.train.clone`` to ``spreads.append(0.0); collapsed += 0`` -- which
+    disables ``make_demos``' merge gate outright, since ``collapse_refusal``
+    turns on exactly this field -- left forty-six tests green. A dead
+    diagnostic reports 0.0, which is inside every range a range check can
+    write down.
     """
     def make_expert(env):
         bot = SearchBot(Team.BLUE, SEARCH)
@@ -594,13 +603,31 @@ def test_the_collection_records_how_far_its_targets_collapsed(make_env):
         expert.bot = bot
         return expert
 
+    def one_hot_fraction(data) -> float:
+        rows = np.asarray(data.target)
+        return float(np.mean([int(np.count_nonzero(row) == 1) for row in rows]))
+
     data = collect(lambda index: make_env(None), make_expert, episodes=1,
                    meta={"proposer": "random"})
     meta = json.loads(data.meta)
     assert meta["decisions"] == len(data)
-    assert 0.0 <= meta["min_spread_fallback_rate"] <= 1.0
-    assert meta["spread_mean"] >= 0.0
     assert meta["proposer"] == "random"
+
+    # A row that fell back is a one-hot on the move the bot happened to make;
+    # a row that did not spreads mass over the candidates the search scored.
+    # So the recorded rate is countable off the targets themselves.
+    assert meta["min_spread_fallback_rate"] == pytest.approx(
+        one_hot_fraction(data))
+    # And the mean spread is a real measurement of the candidate values, not
+    # the 0.0 a dead diagnostic reports.
+    assert meta["spread_mean"] > 0.0
+
+    # The other end, forced: no candidate set on this board separates by 10.0,
+    # so every row must fall back and the file must say so.
+    collapsed = collect(lambda index: make_env(None), make_expert, episodes=1,
+                        min_spread=10.0, meta={"proposer": "random"})
+    assert one_hot_fraction(collapsed) == 1.0
+    assert json.loads(collapsed.meta)["min_spread_fallback_rate"] == 1.0
 
 
 def test_demonstrations_refuse_to_merge_across_proposers(tmp_path):

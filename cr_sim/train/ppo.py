@@ -210,6 +210,16 @@ def train(
     """
     torch.manual_seed(config.seed)
     rng = np.random.default_rng(config.seed)
+    # The minibatch shuffle's own stream, created once and carried across
+    # every update. It used to be ``np.random.shuffle``, which draws from
+    # numpy's *global legacy* RandomState -- seeded from OS entropy at import
+    # and by nothing here -- so two runs of one command with one --seed
+    # produced identical rollouts and different updates: measured at
+    # --workers 0 with byte-identical config.json, update 1 came out with
+    # policy_loss -0.080 against -0.121 and value_loss 0.056 against 0.092,
+    # and by update 2 the entropy and the explained variance had parted
+    # company entirely.
+    shuffler = np.random.default_rng(config.seed + 1)
 
     # One local environment either way: its spaces define the network's
     # shapes, and building it is cheap next to a rollout.
@@ -353,7 +363,8 @@ def train(
             last_value.cpu(), config.gamma, config.gae_lambda,
         )
 
-        stats = _update(net, optimiser, rollout, config, device, anchor)
+        stats = _update(net, optimiser, rollout, config, device, anchor,
+                        shuffler=shuffler)
         update_index += 1
 
         # The non-finite check lives in _update, on the gradient norm that
@@ -457,11 +468,20 @@ def _update(
     config: PPOConfig,
     device: str,
     anchor: "ActorCritic | None" = None,
+    *,
+    shuffler: "np.random.Generator",
 ) -> dict:
     """One PPO update over the collected rollout.
 
     ``anchor`` is the frozen reference the trust region pulls back toward; see
     :attr:`PPOConfig.kl_coefficient`. ``None`` is plain PPO.
+
+    ``shuffler`` is the stream the minibatch permutation is drawn from, and
+    it is required rather than defaulted. A default here would be a second
+    mechanism guarding one behaviour: :func:`train` could stop passing its
+    own and every run would stay reproducible while quietly replaying one
+    permutation on every update, which no single-line mutation could then be
+    held to account for.
     """
     flat = {
         "grid": rollout.grid.reshape(-1, *rollout.grid.shape[2:]),
@@ -478,7 +498,7 @@ def _update(
 
     policy_loss = value_loss = entropy_value = divergence_value = 0.0
     for _ in range(config.epochs):
-        np.random.shuffle(indices)
+        shuffler.shuffle(indices)
         for start in range(0, total, batch_size):
             batch = torch.from_numpy(indices[start : start + batch_size])
             advantage = flat["advantage"][batch].to(device)

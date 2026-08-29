@@ -94,6 +94,55 @@ def test_no_evaluations_is_distinct_from_evaluating_at_zero():
     assert measured["evaluations"] == 1
 
 
+def _ladder_row(update, steps, elo, **extra):
+    """A row exactly as ``ladder_probe`` writes one: a rating, no lift."""
+    row = _row(update, steps)
+    row.update({
+        "ladder_elo": elo, "ladder_elo_error": 180.0,
+        "ladder_elo_vs_expert": elo - 900.0,
+        "ladder_mode": "greedy", "ladder_opponent": "ladder",
+        "ladder_opponent_ref": "random@random",
+        "ladder_pinned": {"random": 0.0}, "ladder_score_random": 0.9,
+        "eval_opponent": "ladder", "eval_episodes": 40,
+        "eval_block": 0, "eval_blocks": 8,
+    })
+    row.update(extra)
+    return row
+
+
+def test_a_run_measured_only_by_the_ladder_is_not_reported_as_unevaluated():
+    """The failure this file is named for, one metric over.
+
+    ``--probe ladder`` promotes on ``ladder_elo`` and writes no
+    ``eval_lift_sd`` at all, and every selector here keyed on the lift. Over a
+    real ``--probe ladder`` run's metrics.jsonl -- two rows, both carrying
+    ladder_elo, ladder_score_random, ladder_opponent_ref and eval_block --
+    ``summarise`` returned ``evaluations: 0, latest_lift: None,
+    best_lift: None, eval_every: None, next_eval_seconds: None``, and not one
+    key it returned mentioned the ladder. The record card showed an evaluated,
+    promoting run as unevaluated with the eval countdown dead beside it.
+    """
+    rows = [_row(1, 1000), _ladder_row(2, 2000, 314.0),
+            _row(3, 3000), _ladder_row(4, 4000, 402.0)]
+    summary = summarise(rows)
+
+    assert summary["evaluations"] == 2
+    assert summary["latest_elo"] == 402.0
+    assert summary["best_elo"] == 402.0
+    assert summary["latest_elo_vs_expert"] == 402.0 - 900.0
+    # What the scale rests on, carried through: two ratings pinned differently
+    # are not comparable and this is the only field that says so.
+    assert summary["ladder_pinned"] == {"random": 0.0}
+    # The cadence is alive, so the countdown works for a ladder run too.
+    assert summary["eval_every"] == 2
+
+    # And the rating is never handed to anything expecting a lift. They are
+    # unrelated scales that happen to rank the same players the same way,
+    # which is exactly what lets the confusion survive.
+    assert summary["latest_lift"] is None and summary["best_lift"] is None
+    assert not any("lift" in key and summary[key] == 402.0 for key in summary)
+
+
 def test_the_best_evaluation_is_kept_not_the_last(tmp_path):
     """A run that peaks and regresses should still report the peak, because
     that is the checkpoint that was saved."""

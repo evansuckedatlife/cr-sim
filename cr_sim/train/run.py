@@ -435,6 +435,78 @@ def _reward_schedule(args):
     ).resolved(args.steps)
 
 
+#: The mode the in-run ladder probe plays. Greedy, because a rating wants an
+#: opponent that plays the same line every time, and because greedy reproduces
+#: bit-identically. Named once so the ratings table this run is checked
+#: against and the probe that consumes it cannot drift apart.
+_LADDER_PROBE_MODE = "greedy"
+
+
+def _ladder_ratings(path, *, mode: str, observation: str, tower_level: int):
+    """The anchors' fitted ratings, refusing a table fitted on another game.
+
+    A ladder.json records the mode, observation and tower level it was fitted
+    under, and the loader read none of them. Measured on the same players and
+    the same seed block, a ``sampled`` table rates the v1 clone +183.7 where
+    the ``greedy`` table rates the same weights +393.0 -- 209 Elo apart, with
+    the field reordered as well -- and feeding each into the probe's own
+    arithmetic on one greedy edge gives ``ladder_elo`` +337 against +129.
+    Every row stamps ``ladder_mode: greedy`` either way. run_ladder's own
+    ``--mode`` help says it plainly: "sampled is a different policy and needs
+    its own ladder, its own ratings".
+
+    ``tower_level`` is checked only where the file records it. Tables written
+    before that field existed cannot answer the question, and refusing them
+    outright would make ``--ladder-ratings`` unusable against every table on
+    this machine; a table that does record it and disagrees is refused.
+    """
+    loaded = json.loads(Path(path).read_text(encoding="utf-8"))
+    recorded = str(loaded.get("mode", ""))
+    if recorded != mode:
+        raise SystemExit(
+            f"{path} holds a {recorded!r} rating table and the in-run probe "
+            f"plays {mode!r}. Greedy and sampled are two different policies "
+            "rated on two different scales -- measured 209 Elo apart on the "
+            "same weights and the same seeds -- and pinning one against the "
+            f"other moves every ladder_elo this run writes. Rate the anchors "
+            f"with `scripts/run_ladder.py --mode {mode}`.")
+    recorded = str(loaded.get("observation", ""))
+    if recorded != observation:
+        raise SystemExit(
+            f"{path} rated its players under observation {recorded!r} and "
+            f"this run encodes {observation!r}. The environment encodes one "
+            "observation for both sides, so the two cannot share a ladder at "
+            "all.")
+    level = loaded.get("tower_level")
+    if level is not None and int(level) != int(tower_level):
+        raise SystemExit(
+            f"{path} rated its players at tower level {int(level)} and this "
+            f"run trains at {int(tower_level)}. At level 11 the towers "
+            "outlast the match and 90% of battles draw; a rating from one "
+            "level is not on the other's scale.")
+    return {str(r["name"]): float(r["elo"]) for r in loaded.get("ratings", [])}
+
+
+def _ladder_anchors(specs, env):
+    """The probe's anchors, with their weights loaded off ``env``'s shapes.
+
+    ``Player.load`` is what puts a network behind a checkpoint anchor, and
+    the in-run path never called it: ``--ladder-anchor
+    checkpoints/headablate-flat.pt`` trained happily to the first evaluation
+    and then died in ``FrozenOpponent._snapshot`` on ``'NoneType' object has
+    no attribute 'to'``, twenty updates in with no evaluation ever written. A
+    policy-guided search anchor failed the same way one layer up. Only
+    ``random`` and an unproposed ``search-cXhY`` ever worked, which is not the
+    feature -- the anchors this exists for are the clone and the expert.
+
+    Loading here also routes every anchor through ``check_observation``, which
+    is the only thing that would catch a v2 checkpoint entering a v1 run.
+    """
+    from .ladder import parse_player
+
+    return [parse_player(spec).load(env) for spec in (specs or ["random"])]
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     # Resolved before anything is written, because config.json records it.
@@ -588,9 +660,9 @@ def main(argv: list[str] | None = None) -> int:
     # rating for the expert, which is what the offline ladder produced.
     offline_ratings: dict[str, float] = {}
     if args.ladder_ratings is not None:
-        loaded = json.loads(args.ladder_ratings.read_text(encoding="utf-8"))
-        offline_ratings = {str(r["name"]): float(r["elo"])
-                           for r in loaded.get("ratings", [])}
+        offline_ratings = _ladder_ratings(
+            args.ladder_ratings, mode=_LADDER_PROBE_MODE,
+            observation=args.observation, tower_level=args.tower_level)
 
     started = time.perf_counter()
     resume_state = None
@@ -895,13 +967,14 @@ def main(argv: list[str] | None = None) -> int:
             # See _eval_env: a random opponent, not an idle one, and the
             # probe records which it was on every row it produces.
             if args.probe == "ladder":
-                from .ladder import ladder_probe, parse_player
+                from .ladder import ladder_probe
 
-                anchors = [parse_player(spec) for spec
-                           in (args.ladder_anchor or ["random"])]
                 probe_holder["probe"] = ladder_probe(
-                    _env, anchors, episodes=args.eval_episodes,
-                    ratings=offline_ratings, mode="greedy",
+                    _env, _ladder_anchors(args.ladder_anchor, probe_env),
+                    episodes=args.eval_episodes,
+                    ratings=offline_ratings, mode=_LADDER_PROBE_MODE,
+                    ratings_source=(str(args.ladder_ratings)
+                                    if args.ladder_ratings else ""),
                 )
             elif args.probe == "rotating":
                 from .evaluate import rotating_probe
@@ -938,6 +1011,11 @@ def main(argv: list[str] | None = None) -> int:
                     reward_weights=_reward_weights(args),
                     observation=observation,
                     opponent_seed=(args.seed * 1000 if args.opponent == "random" else None),
+                    # The run's seed, which CRSimVecEnv makes distinct per
+                    # worker. Without it a self-play opponent sampled from
+                    # torch's global stream in a freshly spawned process, so
+                    # --seed 0 played different battles every time it was run.
+                    seed=args.seed,
                     net_config=(net_shape if args.opponent == "self" else None),
                 ),
                 num_envs=args.envs,

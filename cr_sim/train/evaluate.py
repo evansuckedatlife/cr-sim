@@ -425,7 +425,7 @@ def evaluate_paired(
                        if len(control["returns"]) > 1 else 0.0),
         },
     }
-    for index, mode in enumerate(modes):
+    for mode in modes:
         # A stream per arm, derived from the battles being played, so the same
         # checkpoint on the same block gives the same answer twice. The greedy
         # arm ignores it; the sampled arm is otherwise unreproducible, and an
@@ -433,8 +433,21 @@ def evaluate_paired(
         # anything. Derived arithmetically, not from hash() -- string hashing
         # is salted per process, so that would be reproducible within a run
         # and not between two.
+        #
+        # Keyed on *which mode this is*, never on its position in ``modes``.
+        # Keyed on the position, the sampled arm drew one stream when both
+        # arms were asked for (index 1) and a different one when it was asked
+        # for alone (index 0), so the same checkpoint over the same battles
+        # against the same control measured +1.320 and +1.197 -- 0.123 sd
+        # apart, twice the sampled noise floor this module documents, decided
+        # entirely by whether the caller also wanted greedy. Both single-arm
+        # callers are live: scripts/run_ladder.py and
+        # scripts/evaluate_vs_expert.py. ladder._stream_seed already keys on
+        # the mode itself, which is what makes this a slip rather than a
+        # choice.
+        mode_index = 0 if mode == "greedy" else 1
         stream = torch.Generator().manual_seed(
-            ((seeds[0] if seeds else 0) + 7919 * index) % (2 ** 31 - 1))
+            ((seeds[0] if seeds else 0) + 7919 * mode_index) % (2 ** 31 - 1))
         result = evaluate(make_env(), net, episodes=episodes, seeds=seeds,
                           greedy=(mode == "greedy"), generator=stream)
         verdict[mode] = paired_lift(result, control)
@@ -468,6 +481,27 @@ def write_verdict(path: Path, verdict: dict[str, Any]) -> dict[str, Any]:
             "same policy scores wildly differently against an idle, a random "
             "and a searching one. See cr_sim.train.selfplay.opponent_name."
         )
+    if "lift" in verdict and "ladder_elo" in verdict:
+        # Two measurements on two scales in one file, and the top-level
+        # eval_opponent can only name one of them. runs/agent-ladder-v1 and
+        # runs/audit-ladder-greedy both carry a lift measured against the
+        # random control under eval_opponent "ladder", paired with a
+        # ladder_player naming an entirely different checkpoint -- in the
+        # second, the worst-rated of four. report.py rendered that as "100
+        # paired battles against ladder put the lift at +0.781 sd".
+        missing = [k for k in ("lift_player", "lift_opponent")
+                   if not verdict.get(k)]
+        if missing:
+            raise ValueError(
+                f"this verdict carries both a rating and a lift and does not "
+                f"say {' or '.join(missing)}. They are different scales "
+                "measured against different opponents, and eval_opponent "
+                f"({verdict['eval_opponent']!r}) can only name one of them: "
+                "a reader takes the lift as having been measured against "
+                "whatever that field says, which is how a +0.781 sd lift "
+                "over the random control came to be reported as a result "
+                "against the ladder, on a player that did not produce it."
+            )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(verdict, indent=2), encoding="utf-8")
     return verdict

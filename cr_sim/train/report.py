@@ -71,6 +71,13 @@ def collect(runs_dir: Path) -> list[dict[str, Any]]:
         by_update = {r.get("updates", i): r for i, r in enumerate(rows)}
         rows = [by_update[k] for k in sorted(by_update)]
         evaluations = [r["eval_lift_sd"] for r in rows if "eval_lift_sd" in r]
+        # The rating family, read separately and never merged into the lift
+        # above it: they are different scales. A --probe ladder run writes
+        # only these, and selecting evaluations on the lift alone rendered
+        # such a run as "never evaluated" over a real measurement.
+        ladder = [r["ladder_elo"] for r in rows if "ladder_elo" in r]
+        pinned = ([r["ladder_pinned"] for r in rows if r.get("ladder_pinned")]
+                  or [None])[-1]
         variance = [r["explained_variance"] for r in rows if "explained_variance" in r]
         config = _config(run)
         found.append(
@@ -83,6 +90,10 @@ def collect(runs_dir: Path) -> list[dict[str, Any]]:
                 "evaluations": evaluations,
                 "mean_lift": statistics.fmean(evaluations) if evaluations else None,
                 "best_lift": max(evaluations) if evaluations else None,
+                "ladder_elo": ladder,
+                "latest_elo": ladder[-1] if ladder else None,
+                "best_elo": max(ladder) if ladder else None,
+                "ladder_pinned": pinned,
                 # Split in half rather than fitted: with fewer than twenty
                 # readings a slope is mostly noise, and "did the second half
                 # beat the first" is the honest version of the same question.
@@ -135,6 +146,23 @@ def _verdict_of(record: dict[str, Any]) -> tuple[str, str, str]:
                 f"{verdict['lift']:+.3f} sd, but the 95% interval "
                 f"[{lo:+.3f}, {hi:+.3f}] contains zero.")
     mean = record["mean_lift"]
+    ladder = record.get("ladder_elo") or []
+    if mean is None and ladder:
+        # A rating, reported as a rating. This run measured itself and the
+        # page used to call it never evaluated, because every selector here
+        # keyed on eval_lift_sd and a --probe ladder run writes none.
+        pinned = record.get("ladder_pinned") or {}
+        anchor, at = (max(pinned.items(), key=lambda kv: kv[1])
+                      if pinned else ("the anchors", 0.0))
+        latest = ladder[-1]
+        sentence = (
+            f"{len(ladder)} ladder readings put the latest rating at "
+            f"{latest:+.0f} Elo, against {anchor} pinned at {at:+.0f}. An Elo "
+            "is not a lift; the two are unrelated scales and must not be "
+            "plotted on one axis.")
+        if latest > at:
+            return ("good", f"rated above {anchor}", sentence)
+        return ("warn", f"rated below {anchor}", sentence)
     if mean is None:
         return ("dim", "never evaluated",
                 "This run recorded no evaluations, so nothing here says "

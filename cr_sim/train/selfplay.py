@@ -144,6 +144,19 @@ def check_lift_is_named(stats: dict) -> dict:
                 "not which weights they were. 'pool' is not an opponent; "
                 "'runs/clone-v3-paired/cloned.pt' is."
             )
+    if "ladder_elo" in stats and "ladder_pinned" not in stats:
+        raise ValueError(
+            "a metrics row carries ladder_elo but does not say what the "
+            "rating was pinned to. An Elo is only a number relative to "
+            "whatever the fit held fixed: the same battles with one anchor "
+            "pinned at its offline +382 and with that anchor missing from the "
+            "table -- pinned at 0, i.e. level with a uniform random agent -- "
+            "came out 377 points apart, with every other field on the row "
+            "identical. This is the same failure eval_opponent already "
+            "refuses, one scale over: naming who was played and not what the "
+            "measurement was measured against. Record `ladder_pinned` as "
+            "{name: elo} for every player the fit held fixed."
+        )
     return stats
 
 
@@ -439,7 +452,21 @@ def evaluation_probe(
     scale = reward_name(control_env)
 
     def probe(net: ActorCritic) -> dict[str, Any]:
-        result = evaluate(make_env(), net, episodes=episodes, seeds=seeds, greedy=False)
+        import torch
+
+        # The sampled arm's own stream, built fresh from the probe's seed on
+        # every reading, so this probe is a function of (net, seeds) and
+        # nothing else. Without it the draw came off torch's global stream:
+        # three consecutive readings of one net over one seed list measured
+        # +0.905, +1.228 and +0.970 -- a 0.32 sd spread, against a documented
+        # sampled noise floor of 0.062 and a full PPO run that moved greedy by
+        # 0.024. run.py promotes on the mean of three of these, so the
+        # promotion was partly a function of where the global stream happened
+        # to be. The same discipline rotating_probe already uses; this is the
+        # probe that is actually the default.
+        stream = torch.Generator().manual_seed(int(seed) % (2 ** 31 - 1))
+        result = evaluate(make_env(), net, episodes=episodes, seeds=seeds,
+                          greedy=False, generator=stream)
         wins = float(np.mean([c > 0 for c in result["crowns"]]))
         spread = float(np.std(control["returns"])) or 1.0
         return {
@@ -495,12 +522,24 @@ def ancestor_probe(
         if ancestor is None:
             return {}
         age = pool.generations - len(pool) + 1
+        import torch
+
+        # Two streams, both derived from this probe's seed and neither of them
+        # torch's global one: the ancestor's own sampling and the policy's.
+        # Every self-play run promotes partly on this number, and without the
+        # generators two readings of one net against one ancestor over one
+        # seed list are two different measurements.
+        opponent_stream = torch.Generator().manual_seed(int(seed) % (2 ** 31 - 1))
+        stream = torch.Generator().manual_seed(
+            (int(seed) * 8191 + 1) % (2 ** 31 - 1))
         # Named, at last. This probe used to build its opponent anonymously
         # and report a win rate against "the oldest one", which is a
         # measurement whose scale moves every time the pool evicts.
         env = make_env(FrozenOpponent(ancestor, nvec, seed=seed,
-                                      name=f"pool:gen{age}"))
-        result = evaluate(env, net, episodes=episodes, seeds=seeds, greedy=False)
+                                      name=f"pool:gen{age}",
+                                      generator=opponent_stream))
+        result = evaluate(env, net, episodes=episodes, seeds=seeds,
+                          greedy=False, generator=stream)
         crowns = result["crowns"]
         if len(crowns) == 0:
             return {}

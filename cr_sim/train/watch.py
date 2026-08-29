@@ -59,6 +59,53 @@ def read_metrics(path: Path) -> list[dict[str, Any]]:
 
 
 
+def _is_evaluation(row: "dict[str, Any]") -> bool:
+    """Whether this row records a measurement of the policy, of any family.
+
+    Two families write one now. ``eval_lift_sd`` is a lift against a control
+    and ``ladder_elo`` is a rating against anchors; they are different scales
+    and are never merged into one number, but a run that recorded either has
+    been evaluated. Selecting on the lift alone made a ``--probe ladder`` run
+    -- which promotes on ``ladder_elo`` and writes no lift at all -- report
+    ``evaluations: 0, latest_lift: None`` over rows carrying a real rating,
+    with the evaluation countdown dead beside it. That is, exactly, the "no
+    evaluations yet" over a real evaluation this file was rewritten for.
+    """
+    return "eval_lift_sd" in row or "ladder_elo" in row
+
+
+def _ladder_readings_of(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The rating series, under names that are never "lift".
+
+    An Elo and a lift rank the same players the same way, which is what makes
+    putting one in a field called the other survivable long enough to cost
+    three rounds of invalid comparisons. So this reader hands back ``elo``,
+    and a caller that wants a lift will not find one here.
+    """
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if "ladder_elo" not in row or not _plottable(row["ladder_elo"]):
+            continue
+        out.append({
+            "elo": row["ladder_elo"],
+            "error": (row.get("ladder_elo_error")
+                      if _plottable(row.get("ladder_elo_error")) else None),
+            "vs_expert": (row.get("ladder_elo_vs_expert")
+                          if _plottable(row.get("ladder_elo_vs_expert"))
+                          else None),
+            "updates": row.get("updates"),
+            "steps": row.get("steps", 0),
+            "mode": row.get("ladder_mode"),
+            "opponent": row.get("ladder_opponent_ref"),
+            # What the scale rests on. Two ratings pinned differently are not
+            # comparable, and the row is the only place that says so.
+            "pinned": row.get("ladder_pinned"),
+            "eval_episodes": (row.get("eval_episodes")
+                              if _plottable(row.get("eval_episodes")) else None),
+        })
+    return out
+
+
 def _next_evaluation(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """How long until this run evaluates again.
 
@@ -70,7 +117,7 @@ def _next_evaluation(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     long recent updates actually took, which is what a countdown should
     follow rather than an average over a run that has changed speed.
     """
-    updates = [r["updates"] for r in rows if "eval_lift_sd" in r]
+    updates = [r["updates"] for r in rows if _is_evaluation(r)]
     if len(updates) < 2 or len(rows) < 2:
         return {"eval_every": None, "next_eval_seconds": None}
     gaps = [b - a for a, b in zip(updates, updates[1:]) if b > a]
@@ -101,14 +148,26 @@ def summarise(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     last = rows[-1]
     evals = [r for r in rows if "eval_lift_sd" in r]
     best = max(evals, key=lambda r: r["eval_lift_sd"]) if evals else None
+    # The rating family, kept apart from the lift the whole way down: its
+    # numbers arrive under `latest_elo`/`best_elo` and never under a name
+    # containing "lift".
+    ladder = _ladder_readings_of(rows)
     return {
         "updates": last.get("updates", 0),
         "steps": last.get("steps", 0),
         "episodes": last.get("episodes", 0),
         "steps_per_second": last.get("steps_per_second", 0.0),
         "entropy": last.get("entropy", 0.0),
-        "evaluations": len(evals),
+        # Every reading of either family. A run measured only by the ladder
+        # is an evaluated run.
+        "evaluations": sum(1 for r in rows if _is_evaluation(r)),
         "latest_lift": evals[-1]["eval_lift_sd"] if evals else None,
+        "latest_elo": ladder[-1]["elo"] if ladder else None,
+        "latest_elo_error": ladder[-1]["error"] if ladder else None,
+        "latest_elo_vs_expert": ladder[-1]["vs_expert"] if ladder else None,
+        "best_elo": max(r["elo"] for r in ladder) if ladder else None,
+        "ladder_pinned": ladder[-1]["pinned"] if ladder else None,
+        "ladder_opponent": ladder[-1]["opponent"] if ladder else None,
         # `rotating_probe` writes the sampled arm to `eval_lift_sd` and the
         # argmax beside it. Where both are on the row, both are reported: one
         # of them alone is not the checkpoint.
@@ -665,12 +724,21 @@ def read_ladder(run: Path) -> "dict[str, Any] | None":
     own ``config.json`` note, that the page is showing the arms and the Elo
     table is in the file.
 
-    Kept separate from ``_verdict_of`` on purpose. A ladder's verdict already
-    reads as the "flat" shape and renders correctly as one -- its ``lift`` is
-    a genuine lift against the random control, exactly as the field claims --
-    so teaching the shape detector a fifth answer would change how an
-    existing file renders in exchange for nothing. This adds a reader; it
-    does not reroute one.
+    Kept separate from ``_verdict_of`` on purpose. A ladder's verdict reads as
+    the "flat" shape and renders as one, so teaching the shape detector a
+    fifth answer would change how an existing file renders in exchange for
+    nothing. This adds a reader; it does not reroute one.
+
+    The sentence that used to sit here -- that the verdict's ``lift`` "is a
+    genuine lift against the random control, exactly as the field claims" --
+    was wrong twice over, and the files it described are still on disk. The
+    field claimed ``eval_opponent: "ladder"`` over a number measured against
+    random, and the ``ladder_player`` beside it named the top-rated player
+    while the lift came from ``arms[0]`` -- a different checkpoint, and in
+    runs/audit-ladder-greedy the worst-rated of the four. run_ladder now
+    flattens a lift only where there is exactly one arm to flatten, names the
+    player and the opponent it belongs to, and ``write_verdict`` refuses a
+    verdict carrying both an Elo and an unnamed lift.
 
     **The rating and the lift are different scales and this returns them
     under different names.** ``elo`` is an Elo; ``lift`` stays a lift. Putting

@@ -176,6 +176,36 @@ def test_an_unset_end_step_lands_at_eighty_percent_of_the_run():
     assert pinned.end_step == 123
 
 
+def test_a_late_start_does_not_have_to_name_an_end():
+    """``--anneal-start`` was unusable on its own, and crashed at startup.
+
+    ``RewardSchedule.__post_init__`` rejected ``end_step 0 is before
+    start_step 500`` before ``resolved()`` -- whose whole job is filling that
+    zero in from the run's total -- could ever be reached, so `--anneal
+    --anneal-start 500` exited with an unhandled ValueError while
+    ``--anneal-end``'s own help still said "0 means 80% of --steps". Zero is
+    the unset sentinel, not a step.
+    """
+    from cr_sim.train.run import build_parser
+    from cr_sim.train.run import _reward_schedule
+
+    args = build_parser().parse_args(
+        ["--steps", "1000", "--reward", "projected", "--anneal",
+         "--anneal-start", "500"])
+    schedule = _reward_schedule(args)
+    assert (schedule.start_step, schedule.end_step) == (500, 800)
+    # And the ramp really starts where it was told to rather than at zero.
+    assert schedule.at(500)["tower"] == 1.0
+    assert schedule.at(650)["tower"] == pytest.approx(0.5)
+    assert schedule.at(800)["tower"] == 0.0
+
+    # A real inversion is still refused: this is a sentinel, not a hole.
+    with pytest.raises(ValueError, match="before start_step"):
+        anneal_to_zero(
+            "projection", {"tower": 1.0, "elixir": 0.3, "horizon_seconds": 3.0},
+            start_step=500, end_step=200)
+
+
 def test_a_schedule_never_anneals_the_objective():
     """Crowns are the objective, not shaping, and are never reduced.
 
@@ -622,6 +652,62 @@ def test_a_constant_schedule_pushes_nothing_at_all(tmp_path, monkeypatch):
     assert moved, "an annealed run never pushed anything"
     assert moved[-1] == ProjectionWeights(tower=0.0, elixir=0.0,
                                           horizon_seconds=3.0)
+
+
+def test_the_annealed_weight_reaches_the_worker_processes(tmp_path, monkeypatch):
+    """The push that actually moves a real run, and nothing covered it.
+
+    Under ``--workers`` the rollout lives in other processes and
+    ``local_envs`` holds only the shape probe, so the local push moves nothing
+    that trains. Deleting ``parallel.set_reward_weights(...)`` from
+    ``run.record`` left all seventeen reward-schedule tests plus the worker
+    config test green while every rollout kept paying the un-annealed weight:
+    measured, four pushes to the local list and zero to the workers, with
+    config.json recording the schedule and every metrics row's reward_weights
+    claiming tower=0.0.
+
+    The two tests that look like they cover it do not.
+    ``test_a_constant_schedule_pushes_nothing_at_all`` runs ``--workers 0``
+    and spies on ``CRSimEnv``; ``test_the_workers_adopt_the_annealed_weight``
+    drives ``CRSimVecEnv`` directly and never goes through run.py -- which is
+    the --tower-level bug's exact shape, one layer up.
+    """
+    import cr_sim.train.run as run_module
+    from cr_sim.api.vec import CRSimVecEnv
+
+    to_workers: list = []
+    to_local: list = []
+    worker_push = CRSimVecEnv.set_reward_weights
+    local_push = CRSimEnv.set_reward_weights
+
+    def _worker_spy(self, weights, **kwargs):
+        to_workers.append(weights)
+        return worker_push(self, weights, **kwargs)
+
+    def _local_spy(self, weights, **kwargs):
+        to_local.append(weights)
+        return local_push(self, weights, **kwargs)
+
+    monkeypatch.setattr(CRSimVecEnv, "set_reward_weights", _worker_spy)
+    monkeypatch.setattr(CRSimEnv, "set_reward_weights", _local_spy)
+
+    run_module.main([
+        "--steps", "128", "--horizon", "16", "--envs", "1", "--workers", "1",
+        "--match-seconds", "20", "--tower-level", "5", "--tps", "20",
+        "--frame-skip", "30", "--device", "cpu", "--opponent", "random",
+        "--reward", "projected", "--eval-every", "0",
+        "--save-every", "10000", "--out", str(tmp_path),
+        "--name", "worker-anneal", "--anneal", "--anneal-end", "64"])
+
+    assert to_workers, (
+        "the annealed weight never left the parent process, so every rollout "
+        "trained at the un-annealed weight while config.json and every "
+        "metrics row recorded the schedule")
+    # Both lists, field for field: a run whose local probe and whose workers
+    # disagree about the reward is training on one game and measuring another.
+    assert to_workers == to_local
+    assert to_workers[-1] == ProjectionWeights(tower=0.0, elixir=0.0,
+                                               horizon_seconds=3.0)
 
 
 def test_a_resumed_run_moves_its_rollout_onto_the_resumed_steps_weight(

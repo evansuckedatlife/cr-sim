@@ -56,6 +56,45 @@ def test_a_run_written_twice_per_update_is_counted_once(tmp_path):
     assert len(record["evaluations"]) == 3
 
 
+def test_a_ladder_run_is_reported_as_measured_rather_than_as_never_evaluated(
+        tmp_path):
+    """``--probe ladder`` writes a rating and no lift, and every selector in
+    this module keyed on ``eval_lift_sd``.
+
+    Over a real ladder run's rows, ``collect`` returned ``evaluations: []``,
+    ``mean_lift: None`` and ``best_lift: None``, and ``_verdict_of`` rendered
+    ("dim", "never evaluated", "This run recorded no evaluations, so nothing
+    here says whether it learned anything") over the run's only measurement.
+    """
+    from cr_sim.train.report import _verdict_of
+
+    rows = [_row(u, u * 1000, ladder_elo=elo, ladder_elo_error=90.0,
+                 ladder_mode="greedy", ladder_opponent="ladder",
+                 ladder_opponent_ref="random@random",
+                 ladder_pinned={"random": 0.0, "clone": 382.0},
+                 eval_opponent="ladder", eval_episodes=40)
+            for u, elo in ((1, 300.0), (2, 420.0))]
+    _run(tmp_path, "rated", rows)
+    record = collect(tmp_path)[0]
+
+    assert record["ladder_elo"] == [300.0, 420.0]
+    assert record["latest_elo"] == 420.0 and record["best_elo"] == 420.0
+    # Never in a field called lift: an Elo and a lift are unrelated scales.
+    assert record["mean_lift"] is None and record["best_lift"] is None
+
+    chip, label, sentence = _verdict_of(record)
+    assert label != "never evaluated"
+    assert "clone" in label and chip == "good", (chip, label)
+    assert "+420" in sentence and "not a lift" in sentence
+
+    # And a run rated below the best anchor is not sold as a win.
+    rows[-1]["ladder_elo"] = 100.0
+    _run(tmp_path, "under", rows)
+    under = [r for r in collect(tmp_path) if r["name"] == "under"][0]
+    chip, label, _ = _verdict_of(under)
+    assert chip == "warn" and label == "rated below clone"
+
+
 def test_a_directory_with_no_metrics_is_skipped(tmp_path):
     (tmp_path / "empty").mkdir()
     _run(tmp_path, "real", [_row(1, 1000)])

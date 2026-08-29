@@ -81,6 +81,24 @@ class VecEnvConfig:
     reward_weights: Any = None
     #: Seed for a random opponent, or ``None`` for an idle or network one.
     opponent_seed: int | None = None
+    #: The run's own seed, made distinct per worker by
+    #: :class:`CRSimVecEnv`, and the only thing that makes a self-play
+    #: worker's opponent reproducible.
+    #:
+    #: A self-play opponent samples from its policy, and until this existed
+    #: that draw came off torch's *global* stream. ``_worker`` sets the thread
+    #: count and nothing else, and the workers are spawned rather than forked,
+    #: so every worker imported torch fresh and seeded itself from OS entropy:
+    #: three fresh processes running the identical construction on one fixed
+    #: board reported ``torch.initial_seed()`` of 81036942797900,
+    #: 81144705125800 and 81234665151700 and shared not one of their first
+    #: twenty opponent actions. End to end, two runs of
+    #: ``--steps 1600 --workers 4 --seed 0`` from one tree gave update-1
+    #: mean_return +0.2556 and -0.1125, while the same command at
+    #: ``--workers 0`` -- where the rollout runs in the seeded parent --
+    #: matched exactly. That is what made every ``--workers`` self-play run,
+    #: runs/learn-lvl5-kl01 included, impossible to replay.
+    seed: int = 0
     #: Shapes for a network opponent, if one will be sent. Weights arrive
     #: separately through ``set_opponent`` rather than living in the config:
     #: they change every refresh, and a config is pickled once per worker.
@@ -171,6 +189,12 @@ def _worker(config: VecEnvConfig, conn) -> None:
         _build_env(config, data, levels, registry, i, network_opponent=_current)
         for i in range(config.shard)
     ]
+    # The self-play opponent's own sampling stream, built once per worker and
+    # carried across every refresh, so what the opponent plays is a function
+    # of (run seed, worker) and of how far this worker has got -- never of
+    # where a global generator happened to be. Rebuilding it per refresh would
+    # instead replay one fixed sequence after every generation change.
+    opponent_stream: list = []
     rng = np.random.default_rng(config.opponent_seed or 0)
     nvec = [int(v) for v in envs[0].action_space.nvec]
     try:
@@ -206,9 +230,16 @@ def _worker(config: VecEnvConfig, conn) -> None:
                 from ..train.nets import ActorCritic, NetConfig
                 from ..train.selfplay import FrozenOpponent
 
+                import torch as _torch
+
+                if not opponent_stream:
+                    opponent_stream.append(_torch.Generator().manual_seed(
+                        int(config.seed) % (2 ** 31 - 1)))
                 net = ActorCritic(NetConfig(**config.net_config))
                 net.load_state_dict(payload)
-                holder[:] = [FrozenOpponent(net, nvec, seed=config.opponent_seed or 0)]
+                holder[:] = [FrozenOpponent(net, nvec,
+                                            seed=config.opponent_seed or 0,
+                                            generator=opponent_stream[0])]
                 conn.send(True)
             elif command == "set_reward_weights":
                 # Pending on every env this worker owns, adopted at that
@@ -290,10 +321,15 @@ class CRSimVecEnv:
             # Each worker gets a distinct opponent seed, or eight parallel
             # battles would face an identical sequence of placements and
             # report a smoother result than the policy has earned.
-            per = shard_config
+            # And its own opponent stream, derived arithmetically from the
+            # run's seed, so eight workers do not sample the identical
+            # sequence of opponent moves and two runs of one --seed do.
+            per = dataclasses.replace(
+                shard_config,
+                seed=(int(config.seed) * 1_000_003 + worker) % (2 ** 31 - 1))
             if config.opponent_seed is not None:
                 per = dataclasses.replace(
-                    shard_config, opponent_seed=config.opponent_seed + worker * 1000
+                    per, opponent_seed=config.opponent_seed + worker * 1000
                 )
             proc = self._ctx.Process(target=_worker, args=(per, child_conn), daemon=True)
             proc.start()

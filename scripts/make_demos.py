@@ -138,6 +138,15 @@ def build_parser() -> argparse.ArgumentParser:
              "always spans placements the policy did not choose. Ignored "
              "without --proposer.")
     parser.add_argument(
+        "--min-random-candidates", type=int, default=0,
+        help="candidates the stratified random draw keeps whatever the "
+             "proposer wants. 0 is the default floor, max(2, candidates // 3). "
+             "The collapse refusal below tells the operator to raise this and "
+             "there was no flag to raise: SearchBotConfig.random_floor was "
+             "permanently max(2, candidates // 3) because nothing on any "
+             "command line set it, so half the documented remedy for target "
+             "collapse was unreachable.")
+    parser.add_argument(
         "--baseline-fallback", type=float, default=BASELINE_FALLBACK_RATE,
         help="the unguided bot's min_spread fallback rate. A guided shard "
              "more than ten points above it has collapsed its own target and "
@@ -151,14 +160,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def env_factory(args, offset: int, world):
+    """The environment these demonstrations are collected in.
 
-    data = LogicData.load(DEFAULT_BUILD)
-    levels, registry = build_level_table(data), build_card_registry(data)
-    # Shards must not replay each other's battles, or the merged set is the
-    # same few games repeated and the policy learns those rather than the game.
-    offset = args.shard * 10_000
+    Exposed rather than buried in ``main`` so a test can build the same
+    environment this script builds and read the reward off it. The test that
+    was meant to cover ``--tower-weight`` never imported this file at all --
+    it called ``run._reward_weights`` on a hand-built namespace -- so this
+    script could accept the flag, record it in the shard's meta, and pass 1.0
+    to the reward, with the whole of tests/test_train.py green.
+    """
+    data, levels, registry = world
 
     def make_env(index: int) -> CRSimEnv:
         seed = offset + index
@@ -196,6 +208,33 @@ def main(argv: list[str] | None = None) -> int:
                 tower_weight=args.tower_weight)),
             opponent_policy=opponent)
 
+    return make_env
+
+
+def search_config(args, guided: bool) -> SearchBotConfig:
+    """The search the expert runs, from the flags that describe it.
+
+    Exposed for the same reason ``env_factory`` is: ``--min-random-candidates``
+    only earns its keep if it reaches ``SearchBotConfig.random_floor``, and
+    that is a property of the object rather than of the flag string.
+    """
+    return SearchBotConfig(
+        horizon_seconds=args.horizon_seconds,
+        candidates=args.candidates, seed=args.shard,
+        min_random_candidates=args.min_random_candidates,
+        policy_candidates=args.policy_candidates if guided else 0)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    data = LogicData.load(DEFAULT_BUILD)
+    levels, registry = build_level_table(data), build_card_registry(data)
+    # Shards must not replay each other's battles, or the merged set is the
+    # same few games repeated and the policy learns those rather than the game.
+    offset = args.shard * 10_000
+    make_env = env_factory(args, offset, (data, levels, registry))
+
     # --------------------------------------------------- who proposes what
 
     guided = args.proposer not in ("", "none", "None")
@@ -214,10 +253,7 @@ def main(argv: list[str] | None = None) -> int:
               f"{args.policy_candidates} of {args.candidates} placements",
               flush=True)
 
-    search = SearchBotConfig(
-        horizon_seconds=args.horizon_seconds,
-        candidates=args.candidates, seed=args.shard,
-        policy_candidates=args.policy_candidates if guided else 0)
+    search = search_config(args, guided)
 
     def make_expert(env):
         # A proposer per battle, keyed by the battle's own seed, so its stream
@@ -367,6 +403,18 @@ def collapse_refusal(demos: Demonstrations, baseline: float,
         "preference rather than improving one. The shard is on disk; do not "
         "merge it. Lower --policy-candidates or raise "
         "--min-random-candidates and collect again.")
+
+
+def _flag_names() -> set:
+    """Every option string this script's parser accepts.
+
+    Exposed so a test can hold the refusal above to the flags that exist: it
+    told the operator to raise --min-random-candidates for months while
+    `make_demos.py --min-random-candidates 8` exited 2 on an unrecognised
+    argument.
+    """
+    return {option for action in build_parser()._actions
+            for option in action.option_strings}
 
 
 if __name__ == "__main__":
