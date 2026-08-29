@@ -189,6 +189,15 @@ def main(argv: list[str] | None = None) -> int:
         "block": int(args.block),
         "tower_level": args.tower_level,
         "reward": "evaluation (crowns + 0.01 * tower health)",
+        # The scale, in the field a reader can compare on, and not only in
+        # the prose above it. The line above is a sentence; this is the
+        # weight tuple read off the environment the control actually played
+        # in, and it is what tells a reader that this lift and a training
+        # run's in-run lift -- projected:tower=1,elixir=0.3,horizon_seconds=3
+        # -- are numbers in different units. The metrics row has carried it
+        # since check_lift_is_named started demanding it; the verdict, which
+        # is the file report.py reads, did not.
+        "eval_reward": scale,
         "expert": {"candidates": args.candidates,
                    "horizon_seconds": args.horizon_seconds},
         "control": {

@@ -353,6 +353,12 @@ def main(argv: list[str] | None = None) -> int:
                # verdict.json on this machine carries the field; all seven
                # would be refused today, which is the guard working.
                "eval_opponent": opponent_name(make_env()),
+               # And the scale, off the same environment. The metrics row
+               # below has always carried it; this file did not, so the
+               # clone's +2.167 sat on disk with no record of the reward its
+               # returns were denominated in -- beside an expert anchor that
+               # was measured under a different one.
+               "eval_reward": reward_name(make_env()),
                "eval_episodes": args.episodes,
                "seeds": seeds,
                "mode": "greedy" if best is greedy_stats else "sampled",

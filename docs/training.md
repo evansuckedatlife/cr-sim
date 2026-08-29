@@ -482,14 +482,26 @@ about.
 
 **Not done, deliberately: the γ-correct potential.** `r = γΦ(s′) − Φ(s)` is
 the policy-invariant form for γ<1, and it was written and reverted here once
-already. The revert was right. Applied inside `RewardTracker.step` /
-`ProjectedReward.step` it charges γ per *score*, and a score is not a PPO
-timestep — 2 scores per decision under `projected` and ~9 under `five-term`,
-against PPO's one γ per `env.step`. That is up to 9× too much discount on the
-shaping term alone, and the run-out scores are not decisions at all, so it
-prices time the agent never chose. If it is wanted it belongs at the single
-point the reward crosses into the trainer, and it is a separate change, not a
-prerequisite for this one.
+already. The revert was right, but **half of the reason it was given for is no
+longer true and should not be re-derived from this paragraph.** It used to say
+"2 scores per decision under `projected` and ~9 under `five-term`". The
+`projected` half died with the double-score fix: `CRSimEnv.step` now skips
+scoring a state that a telescoping reward is about to score again at the end of
+the run-out, and the count is measured at **1.038 score calls per decision**
+under `projected` — three episodes, random play, tower level 5, frame skip 30,
+78 decisions, 81 calls, the extra three being one reset apiece. `five-term`
+does not telescope and still scores more than once a decision: **3.115** in
+that same configuration. Do not read that as the 9× the old sentence claimed;
+the multiplier is a function of how many forced decisions the run-out
+compresses, which moves with `frame_skip` and with the opponent, so it is a
+number for whichever regime is being argued about and not a constant.
+
+What survives, and it is enough on its own: applied inside
+`RewardTracker.step` / `ProjectedReward.step`, γ is charged per *score*, and a
+score is not a PPO timestep. The run-out compresses several engine decisions
+into one `env.step`, so a γ per score prices time the agent never chose either
+way. If it is wanted it belongs at the single point the reward crosses into the
+trainer, and it is a separate change, not a prerequisite for this one.
 
 ## What to do next
 

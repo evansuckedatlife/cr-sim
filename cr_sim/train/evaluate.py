@@ -396,7 +396,7 @@ def evaluate_paired(
     battle -- but one shared environment would also share the opponent's
     generator state between arms, which is the thing pairing exists to stop.
     """
-    from .selfplay import opponent_name
+    from .selfplay import opponent_name, reward_name
 
     seeds = [int(s) for s in seeds]
     control_env = make_env()
@@ -405,11 +405,20 @@ def evaluate_paired(
     # an argument: a caller cannot then label a measurement with an opponent
     # it did not face.
     faced = opponent_name(control_env)
+    # And the scale, off the same environment and for the same reason. A lift
+    # is a difference of returns divided by the control's spread, and both
+    # halves of that are denominated in whatever reward was scoring: the
+    # offline scripts here build an environment with no reward_weights, i.e.
+    # `simple:shaping=0.01`, while cr_sim.train.run pins its in-run probe to
+    # `projected:tower=1,elixir=0.3,horizon_seconds=3`. Those two lifts are
+    # numbers in different units and nothing in the file said so.
+    scale = reward_name(control_env)
 
     control_crowns = np.asarray(control["crowns"], dtype=float)
     verdict: dict[str, Any] = {
         "episodes": int(episodes),
         "eval_opponent": faced,
+        "eval_reward": scale,
         "seeds": seeds,
         "control": {
             "win": float(np.mean(control_crowns > 0)),
@@ -465,6 +474,12 @@ def evaluate_paired(
     return verdict
 
 
+#: Verdict keys that mean a lift was measured. A rating is not one of them:
+#: ``ladder_elo`` is fitted on crowns, which no reward touches, which is why
+#: the reward clause below is keyed to the lift and not to the file.
+_LIFT_KEYS = ("lift", "ci_low", "ci_high", "greedy", "sampled")
+
+
 def write_verdict(path: Path, verdict: dict[str, Any]) -> dict[str, Any]:
     """Write ``verdict.json``, refusing one that does not name its opponent.
 
@@ -473,6 +488,21 @@ def write_verdict(path: Path, verdict: dict[str, Any]) -> dict[str, Any]:
     on disk; read later beside one measured against a different opponent it is
     worse than no number, and this project has already spent two rounds of
     comparisons finding that out.
+
+    **And the same guard on the scale, which the row already had and the file
+    did not.** ``check_lift_is_named`` has refused a metrics row carrying
+    ``eval_lift_sd`` without ``eval_reward`` since the row guard landed, but
+    ``verdict.json`` -- the artefact that outlives the run and the only thing
+    ``report.py`` reads for its chips -- was exempt. That exemption is live on
+    this machine right now: every offline script here builds ``CRSimEnv`` with
+    no ``reward_weights`` and measures under ``simple:shaping=0.01``, while
+    ``cr_sim.train.run.EVAL_REWARD`` pins the in-run probe to
+    ``projected:tower=1,elixir=0.3,horizon_seconds=3``. The expert's anchor
+    and a training run's lift are therefore numbers in different units --
+    different numerator *and* different denominator, since the lift's unit is
+    the control's own spread -- and until now the only record of that
+    difference was a field on the metrics rows that nothing wrote to the
+    verdict and nothing read.
     """
     if not verdict.get("eval_opponent"):
         raise ValueError(
@@ -480,6 +510,18 @@ def write_verdict(path: Path, verdict: dict[str, Any]) -> dict[str, Any]:
             "meaningless without the opponent it was measured against -- the "
             "same policy scores wildly differently against an idle, a random "
             "and a searching one. See cr_sim.train.selfplay.opponent_name."
+        )
+    if any(k in verdict for k in _LIFT_KEYS) and not verdict.get("eval_reward"):
+        raise ValueError(
+            "a verdict carries a lift but no eval_reward. A lift is a "
+            "difference of *returns* over the control's spread, and both are "
+            "denominated in whatever reward scored them: the offline scripts "
+            "here measure under simple:shaping=0.01 and cr_sim.train.run's "
+            "probe under projected:tower=1,elixir=0.3,horizon_seconds=3, so "
+            "the expert's anchor and a run's lift are not on one scale and "
+            "never were. This is the guard check_lift_is_named already puts "
+            "on a metrics row, on the file that outlives the run. See "
+            "cr_sim.train.selfplay.reward_name."
         )
     if "lift" in verdict and "ladder_elo" in verdict:
         # Two measurements on two scales in one file, and the top-level

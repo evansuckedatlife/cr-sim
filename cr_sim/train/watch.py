@@ -100,6 +100,12 @@ def _ladder_readings_of(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
             # What the scale rests on. Two ratings pinned differently are not
             # comparable, and the row is the only place that says so.
             "pinned": row.get("ladder_pinned"),
+            # And which fitted table the pins came out of. A probe pinned to
+            # runs/agent-ladder-v1's ratings and one pinned to a later
+            # ladder's are two scales wearing the same field name; the row
+            # has carried this since the probe started writing it and nothing
+            # read it.
+            "ratings_source": row.get("ladder_ratings_source") or None,
             "eval_episodes": (row.get("eval_episodes")
                               if _plottable(row.get("eval_episodes")) else None),
         })
@@ -147,7 +153,19 @@ def summarise(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
         return {"updates": 0}
     last = rows[-1]
     evals = [r for r in rows if "eval_lift_sd" in r]
-    best = max(evals, key=lambda r: r["eval_lift_sd"]) if evals else None
+    # The scale every one of them was measured on. A maximum over readings in
+    # two units is a comparison between the units, and this is the live
+    # page's copy of the same `max(evaluations)` cr_sim.train.report took.
+    # Every existing run on this machine records no eval_reward at all, so it
+    # has one (absent) scale and summarises exactly as it did before.
+    lift_scales = []
+    for row in evals:
+        key = (str(row.get("eval_opponent") or "") or None,
+               str(row.get("eval_reward") or "") or None)
+        if key not in lift_scales:
+            lift_scales.append(key)
+    best = (max(evals, key=lambda r: r["eval_lift_sd"])
+            if evals and len(lift_scales) <= 1 else None)
     # The rating family, kept apart from the lift the whole way down: its
     # numbers arrive under `latest_elo`/`best_elo` and never under a name
     # containing "lift".
@@ -167,6 +185,8 @@ def summarise(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "latest_elo_vs_expert": ladder[-1]["vs_expert"] if ladder else None,
         "best_elo": max(r["elo"] for r in ladder) if ladder else None,
         "ladder_pinned": ladder[-1]["pinned"] if ladder else None,
+        "ladder_ratings_source": (ladder[-1]["ratings_source"]
+                                  if ladder else None),
         "ladder_opponent": ladder[-1]["opponent"] if ladder else None,
         # `rotating_probe` writes the sampled arm to `eval_lift_sd` and the
         # argmax beside it. Where both are on the row, both are reported: one
@@ -176,8 +196,13 @@ def summarise(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "modes_recorded": bool(evals and "eval_lift_sd_greedy" in evals[-1]),
         "latest_win": evals[-1].get("eval_win") if evals else None,
         "control_win": evals[-1].get("control_win") if evals else None,
+        # Absent rather than wrong where the run mixed scales -- the page
+        # draws this as "best +X at N steps" beside the latest reading, and
+        # the best of two units is neither.
         "best_lift": best["eval_lift_sd"] if best else None,
         "best_at_steps": best.get("steps") if best else None,
+        "lift_scales": [{"opponent": o, "reward": w} for o, w in lift_scales],
+        "one_lift_scale": len(lift_scales) <= 1,
         "total_steps": last.get("total_steps"),
         "elapsed_seconds": last.get("elapsed_seconds"),
         **_next_evaluation(rows),
@@ -407,7 +432,7 @@ def _anchor_for(control: Any) -> "str | None":
 
 
 def _scale_of(control: Any, stated: bool = False,
-              opponent: Any = None) -> dict[str, Any]:
+              opponent: Any = None, reward: Any = None) -> dict[str, Any]:
     """The provenance chip that travels with a lift, in the same object.
 
     Never a bare number. A screenshot of a figure with no scale beside it is
@@ -421,12 +446,31 @@ def _scale_of(control: Any, stated: bool = False,
     names itself. Where the two disagree the disagreement is carried rather
     than resolved: a third opponent whose control happens to win at the idle
     rate is neither idle nor a rounding error.
+
+    ``reward`` is the other half of a scale, and this module had no concept of
+    it: the string "reward" appeared zero times in 4,643 lines, and
+    ``_same_scale`` defined "same scale" as *same opponent* alone. A lift is a
+    difference of returns divided by the control's own spread, so the reward
+    that scored those returns is in the numerator and in the denominator both
+    -- and every offline script here measures under ``simple:shaping=0.01``
+    while ``cr_sim.train.run`` pins its probe to
+    ``projected:tower=1,elixir=0.3,horizon_seconds=3``. Two runs on those two
+    scales passed every clause in this file and landed on one axis.
+
+    Never inferred. No control rate identifies a reward the way 0.26
+    identifies the random opponent, so an unrecorded scale is recorded as
+    unrecorded. ``selfplay.check_lift_is_named`` has forced ``eval_reward``
+    onto every new metrics row since it landed and ``write_verdict`` now
+    forces it onto the file that outlives the run; what was missing was
+    anything that read it.
     """
     anchor = _anchor_for(control)
     named = str(opponent).strip() if opponent not in (None, "") else ""
+    scored = str(reward).strip() if reward not in (None, "") else ""
     return {"control": control,
             "anchor": anchor,
             "named": named or None,
+            "reward": scored or None,
             "opponent": named or anchor,
             "source": "recorded" if named else ("inferred" if anchor else None),
             "stated": bool(stated and (named or anchor)),
@@ -442,6 +486,20 @@ def _same_scale(one: dict[str, Any], two: dict[str, Any]) -> "bool | None":
     and a rate is inferred.
     """
     if not one or not two:
+        return None
+    # The reward first, because it is recorded rather than inferred and
+    # because it can settle the question on its own: two readings measured
+    # under different rewards are not on one scale however perfectly they
+    # agree about the opponent. The opponent decides which battles were
+    # played; the reward decides what the returns were counted in, and a lift
+    # is a difference of returns over the control's own spread.
+    scored_one, scored_two = one.get("reward"), two.get("reward")
+    if scored_one and scored_two and scored_one != scored_two:
+        return False
+    if bool(scored_one) != bool(scored_two):
+        # One says what it counted and the other does not. That is the third
+        # answer and not a soft yes: the reading with no reward recorded may
+        # be on either scale, and drawing it beside this one asserts which.
         return None
     if one.get("named") and two.get("named"):
         return one["named"] == two["named"]
@@ -517,6 +575,9 @@ def _readings_of(rows: Sequence[dict[str, Any]],
             "arm": row.get("arm"), "mode": mode,
             "weight": weight or default_weight,
             "opponent": row.get("eval_opponent"),
+            # The unit, carried on the reading beside the opponent. Both are
+            # needed to say whether two lifts are the same kind of number.
+            "reward": row.get("eval_reward"),
             "steps": row.get("steps", 0),
             "episodes": row.get("episodes"),
             "eval_episodes": (row.get("eval_episodes")
@@ -822,6 +883,10 @@ def _verdict_of(raw: Any) -> dict[str, Any]:
                    # the file's own note says best.pt replays at -0.033.
                    checkpoint=str(raw.get("checkpoint", "") or ""),
                    opponent=raw.get("eval_opponent"),
+                   # write_verdict now refuses a verdict carrying a lift with
+                   # no eval_reward, for the same reason it refuses one with
+                   # no eval_opponent. This is the reading half.
+                   reward=raw.get("eval_reward"),
                    note=str(raw.get("note", "") or ""))
     elif shape == "paired":
         for mode in ("greedy", "sampled"):
@@ -829,7 +894,9 @@ def _verdict_of(raw: Any) -> dict[str, Any]:
             out[mode] = {"lift": sub.get("lift"), "ci": _ci_of(sub),
                          "win": sub.get("win"), "loss": sub.get("loss"),
                          "opponent": sub.get("eval_opponent")
-                         or raw.get("eval_opponent")}
+                         or raw.get("eval_opponent"),
+                         "reward": sub.get("eval_reward")
+                         or raw.get("eval_reward")}
         out.update(episodes=raw.get("episodes"),
                    checkpoint=str(raw.get("checkpoint", "") or ""),
                    note=str(raw.get("note", "") or ""))
@@ -846,6 +913,7 @@ def _verdict_of(raw: Any) -> dict[str, Any]:
             # The only field on this machine that puts a lift and the
             # opponent that produced it on the same object.
             "opponent": r.get("eval_opponent"),
+            "reward": r.get("eval_reward"),
         } for r in raw]
     return out
 
@@ -901,6 +969,15 @@ def _block_of(entries: list[dict[str, Any]]) -> "dict[str, Any] | None":
         if len(named) > 1:
             continue
         opponent = named.pop() if named else None
+        # And one reward, for the same reason and with the same force. This
+        # is the one block on the page whose arms are ranked against each
+        # other; ranking a simple-scale lift against a projected-scale one
+        # orders the units.
+        scored = {str(r.get("reward")).strip() for r in evals
+                  if r.get("reward")}
+        if len(scored) > 1:
+            continue
+        reward = scored.pop() if scored else None
         if opponent is None and _anchor_for(control) is None:
             continue
         seeds = {r.get("eval_episodes") if r.get("eval_episodes") is not None
@@ -912,12 +989,12 @@ def _block_of(entries: list[dict[str, Any]]) -> "dict[str, Any] | None":
             continue
         if not _states_shared_conditions(entry["note"]):
             continue
-        qualifying.append((entry, control, opponent, int(count)))
+        qualifying.append((entry, control, opponent, reward, int(count)))
     if not qualifying:
         return None
-    entry, control, opponent, seeds = max(
+    entry, control, opponent, reward, seeds = max(
         qualifying, key=lambda q: (len(q[0]["evals"]), q[0]["name"]))
-    scale = _scale_of(control, stated=True, opponent=opponent)
+    scale = _scale_of(control, stated=True, opponent=opponent, reward=reward)
     arms = []
     for row in entry["evals"]:
         arms.append({"arm": str(row.get("arm")), "weight": row["weight"],
@@ -982,6 +1059,10 @@ def _groups_of(entries: list[dict[str, Any]],
         for row in entry["evals"]:
             control = row.get("control")
             named = str(row.get("opponent") or "").strip() or None
+            # Part of the key, never merged away. Two readings against the
+            # same opponent under two rewards are two populations; a card
+            # holding both is ranked across units.
+            scored = str(row.get("reward") or "").strip() or None
             # A reading with no control rate at all is not on the same scale
             # as every other reading with no control rate. Where it names its
             # opponent that name is the bucket; where it names nothing there
@@ -993,14 +1074,16 @@ def _groups_of(entries: list[dict[str, Any]],
                 # rate is not, and gets its own.
                 anchor = _anchor_for(control)
                 key = (0, round(control, 6),
-                       "" if (not named or named == anchor) else named)
+                       "" if (not named or named == anchor) else named,
+                       scored or "")
             elif named:
-                key = (1, named, "")
+                key = (1, named, "", scored or "")
             else:
-                key = (2, "", "")
+                key = (2, "", "", scored or "")
             bucket = buckets.setdefault(key, {
                 "control": control if key[0] == 0 else None,
-                "named": named, "rankable": key[0] != 2, "runs": {}})
+                "named": named, "reward": scored,
+                "rankable": key[0] != 2, "runs": {}})
             # One confirmation is enough to name the card: a rate agreeing
             # with a name is stronger evidence than the rate alone.
             bucket["named"] = bucket["named"] or named
@@ -1124,7 +1207,8 @@ def _groups_of(entries: list[dict[str, Any]],
             runs.sort(key=lambda r: r["name"])
         groups.append({
             "control": bucket["control"],
-            "scale": _scale_of(bucket["control"], opponent=bucket["named"]),
+            "scale": _scale_of(bucket["control"], opponent=bucket["named"],
+                               reward=bucket["reward"]),
             "rankable": bucket["rankable"],
             "rows": sum(r["evals"] for r in runs),
             "runs": runs,
@@ -1148,7 +1232,8 @@ def _exhibits_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
                     continue
                 for row in entry["evals"]:
                     scale = _scale_of(row.get("control"),
-                                      opponent=row.get("opponent"))
+                                      opponent=row.get("opponent"),
+                                      reward=row.get("reward"))
                     if _same_scale(scale, block["scale"]) is not False:
                         continue
                     gap = abs(row["lift"] - arm["lift"])
@@ -1185,9 +1270,11 @@ def _exhibits_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
             continue
         if chosen is None or peak["lift"] > chosen["best_in_run"]:
             in_scale = _scale_of(peak.get("control"),
-                                 opponent=peak.get("opponent"))
+                                 opponent=peak.get("opponent"),
+                                 reward=peak.get("reward"))
             verdict_scale = _scale_of(verdict.get("control_win"),
-                                      opponent=verdict.get("opponent"))
+                                      opponent=verdict.get("opponent"),
+                                      reward=verdict.get("reward"))
             chosen = {"run": entry["name"], "best_in_run": peak["lift"],
                       "best_scale": in_scale, "best_mode": peak.get("mode"),
                       "readings": len(entry["evals"]),
@@ -1482,7 +1569,8 @@ def _demoted_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
     entry, row = best
     verdict = verdicts.get(entry["name"]) or {}
     control = row.get("control")
-    scale = _scale_of(control, opponent=row.get("opponent"))
+    scale = _scale_of(control, opponent=row.get("opponent"),
+                      reward=row.get("reward"))
     record_scale = block["scale"] if block else None
     return {
         "name": entry["name"], "lift": row["lift"],
@@ -1563,6 +1651,10 @@ def _modes_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
                 continue
             left, right = greedy.get("opponent"), sampled.get("opponent")
             mismatch = bool(left and right and left != right)
+            # The unit, treated the way the opponent above it is: carried
+            # where both halves agree, withheld where they disagree.
+            scored = (greedy.get("reward") if greedy.get("reward")
+                      == sampled.get("reward") else None)
             recorded.append({
                 "source": source, "weight": source,
                 "checkpoint": verdict.get("checkpoint") or "",
@@ -1585,7 +1677,8 @@ def _modes_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
                 # two opponents on one axis.
                 "episodes": verdict.get("episodes"),
                 "scale": _scale_of(None,
-                                   opponent=(None if mismatch else (left or right))),
+                                   opponent=(None if mismatch else (left or right)),
+                                   reward=scored),
                 "recorded": bool(left or right),
                 "flips": (greedy["lift"] < 0) != (sampled["lift"] < 0),
                 "straddles_zero": bool(
@@ -1620,6 +1713,8 @@ def _modes_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
             # under a heading saying the only difference is how it played.
             left, right = greedy.get("opponent"), sampled.get("opponent")
             mismatch = bool(left and right and left != right)
+            scored = (greedy.get("reward") if greedy.get("reward")
+                      == sampled.get("reward") else None)
             checkpoint = greedy.get("checkpoint") or sampled.get("checkpoint")
             recorded.append({
                 "source": source, "weight": key,
@@ -1637,7 +1732,8 @@ def _modes_of(entries: list[dict[str, Any]], block: "dict[str, Any] | None",
                 "episodes": (greedy.get("episodes")
                              or sampled.get("episodes")),
                 "scale": _scale_of(None,
-                                   opponent=(None if mismatch else (left or right))),
+                                   opponent=(None if mismatch else (left or right)),
+                                   reward=scored),
                 "recorded": bool(left or right), "flips": flips,
                 "straddles_zero": straddles,
             })
@@ -1824,6 +1920,14 @@ def _ab_of(entries: list[dict[str, Any]],
         if len(opponents) != 1:
             continue
         opponent = opponents.pop() or None
+        # And one reward across the run. A run whose own readings are on two
+        # scales is not an arm of anything; and where it has one, the pair
+        # loop below refuses a partner measured under a different one, which
+        # every clause here used to let through.
+        rewards = {str(r.get("reward") or "").strip() for r in evals}
+        if len(rewards) != 1:
+            continue
+        reward = rewards.pop() or None
         sizes = {r.get("eval_episodes") for r in evals}
         if len(sizes) != 1:
             continue
@@ -1836,7 +1940,7 @@ def _ab_of(entries: list[dict[str, Any]],
         candidates.append({
             "name": entry["name"], "live": entry["live"], "evals": evals,
             "control": control, "episodes": int(episodes), "mode": modes.pop(),
-            "scale": _scale_of(control, opponent=opponent),
+            "scale": _scale_of(control, opponent=opponent, reward=reward),
         })
 
     best = None
@@ -2049,14 +2153,18 @@ def _sweeps_of(verdicts: dict[str, Any]) -> dict[str, Any]:
             continue
         opponents = {str(r["opponent"]).strip() for r in rows}
         sizes = {r.get("episodes") for r in rows}
-        if len(opponents) != 1 or len(sizes) != 1:
+        # And one reward. A sweep drawn as a ladder is a ranking, and a
+        # ranking across two units orders the units.
+        scored = {str(r.get("reward") or "").strip() for r in rows}
+        if len(opponents) != 1 or len(sizes) != 1 or len(scored) != 1:
             dropped.update(checkpoints)
             continue
         episodes = sizes.pop()
         if not _plottable(episodes) or episodes <= 0:
             dropped.update(checkpoints)
             continue
-        scale = _scale_of(None, opponent=opponents.pop())
+        scale = _scale_of(None, opponent=opponents.pop(),
+                          reward=scored.pop() or None)
         sections = []
         for mode in _MODE_ORDER:
             arms = sorted([r for r in rows if r.get("mode") == mode],
@@ -2109,7 +2217,8 @@ def _precision_of(recorded: list[dict[str, Any]],
                 continue
             populations.setdefault(key, []).append(half)
             scales.setdefault(key, item.get("scale")
-                              or _scale_of(None, opponent=item["opponent"]))
+                              or _scale_of(None, opponent=item["opponent"],
+                                           reward=item.get("reward")))
     # The largest population is drawn; the rest are counted and named. Ties by
     # the key, so the choice does not move between polls.
     order = sorted(populations, key=lambda k: (-len(populations[k]), k))
@@ -2272,7 +2381,8 @@ def _all_time(runs, notes, kinds, extras, configs=None) -> dict[str, Any]:
         # of them, which is the single most important fact on the page.
         "unidentified": sum(1 for r in readings
                             if _scale_of(r.get("control"),
-                                         opponent=r.get("opponent"))["opponent"]
+                                         opponent=r.get("opponent"),
+                                         reward=r.get("reward"))["opponent"]
                             is None),
         # How many name the opponent on their own row. The page says in two
         # places that not one lift on disk does; that has to be counted
@@ -2986,10 +3096,20 @@ function plural(n,one,many){return n===1?one:(many||(one+'s'));}
    confidently wrong name on a number that names itself. */
 function scaleChip(sc){
   if(!sc) return {cls:'dim',text:'scale not recorded'};
-  if(sc.named) return {cls:'good',text:'vs '+sc.named+' (recorded)'};
+  /* The unit, appended to whatever the opponent clause decided. A lift is a
+     difference of returns over the control's own spread, so the reward is in
+     the numerator and the denominator both -- and the offline scripts here
+     measure under simple:shaping=0.01 while run.EVAL_REWARD pins the in-run
+     probe to projected:tower=1,elixir=0.3,horizon_seconds=3. Recorded rather
+     than inferred: no control rate identifies a reward the way 0.26
+     identifies the random opponent, so a reading that does not say is drawn
+     as not saying. */
+  var unit=sc.reward?(' · '+sc.reward):'';
+  if(sc.named) return {cls:'good',text:'vs '+sc.named+' (recorded)'+unit};
   if(sc.opponent) return {cls:sc.stated?'good':'dim',
-    text:'vs '+sc.opponent+(sc.stated?' (stated)':' (inferred)')};
-  return {cls:'warn',text:'scale unidentified (control '+num(sc.control)+')'};
+    text:'vs '+sc.opponent+(sc.stated?' (stated)':' (inferred)')+unit};
+  return {cls:'warn',
+    text:'scale unidentified (control '+num(sc.control)+')'+unit};
 }
 
 function liftNode(v,sc,extra){

@@ -219,9 +219,74 @@ def test_a_verdict_cannot_be_written_without_naming_its_opponent(tmp_path):
         write_verdict(tmp_path / "verdict.json", {"episodes": 40, "lift": 0.42})
     assert not (tmp_path / "verdict.json").exists()
 
-    named = {"episodes": 40, "lift": 0.42, "eval_opponent": "search"}
+    named = {"episodes": 40, "lift": 0.42, "eval_opponent": "search",
+             "eval_reward": "simple:shaping=0.01"}
     write_verdict(tmp_path / "verdict.json", named)
     assert json.loads((tmp_path / "verdict.json").read_text())["eval_opponent"] == "search"
+
+
+def test_a_verdict_cannot_be_written_without_naming_the_reward_it_counted(
+        tmp_path, world):
+    """The scale clause, which the metrics row has had all along and the file
+    that outlives the run did not.
+
+    A lift is a difference of *returns* divided by the control's own spread,
+    so the reward that scored those returns is in the numerator and in the
+    denominator both. That is not hypothetical here: every offline script on
+    this machine -- ``evaluate_checkpoints.py``, ``measure_expert.py``,
+    ``evaluate_vs_expert.py``, ``run_ladder.py``'s arms -- builds
+    ``CRSimEnv`` with no ``reward_weights`` and measures under
+    ``simple:shaping=0.01``, while ``cr_sim.train.run.EVAL_REWARD`` pins the
+    in-run probe to ``projected:tower=1,elixir=0.3,horizon_seconds=3``. The
+    expert's anchor and a training run's lift have never been on one scale,
+    and until now the only record of that was a metrics-row field that no
+    verdict wrote and nothing read.
+
+    ``check_lift_is_named`` refuses a row carrying ``eval_lift_sd`` without
+    ``eval_reward``; this is the identical refusal on ``verdict.json``.
+    """
+    from cr_sim.train.evaluate import (
+        evaluate_paired, evaluation_seeds, write_verdict,
+    )
+    from cr_sim.train.nets import ActorCritic, net_config_for
+
+    # Named opponent, no scale: refused, and nothing reaches the disk.
+    with pytest.raises(ValueError, match="eval_reward"):
+        write_verdict(tmp_path / "verdict.json",
+                      {"episodes": 40, "lift": 0.42, "eval_opponent": "random"})
+    assert not (tmp_path / "verdict.json").exists()
+
+    # The nested shape is a lift too. evaluate_paired writes greedy/sampled
+    # sub-dicts and flattens only the better one, so a verdict trimmed to one
+    # arm can reach the file with no top-level "lift" at all.
+    with pytest.raises(ValueError, match="eval_reward"):
+        write_verdict(tmp_path / "verdict.json",
+                      {"eval_opponent": "random", "greedy": {"lift": 0.42}})
+
+    # A rating is not a lift and is not asked for a reward: Elo is fitted on
+    # crowns, which no reward touches. This must still write.
+    write_verdict(tmp_path / "verdict.json",
+                  {"eval_opponent": "ladder", "ladder_elo": 604.0})
+
+    # And the field is produced, not left to the caller: evaluate_paired reads
+    # it off the environment the control actually played in, the way it
+    # already reads eval_opponent, so a caller cannot label a measurement with
+    # a scale it was not taken on.
+    seeds = evaluation_seeds(2, block=0)
+    probe = _tiny(world, opponent_policy=_cheap_expert())
+    probe.reset(seed=0)
+    net = ActorCritic(net_config_for(probe))
+    net.eval()
+    verdict = evaluate_paired(
+        lambda: _tiny(world, opponent_policy=_cheap_expert()),
+        net, episodes=2, seeds=seeds, modes=("greedy",))
+    # The weight tuple, not the variant name: "projected" alone does not
+    # identify a scale, and the same variant at tower=1.0 and tower=0.0 gives
+    # returns an order of magnitude apart.
+    assert verdict["eval_reward"] == "simple:shaping=0.01"
+    write_verdict(tmp_path / "paired.json", verdict)
+    assert json.loads((tmp_path / "paired.json").read_text(
+        encoding="utf-8"))["eval_reward"] == "simple:shaping=0.01"
 
 
 def test_an_evaluation_against_the_expert_runs_and_reports_both_ways_of_playing(world):
@@ -497,8 +562,10 @@ def test_a_frozen_opponent_can_be_named_and_can_play_the_argmax(world, tmp_path)
     assert opponent_name(_env(world, opponent_policy=named)) == "pool:gen3"
     # And a verdict carrying that name is now writable at all, which it was
     # not: write_verdict refuses one with no eval_opponent.
-    written = write_verdict(tmp_path / "verdict.json",
-                            {"lift": 0.4, "eval_opponent": named.opponent_name})
+    written = write_verdict(
+        tmp_path / "verdict.json",
+        {"lift": 0.4, "eval_opponent": named.opponent_name,
+         "eval_reward": "simple:shaping=0.01"})
     assert written["eval_opponent"] == "pool:gen3"
 
     torch.manual_seed(0)

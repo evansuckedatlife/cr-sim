@@ -20,7 +20,7 @@ from cr_sim.data.source import LogicData
 from cr_sim.train.evaluate import evaluate
 from cr_sim.train.nets import ActorCritic, net_config_for
 from cr_sim.train.run import DEFAULT_BUILD, DEFAULT_DECK, _random_opponent
-from cr_sim.train.selfplay import opponent_name
+from cr_sim.train.selfplay import opponent_name, reward_name
 
 p = argparse.ArgumentParser()
 p.add_argument("checkpoints", nargs="+")
@@ -103,7 +103,20 @@ for path in args.checkpoints:
                      "loss": float(np.mean(crowns < 0)),
                      "lift": float(lift), "ci_low": float(low),
                      "ci_high": float(high), "episodes": args.episodes,
-                     "eval_opponent": opponent_name(env)})
+                     "eval_opponent": opponent_name(env),
+                     # And the unit, off the same environment. A lift is a
+                     # difference of returns over the control's own spread,
+                     # so both halves are denominated in whatever reward
+                     # scored them -- and the arms in runs/_anchor/*.json are
+                     # the only records on this machine that already pair a
+                     # lift with the opponent that produced it. They should
+                     # pair it with the scale too: cr_sim.train.run's in-run
+                     # probe is on projected:tower=1,elixir=0.3,
+                     # horizon_seconds=3 while this is on
+                     # simple:shaping=0.01, and nothing in either file said
+                     # so. Recorded after the battles, and it touches no
+                     # generator, so every number above is unchanged.
+                     "eval_reward": reward_name(env)})
 
 if args.out:
     # After the battles, not before. Losing a twenty-minute evaluation to a

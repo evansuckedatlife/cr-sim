@@ -1892,11 +1892,12 @@ def test_a_page_with_no_paired_verdict_draws_no_scatter():
 # ---------------------------------------------------------- the matched pair
 
 
-def _ab_run(readings, opponent="random", control=0.2, episodes=40):
+def _ab_run(readings, opponent="random", control=0.2, episodes=40, reward=None):
     """Rows for one arm of a matched pair, from (update, steps, lift) triples."""
+    scale = {"eval_reward": reward} if reward else {}
     return [_row(update, steps, eval_lift_sd=lift, eval_win=0.5,
                  control_win=control, eval_opponent=opponent,
-                 eval_episodes=episodes)
+                 eval_episodes=episodes, **scale)
             for update, steps, lift in readings]
 
 
@@ -3770,3 +3771,214 @@ def test_the_run_tab_shows_both_arms_of_a_row_that_holds_two():
     _page, payload = render_multi([("probe", plain, True)])
     assert payload["runs"]["probe"]["series"]["lift_greedy"] == []
     assert payload["runs"]["probe"]["summary"]["modes_recorded"] is False
+
+# ------------------------------------------------ the other half of a scale
+
+
+_SIMPLE = "simple:shaping=0.01"
+_PROJECTED = "projected:elixir=0.3,horizon_seconds=3,tower=1"
+
+
+def test_two_readings_under_two_rewards_are_not_on_one_scale():
+    """This module contained the string "reward" zero times in 4,643 lines.
+
+    ``_same_scale`` defined "same scale" as *same opponent*, and nothing else.
+    But a lift is a difference of *returns* divided by the control's own
+    spread, so the reward that scored those returns is in the numerator and
+    in the denominator both -- and the two halves of this project are on two
+    different ones right now. Every offline script here builds ``CRSimEnv``
+    with no ``reward_weights`` and measures under ``simple:shaping=0.01``,
+    while ``cr_sim.train.run.EVAL_REWARD`` pins the in-run probe to
+    ``projected:tower=1,elixir=0.3,horizon_seconds=3``. Two runs on those two
+    scales agreed on their opponent, their control rate, their battle count
+    and their play mode, and so passed every clause in this file.
+
+    The three answers, and all three are needed: False where both say what
+    they counted and disagree, None where only one says, True where they
+    agree.
+    """
+    from cr_sim.train.watch import _same_scale, _scale_of
+
+    simple = _scale_of(0.26, opponent="random", reward=_SIMPLE)
+    projected = _scale_of(0.26, opponent="random", reward=_PROJECTED)
+    silent = _scale_of(0.26, opponent="random")
+
+    assert simple["reward"] == _SIMPLE
+    # Recorded, never inferred: no control rate identifies a reward the way
+    # 0.26 identifies the random opponent.
+    assert silent["reward"] is None
+
+    assert _same_scale(simple, projected) is False
+    assert _same_scale(simple, _scale_of(0.26, opponent="random",
+                                        reward=_SIMPLE)) is True
+    # One says what it counted and the other does not. Not a soft yes: the
+    # silent reading may be on either scale, and drawing it beside this one
+    # asserts which.
+    assert _same_scale(simple, silent) is None
+    assert _same_scale(silent, simple) is None
+    # And two silent readings behave exactly as they did before this clause,
+    # which is what keeps every run already on disk readable.
+    assert _same_scale(silent, _scale_of(0.26, opponent="random")) is True
+
+
+def test_two_runs_measured_under_two_rewards_are_never_paired():
+    """The A/B panel subtracts one run's readings from another's at equal
+    update index.
+
+    These two agree on opponent, control rate, battle count, play mode and
+    all but one config key -- every clause the gate had -- and differ only in
+    what their returns were counted in. Subtracting them produces a number in
+    no unit at all, drawn as a curve with a mean and a standard error under
+    it.
+    """
+    left = _ab_run([(3, 3000, 1.0), (6, 6000, 1.2), (9, 9000, 1.4)],
+                   reward=_SIMPLE)
+    right = _ab_run([(3, 3000, 0.6), (6, 6000, 0.7), (9, 9000, 0.8)],
+                    reward=_PROJECTED)
+    crossed = render_multi([("arm-a", left, True), ("arm-b", right, False)],
+                           configs=_AB_CONFIGS)[1]["alltime"]["ab"]
+    assert crossed is None, "two reward scales were subtracted from each other"
+
+    # The identical fixture with one scale pairs, so the refusal is about the
+    # evidence and not about the rows.
+    same = _ab_run([(3, 3000, 0.6), (6, 6000, 0.7), (9, 9000, 0.8)],
+                   reward=_SIMPLE)
+    agreed = render_multi([("arm-a", left, True), ("arm-b", same, False)],
+                          configs=_AB_CONFIGS)[1]["alltime"]["ab"]
+    assert agreed is not None
+    assert agreed["scale"]["reward"] == _SIMPLE
+
+    # And a run whose own readings are on two scales is not an arm of
+    # anything, however well it matches its partner.
+    #
+    # Asserted against a partner on *each* of the two scales, and that is the
+    # load-bearing part. Replacing the one-reward gate with "label the run
+    # with whichever of its rewards the set yields first" left a single
+    # assertion here green: the label came out as the scale the partner did
+    # not share, and the refusal arrived from the clause about one side
+    # recording and the other not, over a run that recorded both. Two
+    # partners means no implementation that picks one of the two can pass.
+    mixed = (_ab_run([(3, 3000, 0.6), (6, 6000, 0.7)], reward=_SIMPLE)
+             + _ab_run([(9, 9000, 0.8)], reward=_PROJECTED))
+    on_projected = _ab_run([(3, 3000, 1.0), (6, 6000, 1.2), (9, 9000, 1.4)],
+                           reward=_PROJECTED)
+    for partner in (left, on_projected):
+        assert render_multi([("arm-a", partner, True), ("arm-b", mixed, False)],
+                            configs=_AB_CONFIGS)[1]["alltime"]["ab"] is None
+
+
+def test_one_control_rate_and_two_rewards_are_two_cards():
+    """The grouped view ranks the runs inside a card and never across cards.
+
+    Two readings against the same random control under two rewards share a
+    control rate, so they landed in one card and were ranked against each
+    other -- the +2.1 of a projected-scale reading over the +0.5 of a
+    simple-scale one, presented as one policy beating another.
+    """
+    _page, payload = render_multi([
+        ("old-scale", [_row(1, 1000, eval_lift_sd=0.5, control_win=0.26,
+                            eval_opponent="random", eval_reward=_SIMPLE)], False),
+        ("new-scale", [_row(1, 1000, eval_lift_sd=2.1, control_win=0.26,
+                            eval_opponent="random",
+                            eval_reward=_PROJECTED)], False),
+    ])
+    groups = payload["alltime"]["groups"]
+
+    assert len(groups) == 2, "two reward scales were ranked in one card"
+    scales = sorted(g["scale"]["reward"] for g in groups)
+    assert scales == sorted((_PROJECTED, _SIMPLE))
+    assert all(g["scale"]["opponent"] == "random" for g in groups)
+    assert all(len(g["runs"]) == 1 for g in groups), (
+        "the two runs were still gathered together")
+
+
+@needs_node
+def test_the_chip_beside_a_lift_says_what_the_lift_was_counted_in():
+    """``scaleChip`` is the one place every scale label on the page is built,
+    and it named the opponent and stopped there.
+
+    So a reading measured under ``simple:shaping=0.01`` and one measured
+    under ``projected:tower=1,elixir=0.3,horizon_seconds=3`` were drawn with
+    the identical chip -- "vs random (recorded)" -- directly beside each
+    other's numbers. Evaluated through the page's own function rather than by
+    searching the markup: the payload JSON is embedded in the page, so both
+    strings appear in the source whether or not anything renders them, and
+    asserting on their presence is the vacuous test this project keeps
+    producing.
+    """
+    rows = [_row(1, 1000, eval_lift_sd=0.5, control_win=0.26,
+                 eval_opponent="random", eval_reward=_SIMPLE)]
+    simple = _call(rows, "scaleChip({named:'random',reward:'" + _SIMPLE
+                   + "'}).text")
+    projected = _call(rows, "scaleChip({named:'random',reward:'" + _PROJECTED
+                      + "'}).text")
+
+    assert simple != projected, (
+        "two lifts in different units were labelled identically")
+    assert _SIMPLE in simple and _PROJECTED in projected
+    # The opponent clause is untouched: the unit is added to it, not swapped
+    # in for it.
+    assert simple.startswith("vs random (recorded)")
+
+    # And a reading that does not say what it counted is drawn as not saying,
+    # never as sharing whatever the reading beside it counted.
+    silent = _call(rows, "scaleChip({named:'random'}).text")
+    assert silent == "vs random (recorded)"
+
+
+def test_a_runs_best_lift_is_withheld_where_its_readings_are_not_one_number():
+    """``summarise`` took ``max`` over every ``eval_lift_sd`` on the run.
+
+    The page draws that as "best +X at N steps" beside the latest reading. A
+    maximum over readings in two units picks the unit, not the checkpoint.
+    """
+    from cr_sim.train.watch import summarise
+
+    one = [_row(u, u * 1000, eval_lift_sd=v, eval_opponent="random",
+                eval_reward=_SIMPLE)
+           for u, v in ((1, 0.2), (2, 0.9), (3, 0.4))]
+    assert summarise(one)["best_lift"] == 0.9
+    assert summarise(one)["one_lift_scale"] is True
+
+    mixed = one + [_row(4, 4000, eval_lift_sd=2.1, eval_opponent="random",
+                        eval_reward=_PROJECTED)]
+    summary = summarise(mixed)
+    assert summary["best_lift"] is None and summary["best_at_steps"] is None
+    assert summary["one_lift_scale"] is False
+    # The readings are still counted: a run that measured itself four times
+    # is not an unevaluated run.
+    assert summary["evaluations"] == 4
+    assert summary["latest_lift"] == 2.1
+    assert {s["reward"] for s in summary["lift_scales"]} == {_SIMPLE, _PROJECTED}
+
+    # Every run already on disk records no eval_reward at all, so it has one
+    # (absent) scale and summarises exactly as it did before.
+    legacy = [_row(u, u * 1000, eval_lift_sd=v) for u, v in ((1, 0.2), (2, 0.9))]
+    assert summarise(legacy)["best_lift"] == 0.9
+
+
+def test_a_ratings_table_a_probe_was_pinned_against_reaches_the_page():
+    """``ladder_ratings_source`` is written by ``ladder_probe`` and read by
+    nothing.
+
+    An Elo is only a number relative to what the fit held fixed, and
+    ``ladder_pinned`` says what that was -- but two probes pinned from two
+    different offline ladders can carry pins that merely happen to agree in
+    shape. The file the pins came out of is the thing that identifies the
+    scale, and the row has carried it since the probe started writing it.
+    """
+    from cr_sim.train.watch import summarise
+
+    rows = [_ladder_row(u, u * 1000, elo,
+                        ladder_pinned={"random": 0.0, "expert": 604.0},
+                        ladder_ratings_source="runs/agent-expert-rating/ladder.json")
+            for u, elo in ((1, 300.0), (2, 420.0))]
+    summary = summarise(rows)
+    assert summary["latest_elo"] == 420.0
+    assert summary["ladder_ratings_source"] == \
+        "runs/agent-expert-rating/ladder.json"
+
+    # A probe with no table behind it says so rather than reporting a source
+    # it does not have.
+    bare = [_ladder_row(1, 1000, 300.0, ladder_pinned={"random": 0.0})]
+    assert summarise(bare)["ladder_ratings_source"] is None

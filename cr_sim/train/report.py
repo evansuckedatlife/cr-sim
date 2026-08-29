@@ -70,7 +70,32 @@ def collect(runs_dir: Path) -> list[dict[str, Any]]:
             continue
         by_update = {r.get("updates", i): r for i, r in enumerate(rows)}
         rows = [by_update[k] for k in sorted(by_update)]
-        evaluations = [r["eval_lift_sd"] for r in rows if "eval_lift_sd" in r]
+        # The scale every lift on this run was measured on, read off the rows
+        # rather than off the run's --reward flag. Those are different
+        # things: cr_sim.train.run pins its probe to EVAL_REWARD whatever
+        # --reward was, and the offline scripts measure under
+        # simple:shaping=0.01, so the config's "reward" names the *training*
+        # variant and says nothing about the unit these numbers are in.
+        #
+        # A run can hold more than one. `max(evaluations)` over a mixed run
+        # returns whichever scale happens to produce the largest float, which
+        # is a comparison between units -- the identical mistake
+        # `eval_opponent` already refuses, one axis over.
+        scales: list[tuple[str | None, str | None]] = []
+        for row in rows:
+            if "eval_lift_sd" not in row:
+                continue
+            key = (str(row.get("eval_opponent") or "") or None,
+                   str(row.get("eval_reward") or "") or None)
+            if key not in scales:
+                scales.append(key)
+        one_scale = len(scales) <= 1
+        evaluations = ([r["eval_lift_sd"] for r in rows if "eval_lift_sd" in r]
+                       if one_scale else [])
+        # Kept whole even where the aggregates are withheld, so the page can
+        # say how many readings it is declining to average rather than
+        # rendering the run as unevaluated.
+        readings = [r["eval_lift_sd"] for r in rows if "eval_lift_sd" in r]
         # The rating family, read separately and never merged into the lift
         # above it: they are different scales. A --probe ladder run writes
         # only these, and selecting evaluations on the lift alone rendered
@@ -78,6 +103,13 @@ def collect(runs_dir: Path) -> list[dict[str, Any]]:
         ladder = [r["ladder_elo"] for r in rows if "ladder_elo" in r]
         pinned = ([r["ladder_pinned"] for r in rows if r.get("ladder_pinned")]
                   or [None])[-1]
+        # Which fitted table those pins came out of. Two probes pinned from
+        # two offline ladders can carry pins that merely agree in shape, and
+        # the rating is only a number relative to what the fit held fixed --
+        # so the file is what identifies the scale. ladder_probe has written
+        # this since it landed and nothing read it.
+        ratings_source = ([r["ladder_ratings_source"] for r in rows
+                           if r.get("ladder_ratings_source")] or [None])[-1]
         variance = [r["explained_variance"] for r in rows if "explained_variance" in r]
         config = _config(run)
         found.append(
@@ -87,13 +119,19 @@ def collect(runs_dir: Path) -> list[dict[str, Any]]:
                 "summary": summarise(rows),
                 "config": config,
                 "verdict": _verdict(run),
-                "evaluations": evaluations,
+                "evaluations": readings,
+                # Absent rather than wrong where the run mixed scales. Both
+                # of these used to be taken over every eval_lift_sd on the
+                # run regardless of what produced it.
                 "mean_lift": statistics.fmean(evaluations) if evaluations else None,
                 "best_lift": max(evaluations) if evaluations else None,
+                "lift_scales": [_scale_label(o, w) for o, w in scales],
+                "one_scale": one_scale,
                 "ladder_elo": ladder,
                 "latest_elo": ladder[-1] if ladder else None,
                 "best_elo": max(ladder) if ladder else None,
                 "ladder_pinned": pinned,
+                "ladder_ratings_source": ratings_source,
                 # Split in half rather than fitted: with fewer than twenty
                 # readings a slope is mostly noise, and "did the second half
                 # beat the first" is the honest version of the same question.
@@ -116,10 +154,44 @@ def collect(runs_dir: Path) -> list[dict[str, Any]]:
     return found
 
 
+def _scale_label(opponent: "str | None", reward: "str | None") -> str:
+    """One reading's scale as a single string: who was played, and in what unit.
+
+    Both halves, always. A lift is a difference of returns over the control's
+    spread, so the opponent decides which battles were played and the reward
+    decides what the returns were counted in -- and two lifts that agree on
+    one and differ on the other are no more comparable than two that differ
+    on both.
+    """
+    return f"{opponent or 'an unnamed opponent'} / {reward or 'an unrecorded reward'}"
+
+
 def _verdict_of(record: dict[str, Any]) -> tuple[str, str, str]:
     """A chip class, a label, and the sentence under it."""
+    from .watch import _plottable
+
     verdict = record["verdict"]
-    if verdict is not None:
+    # A ladder writes a verdict too, and it is a *rating*. Five of the fifteen
+    # verdicts on this machine carry `ladder_elo` and no lift at all, and this
+    # function indexed `verdict["ci_low"]` unconditionally -- so
+    # `python -m cr_sim.train.report` raises KeyError on the whole directory
+    # and no comparison page can be generated at all while a ladder run is
+    # present. The metric that was built to replace the lift is the one that
+    # broke the page that reads it.
+    #
+    # The other two ladder verdicts do carry a lift, and it is worse than
+    # absent: it is one arm's number against the random control, flattened in
+    # beside a whole-graph Elo under `eval_opponent: "ladder"`. Rendered
+    # through the branch below that reads +1.732 sd "against ladder" -- a
+    # number measured against random, on a player the top-level fields do not
+    # name. write_verdict refuses such a file today unless it says
+    # `lift_player` and `lift_opponent`; these two predate that and say
+    # neither. So a verdict carrying a rating is reported as a rating, and its
+    # lift is left to arms.json where every arm keeps its own eval_opponent.
+    rated = _plottable(verdict.get("ladder_elo")) if verdict else False
+    has_lift = bool(verdict) and all(
+        _plottable(verdict.get(k)) for k in ("lift", "ci_low", "ci_high"))
+    if verdict is not None and has_lift and not rated:
         lo, hi = verdict["ci_low"], verdict["ci_high"]
         # Named, never assumed. These chips used to read "beats random"
         # whatever the verdict was measured against, and a run evaluated
@@ -131,7 +203,16 @@ def _verdict_of(record: dict[str, Any]) -> tuple[str, str, str]:
         # of invalid comparisons. write_verdict refuses to record a lift
         # without eval_opponent; this is the reading half of that guard.
         foe = verdict.get("eval_opponent") or "an unnamed opponent"
-        where = f"{verdict['episodes']} paired battles against {foe}"
+        # And the unit. write_verdict now refuses a verdict carrying a lift
+        # with no eval_reward, for the same reason it refuses one with no
+        # eval_opponent -- a lift is a difference of returns over the
+        # control's spread, so the reward is in the numerator and the
+        # denominator both -- and this is the reading half of that guard. The
+        # seven verdicts already on disk carry neither and say so.
+        unit = verdict.get("eval_reward") or "an unrecorded reward"
+        battles = verdict.get("episodes")
+        where = (f"{battles} paired battles against {foe}, "
+                 f"scored under {unit},")
         if lo > 0:
             return ("good", f"beats {foe}",
                     f"{where} put the lift at "
@@ -147,22 +228,48 @@ def _verdict_of(record: dict[str, Any]) -> tuple[str, str, str]:
                 f"[{lo:+.3f}, {hi:+.3f}] contains zero.")
     mean = record["mean_lift"]
     ladder = record.get("ladder_elo") or []
+    if not ladder and rated:
+        # An offline ladder writes its rating to the verdict and its rows
+        # carry the per-player ratings; a directory holding only the verdict
+        # is still a rated run and not an unevaluated one.
+        ladder = [verdict["ladder_elo"]]
     if mean is None and ladder:
         # A rating, reported as a rating. This run measured itself and the
         # page used to call it never evaluated, because every selector here
         # keyed on eval_lift_sd and a --probe ladder run writes none.
-        pinned = record.get("ladder_pinned") or {}
+        pinned = (record.get("ladder_pinned")
+                  or (verdict or {}).get("ladder_pinned") or {})
         anchor, at = (max(pinned.items(), key=lambda kv: kv[1])
                       if pinned else ("the anchors", 0.0))
         latest = ladder[-1]
+        # And which table the pins came from. Two runs pinned from two
+        # different offline ladders are on two scales, and the pins alone
+        # cannot say so -- they are the same field with the same shape.
+        source = record.get("ladder_ratings_source")
+        against = (f"{anchor} pinned at {at:+.0f} by {source}" if source
+                   else f"{anchor} pinned at {at:+.0f}, from no recorded "
+                        "ratings table")
         sentence = (
             f"{len(ladder)} ladder readings put the latest rating at "
-            f"{latest:+.0f} Elo, against {anchor} pinned at {at:+.0f}. An Elo "
+            f"{latest:+.0f} Elo, against {against}. An Elo "
             "is not a lift; the two are unrelated scales and must not be "
             "plotted on one axis.")
         if latest > at:
             return ("good", f"rated above {anchor}", sentence)
         return ("warn", f"rated below {anchor}", sentence)
+    if mean is None and record["evaluations"]:
+        # Measured, and on more than one scale. Falling through to "never
+        # evaluated" here would repeat, one scale down, exactly the bug the
+        # ladder branch above fixes: a run that measured itself reported as
+        # one that did not, because the summary this module wanted could not
+        # be computed. The readings exist; what is missing is a single unit
+        # to average them in.
+        scales = "; ".join(record.get("lift_scales") or [])
+        return ("warn", "measured on two scales",
+                f"{len(record['evaluations'])} readings, and not all on one "
+                f"scale -- {scales}. No mean or best is given, because a "
+                "lift is a difference of returns over the control's own "
+                "spread and an average across two units is not a number.")
     if mean is None:
         return ("dim", "never evaluated",
                 "This run recorded no evaluations, so nothing here says "
@@ -186,6 +293,28 @@ def _fmt(value: Any, spec: str = ".3f", plus: bool = False) -> str:
     return str(value)
 
 
+def _reward_cell(record: dict[str, Any], config: dict[str, Any]) -> str:
+    """The Reward column: the training variant, and the unit the lifts are in.
+
+    ``config["reward"]`` alone is the *training* reward's variant name, and it
+    is neither of the two things a reader of the two lift columns beside it
+    needs. It is not the scale -- ``cr_sim.train.run`` pins its probe to
+    ``EVAL_REWARD`` whatever ``--reward`` was, and every offline script here
+    measures under ``simple:shaping=0.01`` -- and it is not even the weights,
+    since the same variant at ``tower=1`` and at ``tower=0`` gives returns an
+    order of magnitude apart and an annealed run passes through both. So a
+    run trained on ``projected`` and measured on ``simple:shaping=0.01``
+    rendered identically to one measured on
+    ``projected:tower=1,elixir=0.3,horizon_seconds=3``, with their lifts in
+    the same column.
+    """
+    trained = str(config.get("reward", "") or "") or "&mdash;"
+    measured = [str(x) for x in record.get("lift_scales") or []]
+    if not measured:
+        return trained
+    return f"{trained} &middot; measured on {' and '.join(measured)}"
+
+
 def render_index(records: Sequence[dict[str, Any]]) -> str:
     """The comparison page."""
     rows = []
@@ -198,7 +327,7 @@ def render_index(records: Sequence[dict[str, Any]]) -> str:
             f'<td><span class="chip {cls}">{label}</span></td>'
             f'<td class="n">{s.get("steps", 0):,}</td>'
             f'<td class="n">{s.get("episodes", 0):,}</td>'
-            f'<td>{c.get("reward", "&mdash;")}</td>'
+            f'<td>{_reward_cell(r, c)}</td>'
             f'<td>{c.get("opponent", "&mdash;")}</td>'
             f'<td class="n">{c.get("frame_skip", "&mdash;")}</td>'
             f'<td class="n">{_fmt(r["mean_lift"], plus=True)}</td>'
@@ -219,6 +348,17 @@ def render_index(records: Sequence[dict[str, Any]]) -> str:
                 f"first half of the run to {r['late_lift']:+.3f} over the "
                 "second.</p>"
             )
+        mixed = ""
+        if not r.get("one_scale", True):
+            mixed = (
+                f"<p>This run’s {len(r['evaluations'])} readings were not "
+                "all measured on one scale &mdash; "
+                + "; ".join(r["lift_scales"]) +
+                " &mdash; so no mean or best is given for them. A lift is a "
+                "difference of returns over the control&rsquo;s own spread, "
+                "and a maximum taken across two units is a comparison "
+                "between the units.</p>"
+            )
         entropy = ""
         if r["entropy_from"] is not None and r["entropy_to"] is not None:
             entropy = (
@@ -230,7 +370,7 @@ def render_index(records: Sequence[dict[str, Any]]) -> str:
             f'<div class="card {cls}">'
             f'<div class="card-top"><h3><a href="{r["name"]}.html">{r["name"]}</a></h3>'
             f'<span class="chip {cls}">{label}</span></div>'
-            f"<p>{sentence}</p>{trend}{entropy}"
+            f"<p>{sentence}</p>{mixed}{trend}{entropy}"
             f'<div class="settings">'
             f'<span>{s.get("steps", 0):,} decisions</span>'
             f'<span>{s.get("episodes", 0):,} matches</span>'

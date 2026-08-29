@@ -63,9 +63,23 @@ two lifts on one axis without establishing they share a control.
 Related, and equally load-bearing:
 
 - **Greedy and sampled are two different policies.** Report them separately.
-  Greedy reproduces bit-identically run to run; sampled carries roughly
-  ±0.02–0.04 sd of spread from its own sampling, so any sampled comparison
-  closer than about 0.04 sd is measuring the random number generator.
+  Greedy reproduces bit-identically run to run — exact float equality, and
+  `runs/sampled-noise-floor/noise.json` has the same lift twice to sixteen
+  digits. Sampled carries **0.062 sd** of spread from its own sampling: one
+  checkpoint, four independent streams, the same 150 battles and the same
+  control gave +0.8327 / +0.9232 / +0.9642 / +0.8488. So two sampled runs can
+  differ by **0.17 sd** at 95%, and any sampled comparison closer than that is
+  measuring the random number generator. The ±0.02–0.04 figure this line used
+  to carry came from three uncontrolled readings and is about four times too
+  small; `cr_sim/train/evaluate.py` says so in the source. Anything sized off
+  it — battle counts especially — is off by 4x.
+- **A lift also needs the reward it was counted in.** It is a difference of
+  *returns* over the control’s own spread, so the reward is in the numerator
+  and the denominator both. The offline scripts here measure under
+  `simple:shaping=0.01`; `run.EVAL_REWARD` pins the in-run probe to
+  `projected:tower=1,elixir=0.3,horizon_seconds=3`. `check_lift_is_named` and
+  `write_verdict` both refuse a lift with no `eval_reward`. A rating does not
+  need one — Elo is fitted on crowns, which no reward touches.
 - **Agreement with the expert does not track winning.** Two heads matched the
   expert's tile 4.8% and 5.1% of the time while winning 85% and 96% of their
   games. Never rank policies by held-out agreement.

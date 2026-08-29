@@ -170,6 +170,74 @@ def test_a_mirrored_pairing_of_identical_nets_scores_exactly_one_half(
     assert pairing.forward.score == pairing.reverse.score
 
 
+def test_a_direction_scores_the_side_the_environment_controls(world, net):
+    """The crowns a direction records are the *controlled* side's, in either
+    colour.
+
+    ``_play_direction`` reads ``info[f"{env.team.name.lower()}_crowns"]``, and
+    every ladder fixture and every ladder run on this machine builds a
+    ``team=BLUE`` environment -- so that expression is a constant, and the
+    line is correct by accident rather than by test. Applying the exact
+    mutation that was a live bug one module over
+    (``evaluate.py``'s ``info["blue_crowns"] - info["red_crowns"]``) to
+    ``_play_direction`` left the whole ladder suite green.
+
+    That is this codebase's signature failure shape: the invariant is tested
+    one level below where it can break. ``tests/test_measurement.py``
+    already holds ``evaluate()`` to it; nothing held the ladder to it. The
+    moment anybody builds a ``team=RED`` ladder environment -- which is the
+    obvious way to try to balance colour without paying for the mirror -- a
+    hardcoded-blue crowns line reports every result with its sign flipped,
+    silently, and a rating fitted on it ranks the field upside down.
+
+    Ground truth here is the battle itself, not the direction's own tally:
+    ``wins``/``losses``/``score`` are all derived from ``crowns``, so
+    checking them against each other would pass over any sign error. The
+    factory keeps the environments it builds, and the last battle each one
+    played is compared against what the direction wrote down.
+    """
+    data, levels, registry = world
+    built: list[CRSimEnv] = []
+
+    def red_env(opponent=None) -> CRSimEnv:
+        env = CRSimEnv(data, levels, registry, DECK, DECK,
+                       ticks_per_second=20, frame_skip=40, max_ticks=20 * 40,
+                       tower_level=5, team=Team.RED, opponent_policy=opponent)
+        built.append(env)
+        return env
+
+    def truth(env: CRSimEnv) -> int:
+        """What the environment's controlled side actually finished on."""
+        return (env.battle.players[env.team].crowns
+                - env.battle.players[env.team.opponent].crowns)
+
+    a = Player(name="alpha", kind="net", net=net)
+    b = Player(name="beta", kind="random")
+
+    recorded, actual = [], []
+    # One seed at a time, so the environment each direction leaves behind is
+    # the battle whose crowns are being checked rather than the last of a
+    # list. Seed 1 is decisive in both directions and in both signs; 7 and 9
+    # are decisive for the controlled side.
+    for seed in (1, 7, 9):
+        built.clear()
+        pairing = play_pairing(red_env, a, b, seeds=[seed], mode="greedy")
+        # built[0] is play_pairing's shape probe, then forward, then reverse.
+        forward_env, reverse_env = built[1], built[2]
+        assert forward_env.team is Team.RED and reverse_env.team is Team.RED
+        recorded += [pairing.forward.crowns[0], pairing.reverse.crowns[0]]
+        actual += [truth(forward_env), truth(reverse_env)]
+
+    # Decisive on purpose: every battle drawn would make the sign
+    # unobservable and leave this green over a hardcoded colour.
+    assert any(c != 0 for c in actual)
+    # And in both signs, so the claim is not "the controlled side always
+    # wins" -- which a mutation could satisfy by flipping the subtraction on
+    # a set of battles the same player wins either way.
+    assert min(actual) < 0 < max(actual)
+    assert recorded == actual
+
+
 def test_a_greedy_pairing_reproduces_bit_identically(make_env, net):
     """Exact float equality, run to run, which is the whole point of greedy.
 
@@ -710,6 +778,7 @@ def test_the_offline_ladder_never_writes_a_lift_it_cannot_name(
     with pytest.raises(ValueError, match="lift_player"):
         write_verdict(tmp_path / "bad.json", {
             "eval_opponent": "ladder", "ladder_elo": 419.4,
+            "eval_reward": "simple:shaping=0.01",
             "ladder_player": "headablate-factored", "lift": 0.781})
 
 

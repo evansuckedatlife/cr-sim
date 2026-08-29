@@ -56,7 +56,7 @@ from cr_sim.train.ladder import (
 )
 from cr_sim.train.proposal import check_equal_branch_budget
 from cr_sim.train.run import DEFAULT_BUILD, DEFAULT_DECK, _random_opponent
-from cr_sim.train.selfplay import check_lift_is_named
+from cr_sim.train.selfplay import check_lift_is_named, reward_name
 
 #: Rebuilt per worker process rather than shipped across the pickle boundary.
 _WORLD: dict = {}
@@ -357,6 +357,12 @@ def main(argv: list[str] | None = None) -> int:
         }))
 
     arms = []
+    # The reward the arms' lifts are denominated in, read off the control
+    # environment that produced them rather than assumed from the flags. A
+    # ladder rating needs none of this -- it is fitted on crowns, which no
+    # reward touches -- but arms.json is the bridge back to the historical
+    # scale, and a bridge has to say which bank it lands on.
+    arm_scale = ""
     if not args.no_arms:
         print("\nand the same players against the shared random control, on "
               "the same seeds, so these land on the existing scale:",
@@ -369,6 +375,7 @@ def main(argv: list[str] | None = None) -> int:
         for player in entrants + [p for p in anchors if p.kind == "net"]:
             probe = control_env()
             probe.reset(seed=0)
+            arm_scale = reward_name(probe)
             net = load_policy(player.checkpoint, probe)
             verdict = evaluate_paired(control_env, net, episodes=args.episodes,
                                       seeds=seeds, modes=(args.mode,))
@@ -388,6 +395,7 @@ def main(argv: list[str] | None = None) -> int:
                 "ci_high": arm["ci_high"], "win": arm["win"],
                 "loss": arm["loss"], "episodes": args.episodes,
                 "eval_opponent": verdict["eval_opponent"],
+                "eval_reward": verdict["eval_reward"],
                 "elo": ratings[player.name].elo if player.name in ratings else None,
             })
         (out / "arms.json").write_text(json.dumps(arms, indent=2),
@@ -418,6 +426,12 @@ def main(argv: list[str] | None = None) -> int:
     write_verdict(out / "verdict.json", {
         "episodes": args.episodes,
         "eval_opponent": "ladder",
+        # Only where a lift was actually flattened in. An Elo is fitted on
+        # crowns and is reward-free, so naming a reward beside a rating that
+        # no reward produced would be the same fabricated provenance the
+        # guards here exist to refuse -- and write_verdict asks for the field
+        # only when the file carries a lift.
+        **({"eval_reward": arm_scale} if arm_scale else {}),
         "mode": args.mode,
         "seeds": seeds,
         "ladder_opponent_ref": "|".join(sorted(p.ref for p in anchors)),
