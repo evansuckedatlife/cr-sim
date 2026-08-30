@@ -2549,12 +2549,39 @@ _PAGE = r"""<!doctype html>
   --grey:#7C8B9A;
   --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px -14px rgba(0,0,0,.7);
 }
+/* Not colours, so deliberately not in the two theme blocks above: those sets
+   differ from this one only in colour, and a measurement duplicated across
+   all three is a three-place edit the next time one of them moves.
+
+   --measure caps prose, on the prose. The glossary measured 91 characters a
+   line at 78ch on this stack; 72ch lands near 84, and every other block of
+   prose here measured 156 to 174 with no cap at all. --col and --wide cap
+   containers, and the width of a container is a chart question, never a
+   reading-measure one -- which is why one number could not serve both.
+
+   --col is content-derived rather than round: seven readout cells at 168px,
+   two .grid2 charts at 551px, six tiles in one row. --wide belongs to split
+   mode and to the all-time view, because those are the two views that exist
+   to hold things side by side -- two panes at 851px each, each pane wider
+   than the whole single-run column used to be. */
+:root{--measure:72ch;--col:1180px;--wide:1720px}
 *{box-sizing:border-box}
+/* Four longhands rather than the shorthand. `viewport-fit=cover` is declared
+   in the head and only the top inset was ever consumed, so in landscape on a
+   notched phone -- the orientation a wide chart gets read in -- the leftmost
+   readout cell and the ladder track bars sat under the notch. */
 body{background:var(--ground);color:var(--ink);margin:0;
-  padding:env(safe-area-inset-top) 20px 60px;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-right:max(20px,env(safe-area-inset-right,0px));
+  padding-bottom:calc(60px + env(safe-area-inset-bottom,0px));
+  padding-left:max(20px,env(safe-area-inset-left,0px));
   font-family:"Source Sans 3",ui-sans-serif,system-ui,-apple-system,sans-serif;
   font-size:16.5px;line-height:1.55;-webkit-font-smoothing:antialiased}
-.wrap{max-width:1000px;margin:0 auto}
+/* draw() adds .wide for split mode and for the all-time view. Those two were
+   the ones being squeezed hardest: a split pane drew its charts at 457px
+   against a single pane's 966px, on the monitor the comparison was for. */
+.wrap{max-width:var(--col);margin:0 auto}
+.wrap.wide{max-width:var(--wide)}
 h1,h2,h3,.lbl,.v,.kpi-n{font-family:Archivo,ui-sans-serif,system-ui,sans-serif}
 .mono,.v,.kpi-n,td.n,.lbl-s{font-family:"JetBrains Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
 .lbl{font-size:10.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
@@ -2572,6 +2599,17 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .tabbar{display:flex;align-items:flex-end;gap:10px;border-bottom:1px solid var(--rule)}
 .tabs{display:flex;gap:2px;flex:1;overflow-x:auto;scrollbar-width:none;padding-bottom:1px}
 .tabs::-webkit-scrollbar{display:none}
+/* The strip runs to forty times its own width with no scrollbar in either
+   engine, and nothing said it scrolled at all. paintTabs sets these from the
+   measured overflow, and drops each one as that end is reached, so the fade
+   is never a lie about there being more. */
+.tabs.more-l{-webkit-mask-image:linear-gradient(to right,transparent 0,#000 20px);
+  mask-image:linear-gradient(to right,transparent 0,#000 20px)}
+.tabs.more-r{-webkit-mask-image:linear-gradient(to left,transparent 0,#000 20px);
+  mask-image:linear-gradient(to left,transparent 0,#000 20px)}
+.tabs.more-l.more-r{
+  -webkit-mask-image:linear-gradient(to right,transparent 0,#000 20px,#000 calc(100% - 20px),transparent 100%);
+  mask-image:linear-gradient(to right,transparent 0,#000 20px,#000 calc(100% - 20px),transparent 100%)}
 /* Expanded: every run visible at once instead of one scrolling row. With two dozen runs the strip hid most of them behind a scroll gesture that gives no sign there is anything to scroll to. */
 .tabs.expanded{flex-wrap:wrap;overflow:visible;max-height:none;row-gap:3px;padding-bottom:4px}
 .tab{appearance:none;border:1px solid transparent;border-bottom:0;background:none;
@@ -2586,7 +2624,12 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
   font-family:Archivo,sans-serif;font-size:11px;font-weight:600;color:var(--soft);
   padding:6px 11px;cursor:pointer;margin-bottom:7px}
 .split-toggle[aria-pressed="true"]{background:var(--accentw);color:var(--accent);border-color:var(--accent)}
-@media (max-width:700px){.split-toggle{display:none}}
+/* The same number as the 900px at which .panes.split falls back to one
+   column further down, and deliberately the same number rather than one less:
+   that query collapses the split at 900, so at exactly 900 a button hidden
+   only below 899 is still live and still does nothing. At 700 the band where
+   pressing it produced two stacked full-width panes was 200px wide. */
+@media (max-width:900px){.split-toggle{display:none}}
 
 /* Its own class, deliberately not .split-toggle. That class is hidden below
    700px -- correctly, since the split panes collapse to one column at 900px
@@ -2598,7 +2641,7 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
   padding:6px 11px;cursor:pointer;margin-bottom:7px;white-space:nowrap}
 .view-toggle[aria-pressed="true"]{background:var(--accentw);color:var(--accent);border-color:var(--accent)}
 
-.at{margin-top:4px}
+.at{margin-top:4px;container-type:inline-size}
 .at .panel{background:var(--panel);border:1px solid var(--rule);border-radius:3px;
   box-shadow:var(--shadow);padding:14px 16px;margin-top:10px}
 .at .seen{font-size:12.5px;color:var(--muted);padding:9px 12px;background:var(--panel2);
@@ -2618,6 +2661,10 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .at ul.why li{margin:3px 0}
 .at .caption{font-size:12px;color:var(--muted);margin-top:6px;line-height:1.45}
 .at .scroll{overflow-x:auto}
+/* Capped on the element, not on the column. These three measured 156 to 174
+   characters a line inside a 1000px column and would measure 200 inside
+   1180; the column got wider for the charts' sake, not theirs. */
+.at .caption,.at .seen,.lrow .name{max-width:var(--measure)}
 .ladder{margin-top:10px}
 .lrow{padding:7px 0;border-top:1px solid var(--hair)}
 .lrow:first-child{border-top:0}
@@ -2634,10 +2681,10 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
   width:1px;background:var(--ink);opacity:.9}
 .lrow .track u::before{left:0}
 .lrow .track u::after{right:0}
-/* A colour key printed in the DOM at real px beside every hand-rolled SVG in
-   the all-time view. The strokes carry the meaning and a 10px SVG label
-   renders at 5.5px on the phone this page is read on, so the names live
-   here. */
+/* A colour key printed in the DOM at reading size beside every hand-rolled
+   SVG in the all-time view. The strokes carry the meaning, and 10px inside a
+   picture is not reading size on the phone this page is read on however
+   faithfully it is rendered, so the names live here. */
 .at .swatch{display:inline-flex;align-items:center;gap:4px;margin-right:10px;white-space:nowrap}
 .at .swatch i{display:inline-block;width:10px;height:2px;border-radius:1px}
 /* Chips in a hand-rolled chart's heading, on the right of its title, in the
@@ -2660,7 +2707,13 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
    the device it is built for showed the greedy number alone -- including on
    the rows flagged "sign flips", where the hidden half is the other sign.
    Swipeable is not shown. */
-@media (max-width:700px){
+/* @container and not @media, at the same threshold and with the same
+   declarations. `.at` is an inline-size container now, and the moment it
+   grows internal columns -- which the sweep and group panels do below -- a
+   viewport query here would leave this table wide in a half-width column, or
+   stack it in a full-width one. It was right today only because `.at` was
+   always exactly as wide as the window. */
+@container (max-width:700px){
   .ledger.modes thead{position:absolute;left:-9999px}
   .ledger.modes tr{display:block;border-top:1px solid var(--rule);padding:6px 0}
   .ledger.modes td{display:flex;justify-content:space-between;align-items:baseline;
@@ -2687,10 +2740,24 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 
 .panes{display:grid;grid-template-columns:1fr;gap:18px;margin-top:16px}
 .panes.split{grid-template-columns:1fr 1fr}
+/* Stays a viewport query, because it is genuinely a viewport question: can
+   this screen hold two panes at all. Its partner is the 899px above, which
+   hides the button that turns this on. */
 @media (max-width:900px){.panes.split{grid-template-columns:1fr}}
-.pane{min-width:0}
+.pane{min-width:0;container-type:inline-size}
+/* Clamped. The note was 162px of the 315px standing between opening the page
+   and reading the first number on a 390px screen -- the largest single item
+   in that gap. Tapping opens it. `clamped` is set by fillPane only when the
+   text actually overflows, so a short note gets neither a fade nor a cursor
+   promising something to open. */
 .note{font-size:13.5px;line-height:1.5;color:var(--muted);margin:0 0 12px;padding:10px 12px;
-  border-left:2px solid var(--rule);background:rgba(255,255,255,.02);border-radius:0 6px 6px 0;white-space:pre-wrap}
+  border-left:2px solid var(--rule);background:rgba(255,255,255,.02);border-radius:0 6px 6px 0;
+  white-space:pre-wrap;max-width:var(--measure);max-height:4.6em;overflow:hidden;position:relative}
+.note.open{max-height:none}
+.note.clamped{cursor:pointer}
+.note.clamped::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1.7em;
+  background:linear-gradient(to bottom,transparent,var(--ground));pointer-events:none}
+.note.clamped.open::after{content:none}
 .pane-head{display:flex;align-items:center;gap:9px;margin-bottom:10px}
 .pane-head select{font-family:Archivo,sans-serif;font-size:13px;font-weight:600;color:var(--ink);
   background:var(--panel);border:1px solid var(--rule);border-radius:3px;padding:5px 8px}
@@ -2698,11 +2765,16 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .readout{background:var(--panel);border:1px solid var(--rule);border-radius:3px;box-shadow:var(--shadow);overflow:hidden}
 .bar{height:3px;background:var(--hair)}
 .bar i{display:block;height:100%;background:var(--accent)}
-.readout-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr))}
-.cell{padding:13px 15px;border-right:1px solid var(--hair);border-top:1px solid var(--hair)}
-.cell:first-child{border-top:0}
-@media (min-width:760px){.cell{border-top:0}}
-.cell:last-child{border-right:0}
+/* Every cell draws its own top and left hairline and never a right or a
+   bottom one; the grid is pulled one pixel left and .readout already clips,
+   so column zero's left rules fall outside. Every interior boundary then
+   gets exactly one rule at any column count, no cell can draw over the
+   panel's own border, and a short final row simply has no cells and no
+   rules. No query and no positional selector, because neither can know how
+   an auto-fit grid wrapped -- which is what produced a hairline starting
+   111px inside the panel and a doubled border down the first row's right. */
+.readout-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));margin-left:-1px}
+.cell{padding:13px 15px;border-top:1px solid var(--hair);border-left:1px solid var(--hair)}
 .kpi-n{font-size:20px;font-weight:600;letter-spacing:-.02em;display:block;margin-bottom:2px}
 .kpi-n small{font-size:12px;font-weight:400;color:var(--muted)}
 
@@ -2719,8 +2791,10 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .chip.dim{background:var(--hair);color:var(--muted)}
 .hero .best{margin-top:8px;font-size:12.5px;color:var(--muted)}
 
+/* No narrow override: auto-fit already yields two columns at a 445px
+   container, and the viewport stopped predicting this box's width the day
+   split mode landed. */
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:10px}
-@media (max-width:700px){.tiles{grid-template-columns:1fr 1fr}}
 .tile{background:var(--panel);border:1px solid var(--rule);border-radius:3px;padding:12px 14px;box-shadow:var(--shadow)}
 .tile .v{font-size:21px;font-weight:700;letter-spacing:-.02em;margin:5px 0 0;display:block}
 .good{color:var(--good)}.warn{color:var(--warn)}.crit{color:var(--crit)}.dim{color:var(--muted)}
@@ -2732,14 +2806,31 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .chart h3 .read{font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:400;
   color:var(--muted);font-variant-numeric:tabular-nums;text-align:right}
 .chart svg{display:block;width:100%;height:auto;touch-action:pan-y}
+/* The one square picture here -- greedy against sampled, where the diagonal
+   has to be a true 45 degrees, so its viewBox is exactly as tall as it is
+   wide. Capped at the width every other chart declares, because a square
+   tracking a 1720px column would be 1720px tall. Inside the cap the svg is
+   still as wide as its container, so its labels still render at 10px. */
+.chart svg.sq{max-width:640px;margin-left:auto;margin-right:auto}
 .empty{padding:18px;text-align:center;color:var(--muted);font-size:13.5px;background:var(--panel2);border-radius:3px}
 .axis{stroke:var(--rule);stroke-width:1}
 .zero{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3;opacity:.5}
 .grid-l{stroke:var(--hair);stroke-width:1}
 .lbl-s{font:600 10px "JetBrains Mono",monospace;fill:var(--muted)}
 .scrub{stroke:var(--accent);stroke-width:1;opacity:.7}
-.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:10px}
-@media (max-width:700px){.grid2{grid-template-columns:1fr}}
+/* 380 rather than 320, and no query. The query was what manufactured 4.5px
+   axis labels at a 701px viewport; now that a label renders at the size it
+   declares whatever the width, this minimum is only about how many points
+   fit on an axis. */
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:10px}
+/* The two longest panels in the all-time view -- the sweep ladders measure
+   2231px tall at a 1280px viewport and 3086px at 390 -- as two internal
+   columns once the container has the room. @container, so a split pane does
+   not get two columns merely because the monitor is wide. Nothing is
+   reordered and nothing is merged; a family and a card each stay whole. */
+@container (min-width:1000px){
+  .at .sweeps,.at .groups{display:grid;grid-template-columns:1fr 1fr;gap:0 22px;align-items:start}
+}
 h2{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin:26px 0 2px}
 
 details.gloss{margin-top:26px;background:var(--panel);border:1px solid var(--rule);border-radius:3px;box-shadow:var(--shadow)}
@@ -2748,11 +2839,11 @@ details.gloss summary{padding:12px 18px;cursor:pointer;font-family:Archivo,sans-
 details.gloss summary::-webkit-details-marker{color:var(--muted)}
 details.gloss dl{margin:0;padding:0 18px 16px}
 details.gloss dt{font-family:Archivo,sans-serif;font-weight:700;margin-top:14px;font-size:14px}
-details.gloss dd{margin:3px 0 0;color:var(--soft);font-size:13.5px;max-width:78ch}
+details.gloss dd{margin:3px 0 0;color:var(--soft);font-size:13.5px;max-width:var(--measure)}
 code{font-family:"JetBrains Mono",monospace;font-size:.87em;background:var(--accentw);color:var(--accent);padding:1px 4px;border-radius:2px}
 footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--rule);font-size:12px;color:var(--muted)}
 </style></head><body>
-<div class="wrap">
+<div class="wrap" id="wrap">
 
 <header>
   <h1 id="title">cr-sim</h1>
@@ -2852,7 +2943,68 @@ function recall(k,f){try{var v=localStorage.getItem(k);return v===null?f:v;}catc
 
 /* ---------------------------------------------------------------- charts */
 
-var CHARTS = [];   // every drawn chart, so scrubbing can find them
+var CHARTS = [];   // every scrubbable chart, so scrubbing can find them
+/* Every svg whose viewBox is the width of the box it landed in. A superset of
+   CHARTS: the all-time pictures are sized like everything else but have no
+   step axis to scrub along, so they register here and not there. */
+var SIZED = [];
+var SEQ = 0;
+function sizedId(){return 'sz'+(++SEQ);}
+
+/* Sizing, done once the markup is in the document.
+
+   `.chart svg` is width:100% over a viewBox, so the rendered scale of every
+   declared length is container width / viewBox width. Over a fixed 640 that
+   ran from 0.66 in a narrow split-mode cell to 2.2 on a full-width desktop
+   chart: one `font:600 10px` label rendered anywhere from 4.6px to 15.1px,
+   and every `stroke-width="2"` over the same range. Setting the viewBox width
+   to the measured container width makes that scale exactly 1.0 -- a 10px
+   label is 10px on the 390px phone and 10px on the monitor, a 2px line is
+   2px in both, and extra width buys x resolution instead of magnification.
+
+   The height does not follow the width, and that is what makes a wider column
+   safe: at a fixed 640:300 the matched pair would stand 844px tall inside a
+   1720px one.
+
+   Everything registered here is also drawn once at its nominal width when its
+   markup is built, so an element with no layout yet -- a closed <details>, a
+   pane off screen -- and a page that never reaches this function still hold a
+   complete picture rather than an empty box. */
+function layoutCharts(){
+  for(var i=0;i<SIZED.length;i++){
+    var c=SIZED[i],el=document.getElementById(c.id);
+    if(!el) continue;
+    var w=Math.round(el.clientWidth||0);
+    /* A box that measures nothing keeps the drawing it already has, and a box
+       narrower than the axis furniture is drawn at the narrowest width the
+       geometry is defined for rather than through a negative span. */
+    if(!(w>0)) w=c.w;
+    if(w<c.min) w=c.min;
+    if(c.laid===w) continue;
+    c.laid=w;c.w=w;
+    var h=(typeof c.h==='function')?c.h(w):c.h;
+    el.setAttribute('viewBox','0 0 '+w+' '+h);
+    el.innerHTML=c.build(w,h);
+    if(c.after) c.after(w,h);
+  }
+}
+
+/* How wide a box turned out is a question only layout can answer, so it is
+   asked again when layout changes. layoutCharts and never draw(): a redraw
+   would throw away scroll position, an open glossary, the pane <select> and
+   the tab strip's own scroll every time a phone is rotated. Debounced,
+   because a rotation fires this many times over. Without ResizeObserver the
+   page keeps the widths it was drawn at, which is what it did before. */
+var RESIZE=null;
+function watchWidth(){
+  if(typeof ResizeObserver==='undefined') return;
+  var el=document.getElementById('wrap');
+  if(!el) return;
+  new ResizeObserver(function(){
+    if(RESIZE) clearTimeout(RESIZE);
+    RESIZE=setTimeout(function(){RESIZE=null;layoutCharts();},120);
+  }).observe(el);
+}
 
 /* The series palette. Frozen light-theme token values, so a stroke does not
    change meaning between light and dark, and hoisted out of fillPane because
@@ -2880,7 +3032,7 @@ function chart(id,title,series,opts){
     return '<div class="chart"><h3>'+title+'</h3><div class="empty" style="font-size:14px">'+only
       +'<div style="margin-top:5px;font-size:12px;color:var(--muted)">one reading &mdash; a trend needs two</div></div></div>';
   }
-  var w=640,h=170,padL=42,padR=Math.max(50,18+Math.max.apply(null,series.map(function(s){
+  var h=170,padL=42,padR=Math.max(50,18+Math.max.apply(null,series.map(function(s){
     return (s.points||[]).length?s.name.length:0;}))*6.2),padT=10,padB=20;
   var xs=all.map(function(p){return p[0];}),ys=all.map(function(p){return p[1];});
   var x0=Math.min.apply(null,xs),x1=Math.max.apply(null,xs);
@@ -2888,40 +3040,49 @@ function chart(id,title,series,opts){
   if(opts.zero){lo=Math.min(lo,0);hi=Math.max(hi,0);}
   if(hi-lo<1e-9){hi+=0.5;lo-=0.5;}
   var pd=(hi-lo)*0.12;hi+=pd;lo-=pd;
-  var X=function(v){return padL+(x1===x0?0.5:(v-x0)/(x1-x0))*(w-padL-padR);};
   var Y=function(v){return padT+(1-(v-lo)/(hi-lo))*(h-padT-padB);};
-  var body='';
-  [0.33,0.66].forEach(function(f){var y=padT+f*(h-padT-padB);
-    body+='<line class="grid-l" x1="'+padL+'" x2="'+(w-padR)+'" y1="'+y.toFixed(1)+'" y2="'+y.toFixed(1)+'"/>';});
-  if(opts.zero) body+='<line class="zero" x1="'+padL+'" x2="'+(w-padR)+'" y1="'+Y(0).toFixed(1)+'" y2="'+Y(0).toFixed(1)+'"/>';
-  series.forEach(function(s){
-    var pts=s.points||[]; if(pts.length<2) return;
-    if(opts.fill){
-      var base=Y(Math.max(lo,0));
-      var a=pts.map(function(p,i){return (i?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1);}).join(' ')
-        +' L'+X(pts[pts.length-1][0]).toFixed(1)+' '+base.toFixed(1)
-        +' L'+X(pts[0][0]).toFixed(1)+' '+base.toFixed(1)+' Z';
-      body+='<path d="'+a+'" fill="'+s.color+'" opacity=".08"/>';
+  /* Only the x scale and the right-hand furniture know the width, so only
+     they are deferred. The domains, the y scale and the padding are facts
+     about the data and are settled once. */
+  function build(w){
+    var X=function(v){return padL+(x1===x0?0.5:(v-x0)/(x1-x0))*(w-padL-padR);};
+    var body='';
+    [0.33,0.66].forEach(function(f){var y=padT+f*(h-padT-padB);
+      body+='<line class="grid-l" x1="'+padL+'" x2="'+(w-padR)+'" y1="'+y.toFixed(1)+'" y2="'+y.toFixed(1)+'"/>';});
+    if(opts.zero) body+='<line class="zero" x1="'+padL+'" x2="'+(w-padR)+'" y1="'+Y(0).toFixed(1)+'" y2="'+Y(0).toFixed(1)+'"/>';
+    series.forEach(function(s){
+      var pts=s.points||[]; if(pts.length<2) return;
+      if(opts.fill){
+        var base=Y(Math.max(lo,0));
+        var a=pts.map(function(p,i){return (i?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1);}).join(' ')
+          +' L'+X(pts[pts.length-1][0]).toFixed(1)+' '+base.toFixed(1)
+          +' L'+X(pts[0][0]).toFixed(1)+' '+base.toFixed(1)+' Z';
+        body+='<path d="'+a+'" fill="'+s.color+'" opacity=".08"/>';
+      }
+      body+='<path d="'+pts.map(function(p,i){return (i?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1);}).join(' ')
+        +'" fill="none" stroke="'+s.color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+      var lp=pts[pts.length-1];
+      body+='<circle cx="'+X(lp[0]).toFixed(1)+'" cy="'+Y(lp[1]).toFixed(1)+'" r="3.2" fill="'+s.color+'"/>';
+      body+='<text class="lbl-s" x="'+(w-padR+6)+'" y="'+(Y(lp[1])+3.4).toFixed(1)+'" fill="'+s.color+'">'+s.name+'</text>';
+    });
+    body+='<line class="axis" x1="'+padL+'" x2="'+(w-padR)+'" y1="'+(h-padB)+'" y2="'+(h-padB)+'"/>';
+    body+='<text class="lbl-s" x="3" y="'+(Y(hi)+8).toFixed(1)+'">'+hi.toFixed(2)+'</text>';
+    body+='<text class="lbl-s" x="3" y="'+Y(lo).toFixed(1)+'">'+lo.toFixed(2)+'</text>';
+    if(x1>x0){
+      body+='<text class="lbl-s" x="'+padL+'" y="'+(h-5)+'">'+(x0/1000).toFixed(0)+'k</text>';
+      body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(h-5)+'" text-anchor="end">'+(x1/1000).toFixed(0)+'k</text>';
+    }else{
+      body+='<text class="lbl-s" x="'+((padL+w-padR)/2)+'" y="'+(h-5)+'" text-anchor="middle">'+(x0/1000).toFixed(0)+'k</text>';
     }
-    body+='<path d="'+pts.map(function(p,i){return (i?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1);}).join(' ')
-      +'" fill="none" stroke="'+s.color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
-    var lp=pts[pts.length-1];
-    body+='<circle cx="'+X(lp[0]).toFixed(1)+'" cy="'+Y(lp[1]).toFixed(1)+'" r="3.2" fill="'+s.color+'"/>';
-    body+='<text class="lbl-s" x="'+(w-padR+6)+'" y="'+(Y(lp[1])+3.4).toFixed(1)+'" fill="'+s.color+'">'+s.name+'</text>';
-  });
-  body+='<line class="axis" x1="'+padL+'" x2="'+(w-padR)+'" y1="'+(h-padB)+'" y2="'+(h-padB)+'"/>';
-  body+='<text class="lbl-s" x="3" y="'+(Y(hi)+8).toFixed(1)+'">'+hi.toFixed(2)+'</text>';
-  body+='<text class="lbl-s" x="3" y="'+Y(lo).toFixed(1)+'">'+lo.toFixed(2)+'</text>';
-  if(x1>x0){
-    body+='<text class="lbl-s" x="'+padL+'" y="'+(h-5)+'">'+(x0/1000).toFixed(0)+'k</text>';
-    body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(h-5)+'" text-anchor="end">'+(x1/1000).toFixed(0)+'k</text>';
-  }else{
-    body+='<text class="lbl-s" x="'+((padL+w-padR)/2)+'" y="'+(h-5)+'" text-anchor="middle">'+(x0/1000).toFixed(0)+'k</text>';
+    body+='<line class="scrub" id="'+id+'-line" x1="0" x2="0" y1="'+padT+'" y2="'+(h-padB)+'" style="display:none"/>';
+    return body;
   }
-  body+='<line class="scrub" id="'+id+'-line" x1="0" x2="0" y1="'+padT+'" y2="'+(h-padB)+'" style="display:none"/>';
-  CHARTS.push({id:id,series:series,x0:x0,x1:x1,padL:padL,padR:padR,w:w,asPct:!!opts.asPct});
+  var spec={id:id,series:series,x0:x0,x1:x1,padL:padL,padR:padR,w:640,h:h,
+            min:Math.ceil(padL+padR)+60,asPct:!!opts.asPct,build:build};
+  CHARTS.push(spec);SIZED.push(spec);
   return '<div class="chart"><h3>'+title+'<span class="read" id="'+id+'-read"></span></h3>'
-    +'<svg id="'+id+'" viewBox="0 0 '+w+' '+h+'" role="img" aria-label="'+esc(title)+'">'+body+'</svg></div>';
+    +'<svg id="'+id+'" viewBox="0 0 640 '+h+'" role="img" aria-label="'+esc(title)+'">'
+    +build(640)+'</svg></div>';
 }
 
 /* Reading exact values by dragging along a chart. Endpoint labels tell you
@@ -2929,9 +3090,13 @@ function chart(id,title,series,opts){
    the middle, and squinting at a 170px-tall svg does not answer it. */
 function wireScrub(){
   CHARTS.forEach(function(c){
-    var svg=document.getElementById(c.id), read=document.getElementById(c.id+'-read'),
-        line=document.getElementById(c.id+'-line');
+    var svg=document.getElementById(c.id), read=document.getElementById(c.id+'-read');
     if(!svg||!read) return;
+    /* Looked up on use and never captured: the scrub line lives inside the
+       svg, and layoutCharts replaces that content on every resize. A
+       reference taken here would point at a detached node from the first
+       rotation onwards, and the readout would move with nothing under it. */
+    function line(){return document.getElementById(c.id+'-line');}
     function at(clientX){
       var box=svg.getBoundingClientRect();
       var vx=(clientX-box.left)/box.width*c.w;
@@ -2946,11 +3111,12 @@ function wireScrub(){
         step=best[0];
       });
       read.innerHTML=commas(Math.round(step))+' &middot; '+parts.join(' / ');
-      line.setAttribute('x1',c.padL+(step-c.x0)/((c.x1-c.x0)||1)*(c.w-c.padL-c.padR));
-      line.setAttribute('x2',line.getAttribute('x1'));
-      line.style.display='';
+      var ln=line(); if(!ln) return;
+      ln.setAttribute('x1',c.padL+(step-c.x0)/((c.x1-c.x0)||1)*(c.w-c.padL-c.padR));
+      ln.setAttribute('x2',ln.getAttribute('x1'));
+      ln.style.display='';
     }
-    function clear(){read.innerHTML='';line.style.display='none';}
+    function clear(){read.innerHTML='';var ln=line(); if(ln) ln.style.display='none';}
     svg.addEventListener('mousemove',function(e){at(e.clientX);});
     svg.addEventListener('mouseleave',clear);
     svg.addEventListener('touchstart',function(e){at(e.touches[0].clientX);},{passive:true});
@@ -2987,7 +3153,24 @@ function fillPane(pane,name,slot){
   var run=DATA.runs[name]; if(!run) return;
   var S=run.series,s=run.summary,q=function(r){return pane.querySelector('[data-role="'+r+'"]');};
   var noteEl=q('note');
-  if(noteEl){noteEl.innerHTML=run.note?esc(run.note):'';noteEl.style.display=run.note?'block':'none';}
+  if(noteEl){
+    noteEl.innerHTML=run.note?esc(run.note):'';
+    noteEl.style.display=run.note?'block':'none';
+    /* Clamped to about three lines, and marked clamped only when something is
+       actually under the fold -- a fade and a pointer cursor over a two-line
+       note promise an expansion that does not exist. The note was 162px of
+       the 315px between opening this page and reading the first number on a
+       390px screen. */
+    if(noteEl.classList){
+      noteEl.classList.remove('open');
+      noteEl.classList.toggle('clamped',(noteEl.scrollHeight||0)>(noteEl.clientHeight||0)+2);
+    }
+    if(noteEl.addEventListener&&noteEl.dataset&&!noteEl.dataset.wired){
+      noteEl.dataset.wired='1';
+      noteEl.addEventListener('click',function(){
+        if(noteEl.classList) noteEl.classList.toggle('open');});
+    }
+  }
   var done=s.total_steps?Math.min(1,(s.steps||0)/s.total_steps):0;
   q('bar').style.width=(done*100).toFixed(1)+'%';
   var remain=(s.total_steps&&s.steps_per_second)?(s.total_steps-s.steps)/s.steps_per_second:null;
@@ -3166,8 +3349,8 @@ function endLabel(x,y,text,colour,w){
 
 /* What is left of a name once the part it shares with its neighbours is gone.
    The SVG has room for `factored` and not for `learn-1m-factored`; every one
-   of these pictures prints the full names in the DOM beneath it at real px,
-   so nothing is legible only at 8.75px. */
+   of these pictures prints the full names in the DOM beneath it at reading
+   size, so nothing here is legible only inside a picture. */
 function distinctPart(one,others){
   var cut=String(one).length,any=false;
   others.forEach(function(two){
@@ -3307,59 +3490,86 @@ function gvsMarkup(m){
   });
   if(hi-lo<1e-9){hi+=0.5;lo-=0.5;}
   var pd=(hi-lo)*0.08;hi+=pd;lo-=pd;
-  /* Square viewBox, square plot box: 328 by 328. That is what makes y = x a
-     true 45 degrees, which is what lets the gap be read off the picture. Two
-     domains, one per axis, would make the diagonal a lie. */
-  var w=400,h=400,padL=44,padR=28,padT=28,padB=44;
-  var X=function(v){return padL+(v-lo)/(hi-lo)*(w-padL-padR);};
-  var Y=function(v){return padT+(1-(v-lo)/(hi-lo))*(h-padT-padB);};
-  var body='<line class="zero" x1="'+X(lo).toFixed(1)+'" y1="'+Y(lo).toFixed(1)
-    +'" x2="'+X(hi).toFixed(1)+'" y2="'+Y(hi).toFixed(1)+'"/>';
-  body+='<text class="lbl-s" x="'+(X(hi)-3).toFixed(1)+'" y="'+(Y(hi)+13).toFixed(1)
-    +'" text-anchor="end">greedy = sampled</text>';
-  body+='<line class="zero" x1="'+X(0).toFixed(1)+'" y1="'+padT+'" x2="'+X(0).toFixed(1)+'" y2="'+(h-padB)+'"/>';
-  body+='<line class="zero" x1="'+padL+'" y1="'+Y(0).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+Y(0).toFixed(1)+'"/>';
+  /* Square viewBox, square plot box. That is what makes y = x a true 45
+     degrees, which is what lets the gap be read off the picture; two domains,
+     one per axis, would make the diagonal a lie. So this is the one picture
+     here whose height follows its width, and padL+padR is deliberately equal
+     to padT+padB, which keeps the plot box square at whatever width the
+     container hands over. The svg carries .sq, capping it at the 640 every
+     other chart declares -- a square tracking a 1720px column would stand
+     1720px tall. */
+  var padL=44,padR=28,padT=28,padB=44;
   var fams=gvsFamilies(pts);
-  /* Stacked labels, stopped at the plot floor. Unstacking in fixed 11-unit
-     steps has no lower bound, and the live set already stacks into one
-     unbroken column from y=120 down: about 27 checkpoints and the lowest
-     names fall outside the 400-unit viewBox, where they are not drawn at
-     all. A name that is silently missing is the failure this page otherwise
-     refuses, so the ones that do not fit are counted and said. */
-  var placed=unstack(pts.map(function(r){return Y(r.sampled.lift)-4;}),11);
-  var floor=h-padB-2,unlabelled=0;
-  pts.forEach(function(r,i){
-    var col=r.flips?C:A;
-    var gx=X(r.greedy.lift),sy=Y(r.sampled.lift);
-    if(r.greedy.ci) body+='<line x1="'+X(r.greedy.ci[0]).toFixed(1)+'" y1="'+sy.toFixed(1)
-      +'" x2="'+X(r.greedy.ci[1]).toFixed(1)+'" y2="'+sy.toFixed(1)
-      +'" stroke="'+col+'" stroke-width="1" opacity=".45"/>';
-    if(r.sampled.ci) body+='<line x1="'+gx.toFixed(1)+'" y1="'+Y(r.sampled.ci[0]).toFixed(1)
-      +'" x2="'+gx.toFixed(1)+'" y2="'+Y(r.sampled.ci[1]).toFixed(1)
-      +'" stroke="'+col+'" stroke-width="1" opacity=".45"/>';
-    var fam=familyOf(r.checkpoint)||'';
-    body+=marker(fams.kind[fam],gx,sy,col);
-    /* The sweep on every label, not only where two arms happen to share a
-       name: the sweep is what says two points are on one footing, so leaving
-       it off is what lets a reader rank across two. A literal middle dot,
-       not an entity: this text goes through esc() on its way into the SVG,
-       which would print the entity's ampersand. */
-    if(placed[i]<=floor)
-      body+=endLabel(gx+6,placed[i],String(r.weight)+'·'+(fam||'no sweep'),col,w);
-    else unlabelled++;
-  });
-  body+='<text class="lbl-s" x="'+padL+'" y="'+(h-padB+14)+'">'+lo.toFixed(2)+'</text>';
-  body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(h-padB+14)+'" text-anchor="end">'+hi.toFixed(2)+'</text>';
-  body+='<text class="lbl-s" x="3" y="'+(h-padB)+'">'+lo.toFixed(2)+'</text>';
-  body+='<text class="lbl-s" x="3" y="'+(padT+8)+'">'+hi.toFixed(2)+'</text>';
-  body+='<text class="lbl-s" x="'+((padL+w-padR)/2)+'" y="'+(h-6)+'" text-anchor="middle">greedy lift</text>';
-  body+='<text class="lbl-s" x="12" y="'+((padT+h-padB)/2)+'" text-anchor="middle" transform="rotate(-90 12 '
-    +((padT+h-padB)/2)+')">sampled lift</text>';
+  var id=sizedId();
+  /* How many names fit is a fact about the drawn picture, not about the data,
+     so no caption written before the picture was sized may assert it. The
+     caption reserves a node and the layout pass fills it in. */
+  function unlabText(n){
+    return n?(n+' '+plural(n,'point')+' '+plural(n,'is','are')+' drawn without a name in the '
+      +'picture: the label would fall below the plot and be dropped without saying so. Every '
+      +'name is in the list above.'):'';
+  }
+  var spec={id:id,w:400,h:function(w){return w;},min:240,unlabelled:0};
+  spec.build=function(w,h){
+    var X=function(v){return padL+(v-lo)/(hi-lo)*(w-padL-padR);};
+    var Y=function(v){return padT+(1-(v-lo)/(hi-lo))*(h-padT-padB);};
+    var body='<line class="zero" x1="'+X(lo).toFixed(1)+'" y1="'+Y(lo).toFixed(1)
+      +'" x2="'+X(hi).toFixed(1)+'" y2="'+Y(hi).toFixed(1)+'"/>';
+    body+='<text class="lbl-s" x="'+(X(hi)-3).toFixed(1)+'" y="'+(Y(hi)+13).toFixed(1)
+      +'" text-anchor="end">greedy = sampled</text>';
+    body+='<line class="zero" x1="'+X(0).toFixed(1)+'" y1="'+padT+'" x2="'+X(0).toFixed(1)+'" y2="'+(h-padB)+'"/>';
+    body+='<line class="zero" x1="'+padL+'" y1="'+Y(0).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+Y(0).toFixed(1)+'"/>';
+    /* Stacked labels, stopped at the plot floor. Unstacking in fixed 11-unit
+       steps has no lower bound, and the live set already stacks into one
+       unbroken column from y=120 down: about 27 checkpoints and the lowest
+       names fall outside the 400-unit viewBox, where they are not drawn at
+       all. A name that is silently missing is the failure this page otherwise
+       refuses, so the ones that do not fit are counted and said. */
+    var placed=unstack(pts.map(function(r){return Y(r.sampled.lift)-4;}),11);
+    var floor=h-padB-2,unlabelled=0;
+    pts.forEach(function(r,i){
+      var col=r.flips?C:A;
+      var gx=X(r.greedy.lift),sy=Y(r.sampled.lift);
+      if(r.greedy.ci) body+='<line x1="'+X(r.greedy.ci[0]).toFixed(1)+'" y1="'+sy.toFixed(1)
+        +'" x2="'+X(r.greedy.ci[1]).toFixed(1)+'" y2="'+sy.toFixed(1)
+        +'" stroke="'+col+'" stroke-width="1" opacity=".45"/>';
+      if(r.sampled.ci) body+='<line x1="'+gx.toFixed(1)+'" y1="'+Y(r.sampled.ci[0]).toFixed(1)
+        +'" x2="'+gx.toFixed(1)+'" y2="'+Y(r.sampled.ci[1]).toFixed(1)
+        +'" stroke="'+col+'" stroke-width="1" opacity=".45"/>';
+      var fam=familyOf(r.checkpoint)||'';
+      body+=marker(fams.kind[fam],gx,sy,col);
+      /* The sweep on every label, not only where two arms happen to share a
+         name: the sweep is what says two points are on one footing, so leaving
+         it off is what lets a reader rank across two. A literal middle dot,
+         not an entity: this text goes through esc() on its way into the SVG,
+         which would print the entity's ampersand. */
+      if(placed[i]<=floor)
+        body+=endLabel(gx+6,placed[i],String(r.weight)+'·'+(fam||'no sweep'),col,w);
+      else unlabelled++;
+    });
+    body+='<text class="lbl-s" x="'+padL+'" y="'+(h-padB+14)+'">'+lo.toFixed(2)+'</text>';
+    body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(h-padB+14)+'" text-anchor="end">'+hi.toFixed(2)+'</text>';
+    body+='<text class="lbl-s" x="3" y="'+(h-padB)+'">'+lo.toFixed(2)+'</text>';
+    body+='<text class="lbl-s" x="3" y="'+(padT+8)+'">'+hi.toFixed(2)+'</text>';
+    body+='<text class="lbl-s" x="'+((padL+w-padR)/2)+'" y="'+(h-6)+'" text-anchor="middle">greedy lift</text>';
+    body+='<text class="lbl-s" x="12" y="'+((padT+h-padB)/2)+'" text-anchor="middle" transform="rotate(-90 12 '
+      +((padT+h-padB)/2)+')">sampled lift</text>';
+    spec.unlabelled=unlabelled;
+    return body;
+  };
+  spec.after=function(){
+    var el=document.getElementById(id+'-unlab');
+    if(!el) return;
+    el.innerHTML=unlabText(spec.unlabelled);
+    el.style.display=spec.unlabelled?'':'none';
+  };
+  SIZED.push(spec);
+  var body=spec.build(400,400);
   var chip=scaleChip(g.scale);
   var out='<div class="chart"><h3>'+title+'<span class="heads"><span class="chip '+chip.cls+'">'
     +esc(chip.text)+'</span><span class="chip dim">'+commas(g.episodes)+' battles</span></span></h3>'
-    +'<div style="max-width:420px;margin:0 auto"><svg viewBox="0 0 400 400" role="img" '
-    +'aria-label="greedy lift against sampled lift, one point per checkpoint">'+body+'</svg></div>';
+    +'<svg class="sq" id="'+id+'" viewBox="0 0 400 400" role="img" '
+    +'aria-label="greedy lift against sampled lift, one point per checkpoint">'+body+'</svg>';
   out+='<div class="caption">'+pts.length+' '+plural(pts.length,'checkpoint')+', '+commas(g.episodes)
     +' paired battles each, every one against a recorded '+esc(String(g.opponent))+' opponent.'
     +(found.excluded?(' '+found.excluded+' more '+plural(found.excluded,'checkpoint')+' '
@@ -3373,9 +3583,9 @@ function gvsMarkup(m){
       +plural(found.pairs,'is','are')+' read from metrics rows that carry no interval, and '
       +plural(found.pairs,'is','are')+' not drawn here either.'):'')
     +'</div>';
-  /* The names at real px, and the sweep each one came out of. The SVG labels
-     render at about 5px at this page's target width, so nothing here may be
-     legible only inside the picture. */
+  /* The names at reading size, and the sweep each one came out of. A 10px
+     label inside a picture is not reading size at any width, so nothing here
+     may be legible only inside the picture. */
   out+='<div class="caption">'+fams.order.map(function(f){
       return '<b>'+esc(f||'no sweep')+'</b> ('+fams.kind[f]+'): '
         +esc(pts.filter(function(r){return (familyOf(r.checkpoint)||'')===f;})
@@ -3391,9 +3601,8 @@ function gvsMarkup(m){
     +(fams.reused?(' '+fams.reused+' '+plural(fams.reused,'sweep')+' beyond the sixth '
       +plural(fams.reused,'reuses','reuse')+' a marker; the sweep is on every label.'):'')
     +'</div>';
-  if(unlabelled) out+='<div class="caption">'+unlabelled+' '+plural(unlabelled,'point')+' '
-    +plural(unlabelled,'is','are')+' drawn without a name in the picture: the label would fall below the '
-    +'plot and be dropped without saying so. Every name is in the list above.</div>';
+  out+='<div class="caption" id="'+id+'-unlab"'+(spec.unlabelled?'':' style="display:none"')+'>'
+    +unlabText(spec.unlabelled)+'</div>';
   out+='<div class="caption">Bars are the recorded 95% intervals &mdash; the only intervals on this project. '
     +'No in-run probe carries one. The axes run from '+num(lo,2)+' to '+num(hi,2)+' in lift, both of them, '
     +'which is what makes the diagonal a true 45 degrees.</div>';
@@ -3425,12 +3634,14 @@ function abMarkup(ab){
      a-tail dropped every reading the losing run took after the winner
      stopped -- exactly the misreading the tail exists to prevent. */
   var pts=ab.points,tail=ab.tail||[],tailB=ab.tail_b||[];
-  var w=640,h=300,padL=44,padR=64,t0=14,t1=170,b0=200,b1=280;
+  /* 306 rather than 300. The x-axis labels sit at y=298 and a 300-unit box
+     left their descenders nowhere to go; now that a declared unit renders as
+     one pixel, padB has to be a real budget rather than a rounding. */
+  var h=306,padL=44,padR=64,t0=14,t1=170,b0=200,b1=280;
   var x0=pts[0].update,x1=Math.max(ab.a_last_update,ab.b_last_update);
   pts.forEach(function(p){x0=Math.min(x0,p.update);x1=Math.max(x1,p.update);});
   tail.forEach(function(t){x1=Math.max(x1,t[0]);});
   tailB.forEach(function(t){x1=Math.max(x1,t[0]);});
-  var X=function(v){return padL+(x1===x0?0.5:(v-x0)/(x1-x0))*(w-padL-padR);};
   var lo=null,hi=null;
   function span(v){if(v===null||v===undefined)return;lo=(lo===null)?v:Math.min(lo,v);hi=(hi===null)?v:Math.max(hi,v);}
   pts.forEach(function(p){span(p.a);span(p.b);span(p.replay_a);span(p.replay_b);});
@@ -3439,50 +3650,21 @@ function abMarkup(ab){
   if(hi-lo<1e-9){hi+=0.5;lo-=0.5;}
   var pd=(hi-lo)*0.12;hi+=pd;lo-=pd;
   var Y1=function(v){return t0+(1-(v-lo)/(hi-lo))*(t1-t0);};
-  function path(list,yf){return list.map(function(p,i){
-    return (i?'L':'M')+X(p[0]).toFixed(1)+' '+yf(p[1]).toFixed(1);}).join(' ');}
   var aPts=pts.map(function(p){return [p.update,p.a];});
   var bPts=pts.map(function(p){return [p.update,p.b];});
-  /* The line follows the first write. A resume's replayed reading is drawn
-     hollow beside it and joined by a tick, because it is a second measurement
-     of the same update and not a correction of the first. */
-  var body='<path fill="none" stroke="'+A+'" stroke-width="2" stroke-linejoin="round" d="'+path(aPts,Y1)+'"/>';
-  body+='<path fill="none" stroke="'+B+'" stroke-width="2" stroke-linejoin="round" d="'+path(bPts,Y1)+'"/>';
-  if(tail.length) body+='<path fill="none" stroke="'+A+'" stroke-width="2" opacity=".35" '
-    +'stroke-linejoin="round" d="'+path([aPts[aPts.length-1]].concat(tail),Y1)+'"/>';
-  if(tailB.length) body+='<path fill="none" stroke="'+B+'" stroke-width="2" opacity=".35" '
-    +'stroke-linejoin="round" d="'+path([bPts[bPts.length-1]].concat(tailB),Y1)+'"/>';
-  pts.forEach(function(p){
-    body+='<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y1(p.a).toFixed(1)+'" r="3" fill="'+A+'"/>';
-    body+='<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y1(p.b).toFixed(1)+'" r="3" fill="'+B+'"/>';
-    [['replay_a','a',A],['replay_b','b',B]].forEach(function(k){
-      var v=p[k[0]];
-      if(v===null||v===undefined) return;
-      body+='<line x1="'+X(p.update).toFixed(1)+'" y1="'+Y1(p[k[1]]).toFixed(1)+'" x2="'+X(p.update).toFixed(1)
-        +'" y2="'+Y1(v).toFixed(1)+'" stroke="'+k[2]+'" stroke-width="1"/>'
-        +'<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y1(v).toFixed(1)+'" r="3" fill="none" stroke="'
-        +k[2]+'" stroke-width="1.5"/>';
-    });
-  });
-  /* Driven by the run list's own live flag and never by a file timestamp: an
-     mtime varies with the machine and would move the payload fingerprint on
-     every poll. */
+  /* Everything below is a fact about the readings and not about how wide the
+     box turned out, and several of these are quoted by the captions further
+     down -- so they are settled once, out here, rather than inside a function
+     that runs again on every resize. */
   /* The rule stands where the shared window ends, which is wherever the
      first run stopped -- and that is not always B. */
   var stopAt=Math.min(ab.a_last_update,ab.b_last_update);
   var first=(ab.a_last_update<=ab.b_last_update)?ab.a:ab.b;
-  var rule=X(stopAt);
   var state=first.name+(first.live===false?' stopped':' still writing');
-  body+='<line class="axis" x1="'+rule.toFixed(1)+'" y1="'+t0+'" x2="'+rule.toFixed(1)+'" y2="'+(t1+6)+'"/>';
-  body+=(rule>w/2
-    ? '<text class="lbl-s" x="'+(rule-4).toFixed(1)+'" y="'+(t0+10)+'" text-anchor="end">'+esc(state)+'</text>'
-    : '<text class="lbl-s" x="'+(rule+4).toFixed(1)+'" y="'+(t0+10)+'">'+esc(state)+'</text>');
   var names=[ab.a.name,ab.b.name];
   var aEnd=tail.length?tail[tail.length-1]:aPts[aPts.length-1];
   var bEnd=tailB.length?tailB[tailB.length-1]:bPts[bPts.length-1];
   var endYs=unstack([Y1(aEnd[1])+3.4,Y1(bEnd[1])+3.4],11);
-  body+=endLabel(X(aEnd[0])+6,endYs[0],distinctPart(ab.a.name,names),A,w);
-  body+=endLabel(X(bEnd[0])+6,endYs[1],distinctPart(ab.b.name,names),B,w);
   var dlo=0,dhi=0;
   pts.forEach(function(p){
     var ra=(p.replay_a===null||p.replay_a===undefined)?p.a:p.replay_a;
@@ -3493,44 +3675,84 @@ function abMarkup(ab){
   if(dhi-dlo<1e-9){dhi+=0.5;dlo-=0.5;}
   var dp=(dhi-dlo)*0.12;dhi+=dp;dlo-=dp;
   var Y2=function(v){return b0+(1-(v-dlo)/(dhi-dlo))*(b1-b0);};
-  body+='<rect x="'+padL+'" y="'+Y2(ab.mean+ab.sd).toFixed(1)+'" width="'+(w-padL-padR)
-    +'" height="'+Math.max(0.5,Y2(ab.mean-ab.sd)-Y2(ab.mean+ab.sd)).toFixed(1)
-    +'" fill="'+G+'" opacity=".14"/>';
-  body+='<line class="zero" x1="'+padL+'" y1="'+Y2(0).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+Y2(0).toFixed(1)+'"/>';
-  body+='<line x1="'+padL+'" y1="'+Y2(ab.mean).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+Y2(ab.mean).toFixed(1)
-    +'" stroke="'+(ab.mean>=0?D:C)+'" stroke-width="1.5"/>';
-  pts.forEach(function(p){
-    body+='<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y2(p.d).toFixed(1)+'" r="3" fill="'
-      +(p.d>=0?D:C)+'"/>';
-    var ra=(p.replay_a===null||p.replay_a===undefined)?p.a:p.replay_a;
-    var rb=(p.replay_b===null||p.replay_b===undefined)?p.b:p.replay_b;
-    if(ra-rb!==p.d) body+='<line x1="'+X(p.update).toFixed(1)+'" y1="'+Y2(p.d).toFixed(1)+'" x2="'
-      +X(p.update).toFixed(1)+'" y2="'+Y2(ra-rb).toFixed(1)+'" stroke="'+G+'" stroke-width="1"/>'
-      +'<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y2(ra-rb).toFixed(1)+'" r="3" fill="none" stroke="'
-      +((ra-rb)>=0?D:C)+'" stroke-width="1.5"/>';
-  });
-  body+='<line class="axis" x1="'+padL+'" y1="'+(t1+6)+'" x2="'+(w-padR)+'" y2="'+(t1+6)+'"/>';
-  body+='<line class="axis" x1="'+padL+'" y1="'+(b1+6)+'" x2="'+(w-padR)+'" y2="'+(b1+6)+'"/>';
-  body+='<text class="lbl-s" x="3" y="'+(t0+8)+'">'+hi.toFixed(2)+'</text>';
-  body+='<text class="lbl-s" x="3" y="'+t1+'">'+lo.toFixed(2)+'</text>';
-  body+='<text class="lbl-s" x="3" y="'+(b0+8)+'">'+dhi.toFixed(2)+'</text>';
-  body+='<text class="lbl-s" x="3" y="'+b1+'">'+dlo.toFixed(2)+'</text>';
-  body+='<text class="lbl-s" x="'+padL+'" y="'+(b1+18)+'">'+pts[0].update+'</text>';
-  /* The last shared update, unless it lands on top of the right-hand label.
-     While both runs are still writing and standing at the same update -- the
-     ordinary state of the pair this pane exists for -- the two are the same
-     number at the same x and render as smeared double text. */
-  if(X(pts[pts.length-1].update)<w-padR-14)
-    body+='<text class="lbl-s" x="'+X(pts[pts.length-1].update).toFixed(1)+'" y="'+(b1+18)
-      +'" text-anchor="middle">'+pts[pts.length-1].update+'</text>';
-  /* The right end of the axis is x1, so it is labelled x1. Labelling it with
-     A's last update printed one number at the pixel column belonging to
-     another whenever B was the longer run. */
-  body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(b1+18)+'" text-anchor="end">'+x1+'</text>';
+  function build(w){
+    var X=function(v){return padL+(x1===x0?0.5:(v-x0)/(x1-x0))*(w-padL-padR);};
+    function path(list,yf){return list.map(function(p,i){
+      return (i?'L':'M')+X(p[0]).toFixed(1)+' '+yf(p[1]).toFixed(1);}).join(' ');}
+    /* The line follows the first write. A resume's replayed reading is drawn
+       hollow beside it and joined by a tick, because it is a second measurement
+       of the same update and not a correction of the first. */
+    var body='<path fill="none" stroke="'+A+'" stroke-width="2" stroke-linejoin="round" d="'+path(aPts,Y1)+'"/>';
+    body+='<path fill="none" stroke="'+B+'" stroke-width="2" stroke-linejoin="round" d="'+path(bPts,Y1)+'"/>';
+    if(tail.length) body+='<path fill="none" stroke="'+A+'" stroke-width="2" opacity=".35" '
+      +'stroke-linejoin="round" d="'+path([aPts[aPts.length-1]].concat(tail),Y1)+'"/>';
+    if(tailB.length) body+='<path fill="none" stroke="'+B+'" stroke-width="2" opacity=".35" '
+      +'stroke-linejoin="round" d="'+path([bPts[bPts.length-1]].concat(tailB),Y1)+'"/>';
+    pts.forEach(function(p){
+      body+='<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y1(p.a).toFixed(1)+'" r="3" fill="'+A+'"/>';
+      body+='<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y1(p.b).toFixed(1)+'" r="3" fill="'+B+'"/>';
+      [['replay_a','a',A],['replay_b','b',B]].forEach(function(k){
+        var v=p[k[0]];
+        if(v===null||v===undefined) return;
+        body+='<line x1="'+X(p.update).toFixed(1)+'" y1="'+Y1(p[k[1]]).toFixed(1)+'" x2="'+X(p.update).toFixed(1)
+          +'" y2="'+Y1(v).toFixed(1)+'" stroke="'+k[2]+'" stroke-width="1"/>'
+          +'<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y1(v).toFixed(1)+'" r="3" fill="none" stroke="'
+          +k[2]+'" stroke-width="1.5"/>';
+      });
+    });
+    /* Driven by the run list's own live flag and never by a file timestamp: an
+       mtime varies with the machine and would move the payload fingerprint on
+       every poll. */
+    var rule=X(stopAt);
+    body+='<line class="axis" x1="'+rule.toFixed(1)+'" y1="'+t0+'" x2="'+rule.toFixed(1)+'" y2="'+(t1+6)+'"/>';
+    body+=(rule>w/2
+      ? '<text class="lbl-s" x="'+(rule-4).toFixed(1)+'" y="'+(t0+10)+'" text-anchor="end">'+esc(state)+'</text>'
+      : '<text class="lbl-s" x="'+(rule+4).toFixed(1)+'" y="'+(t0+10)+'">'+esc(state)+'</text>');
+    body+=endLabel(X(aEnd[0])+6,endYs[0],distinctPart(ab.a.name,names),A,w);
+    body+=endLabel(X(bEnd[0])+6,endYs[1],distinctPart(ab.b.name,names),B,w);
+    body+='<rect x="'+padL+'" y="'+Y2(ab.mean+ab.sd).toFixed(1)+'" width="'+(w-padL-padR)
+      +'" height="'+Math.max(0.5,Y2(ab.mean-ab.sd)-Y2(ab.mean+ab.sd)).toFixed(1)
+      +'" fill="'+G+'" opacity=".14"/>';
+    body+='<line class="zero" x1="'+padL+'" y1="'+Y2(0).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+Y2(0).toFixed(1)+'"/>';
+    body+='<line x1="'+padL+'" y1="'+Y2(ab.mean).toFixed(1)+'" x2="'+(w-padR)+'" y2="'+Y2(ab.mean).toFixed(1)
+      +'" stroke="'+(ab.mean>=0?D:C)+'" stroke-width="1.5"/>';
+    pts.forEach(function(p){
+      body+='<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y2(p.d).toFixed(1)+'" r="3" fill="'
+        +(p.d>=0?D:C)+'"/>';
+      var ra=(p.replay_a===null||p.replay_a===undefined)?p.a:p.replay_a;
+      var rb=(p.replay_b===null||p.replay_b===undefined)?p.b:p.replay_b;
+      if(ra-rb!==p.d) body+='<line x1="'+X(p.update).toFixed(1)+'" y1="'+Y2(p.d).toFixed(1)+'" x2="'
+        +X(p.update).toFixed(1)+'" y2="'+Y2(ra-rb).toFixed(1)+'" stroke="'+G+'" stroke-width="1"/>'
+        +'<circle cx="'+X(p.update).toFixed(1)+'" cy="'+Y2(ra-rb).toFixed(1)+'" r="3" fill="none" stroke="'
+        +((ra-rb)>=0?D:C)+'" stroke-width="1.5"/>';
+    });
+    body+='<line class="axis" x1="'+padL+'" y1="'+(t1+6)+'" x2="'+(w-padR)+'" y2="'+(t1+6)+'"/>';
+    body+='<line class="axis" x1="'+padL+'" y1="'+(b1+6)+'" x2="'+(w-padR)+'" y2="'+(b1+6)+'"/>';
+    body+='<text class="lbl-s" x="3" y="'+(t0+8)+'">'+hi.toFixed(2)+'</text>';
+    body+='<text class="lbl-s" x="3" y="'+t1+'">'+lo.toFixed(2)+'</text>';
+    body+='<text class="lbl-s" x="3" y="'+(b0+8)+'">'+dhi.toFixed(2)+'</text>';
+    body+='<text class="lbl-s" x="3" y="'+b1+'">'+dlo.toFixed(2)+'</text>';
+    body+='<text class="lbl-s" x="'+padL+'" y="'+(b1+18)+'">'+pts[0].update+'</text>';
+    /* The last shared update, unless it lands on top of the right-hand label.
+       While both runs are still writing and standing at the same update -- the
+       ordinary state of the pair this pane exists for -- the two are the same
+       number at the same x and render as smeared double text. */
+    if(X(pts[pts.length-1].update)<w-padR-14)
+      body+='<text class="lbl-s" x="'+X(pts[pts.length-1].update).toFixed(1)+'" y="'+(b1+18)
+        +'" text-anchor="middle">'+pts[pts.length-1].update+'</text>';
+    /* The right end of the axis is x1, so it is labelled x1. Labelling it with
+       A's last update printed one number at the pixel column belonging to
+       another whenever B was the longer run. */
+    body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(b1+18)+'" text-anchor="end">'+x1+'</text>';
+    return body;
+  }
+  var id=sizedId();
+  SIZED.push({id:id,w:640,h:h,min:padL+padR+60,build:build});
   var t=(ab.se>0)?Math.abs(ab.mean/ab.se):null;
   var out='<div class="chart"><h3>'+title+'<span class="heads">'+liftNode(ab.mean,ab.scale)
     +'<span class="chip dim">'+commas(ab.episodes)+' battles</span>'+modeChip(ab.mode)+'</span></h3>'
-    +'<svg viewBox="0 0 640 300" role="img" aria-label="two runs paired at equal update index">'+body+'</svg>';
+    +'<svg id="'+id+'" viewBox="0 0 640 '+h+'" role="img" '
+    +'aria-label="two runs paired at equal update index">'+build(640)+'</svg>';
   out+='<div class="caption">'+swatch(A,ab.a.name)+swatch(B,ab.b.name)
     +' Top: each run&rsquo;s lift against the update index. Bottom: '+esc(ab.a.name)+' minus '+esc(ab.b.name)
     +' at each shared update, against the mean and one standard deviation of the '+ab.n+'.</div>';
@@ -3565,8 +3787,8 @@ function abMarkup(ab){
       :'Neither run has a reading past the other, so there is no tail to draw.')
     +'</div>';
   out+='<div class="caption">The upper panel runs from '+num(lo,2)+' to '+num(hi,2)+' in lift and the '
-    +'difference panel from '+num(dlo,2)+' to '+num(dhi,2)+', over updates '+x0+' to '+x1+'. Stated here '
-    +'because the numbers inside the picture render at about 5px at this page&rsquo;s width.</div>';
+    +'difference panel from '+num(dlo,2)+' to '+num(dhi,2)+', over updates '+x0+' to '+x1+'. Stated in '
+    +'the page as well as in the picture, so no bound here is legible only inside an svg.</div>';
   (ab.same_run||[]).forEach(function(p){
     out+='<div class="caption">'+esc(p.join(' and '))+' were refused as a pair: they hold the same '
       +'readings, so that is one run reached through two roots and not two runs. Subtracting it from '
@@ -3591,17 +3813,25 @@ function sweepMarkup(sw){
   if(!sw.families||!sw.families.length){
     out+='<div class="empty">no verdict file records a sweep against a named opponent</div>';
   }else{
+    /* One wrapper around the families, and one around each family. This is
+       the longest panel on the page -- 2231px tall at a 1280px viewport --
+       and a wide container lays the families out in two columns off these.
+       Nothing is reordered and no two families are merged: each stays one
+       block, because a family is the only thing on disk that records what was
+       held fixed, and half a family in a column is half a ladder. */
+    out+='<div class="sweeps">';
     sw.families.forEach(function(f){
       var chip=scaleChip(f.scale);
-      out+='<div class="lbl" style="margin-top:18px">'+esc(f.family)+' &mdash; '+f.checkpoints+' '
+      out+='<div class="fam"><div class="lbl" style="margin-top:18px">'+esc(f.family)+' &mdash; '+f.checkpoints+' '
         +plural(f.checkpoints,'checkpoint')+' &middot; <span class="chip '+chip.cls+'">'+esc(chip.text)
         +'</span> &middot; '+commas(f.episodes)+' battles each</div>';
       f.sections.forEach(function(s){out+=ladderSection(s,{control:null});});
       out+='<div class="caption">'+f.checkpoints+' '+plural(f.checkpoints,'checkpoint')+', '
         +f.sections.map(function(s){return s.mode||'play mode never recorded';}).join(' and ')+', '
         +commas(f.episodes)+' battles each, vs '+esc(String(f.scale.opponent))+' (recorded). '
-        +'The whisker on each bar is that record&rsquo;s own interval.</div>';
+        +'The whisker on each bar is that record&rsquo;s own interval.</div></div>';
     });
+    out+='</div>';
   }
   out+='<div class="caption">Each family is one sweep. Bar lengths do not carry from one family to the next '
     +'and nothing is ranked across families, because the family is the only thing on disk that records what '
@@ -3627,42 +3857,47 @@ function precisionMarkup(pr){
   var title='What a reading is worth';
   if(!pr||!pr.half||!pr.half.length) return emptyCard(title,'no verdict records an interval');
   var pop=pr.population,rep=(pr.replicates||[])[0];
-  var w=640,h=150,padL=44,padR=56;
+  var h=150,padL=44,padR=56;
   var top=Math.max(pr.max,pr.probes.derived_half||0,rep?rep.spread:0)*1.15;
   if(!(top>0)) top=1;
-  var X=function(v){return padL+(v/top)*(w-padL-padR);};
-  var body='<line class="axis" x1="'+padL+'" y1="132" x2="'+(w-padR)+'" y2="132"/>';
-  body+='<text class="lbl-s" x="'+padL+'" y="146">0.00</text>';
-  body+='<text class="lbl-s" x="'+(w-padR)+'" y="146" text-anchor="end">'+top.toFixed(2)+'</text>';
-  pr.half.forEach(function(v){
-    body+='<line x1="'+X(v).toFixed(1)+'" y1="30" x2="'+X(v).toFixed(1)+'" y2="52" stroke="'+A
-      +'" stroke-width="1" opacity=".55"/>';});
-  /* One tick and no median line: a median of one reading is that reading
-     wearing a summary's clothes. */
-  if(pr.median!==null&&pr.median!==undefined&&pr.half.length>1){
-    body+='<line x1="'+X(pr.median).toFixed(1)+'" y1="26" x2="'+X(pr.median).toFixed(1)+'" y2="56" stroke="'
-      +D+'" stroke-width="2"/>';
-    body+=endLabel(X(pr.median)+5,24,num(pr.median,3),D,w);
+  function build(w){
+    var X=function(v){return padL+(v/top)*(w-padL-padR);};
+    var body='<line class="axis" x1="'+padL+'" y1="132" x2="'+(w-padR)+'" y2="132"/>';
+    body+='<text class="lbl-s" x="'+padL+'" y="146">0.00</text>';
+    body+='<text class="lbl-s" x="'+(w-padR)+'" y="146" text-anchor="end">'+top.toFixed(2)+'</text>';
+    pr.half.forEach(function(v){
+      body+='<line x1="'+X(v).toFixed(1)+'" y1="30" x2="'+X(v).toFixed(1)+'" y2="52" stroke="'+A
+        +'" stroke-width="1" opacity=".55"/>';});
+    /* One tick and no median line: a median of one reading is that reading
+       wearing a summary's clothes. */
+    if(pr.median!==null&&pr.median!==undefined&&pr.half.length>1){
+      body+='<line x1="'+X(pr.median).toFixed(1)+'" y1="26" x2="'+X(pr.median).toFixed(1)+'" y2="56" stroke="'
+        +D+'" stroke-width="2"/>';
+      body+=endLabel(X(pr.median)+5,24,num(pr.median,3),D,w);
+    }
+    if(pr.probes.derived_half!==null&&pr.probes.derived_half!==undefined){
+      body+='<line x1="'+X(pr.probes.derived_half).toFixed(1)+'" y1="70" x2="'
+        +X(pr.probes.derived_half).toFixed(1)+'" y2="94" stroke="'+B+'" stroke-width="2"/>';
+      body+=endLabel(X(pr.probes.derived_half)+5,86,num(pr.probes.derived_half,3),B,w);
+    }
+    if(rep){
+      body+='<line x1="'+X(0)+'" y1="115" x2="'+X(rep.spread).toFixed(1)+'" y2="115" stroke="'+C
+        +'" stroke-width="3"/>';
+      body+=endLabel(X(rep.spread)+5,112,num(rep.spread,3),C,w);
+      body+='<circle cx="'+X(0)+'" cy="115" r="2.5" fill="'+G+'"/>';
+      body+='<text class="lbl-s" x="'+(X(0)-5)+'" y="112" text-anchor="end" fill="'+G+'">0.000</text>';
+    }
+    return body;
   }
-  if(pr.probes.derived_half!==null&&pr.probes.derived_half!==undefined){
-    body+='<line x1="'+X(pr.probes.derived_half).toFixed(1)+'" y1="70" x2="'
-      +X(pr.probes.derived_half).toFixed(1)+'" y2="94" stroke="'+B+'" stroke-width="2"/>';
-    body+=endLabel(X(pr.probes.derived_half)+5,86,num(pr.probes.derived_half,3),B,w);
-  }
-  if(rep){
-    body+='<line x1="'+X(0)+'" y1="115" x2="'+X(rep.spread).toFixed(1)+'" y2="115" stroke="'+C
-      +'" stroke-width="3"/>';
-    body+=endLabel(X(rep.spread)+5,112,num(rep.spread,3),C,w);
-    body+='<circle cx="'+X(0)+'" cy="115" r="2.5" fill="'+G+'"/>';
-    body+='<text class="lbl-s" x="'+(X(0)-5)+'" y="112" text-anchor="end" fill="'+G+'">0.000</text>';
-  }
+  var id=sizedId();
+  SIZED.push({id:id,w:640,h:h,min:padL+padR+60,build:build});
   var chip=scaleChip(pop?pop.scale:null);
   var out='<div class="chart"><h3>'+title+'<span class="heads"><span class="chip '+chip.cls+'">'
     +esc(chip.text)+'</span><span class="chip dim">'+commas(pop?pop.episodes:null)+' battles</span></span></h3>'
-    +'<svg viewBox="0 0 640 150" role="img" aria-label="interval half-widths in standard deviations">'
-    +body+'</svg>';
+    +'<svg id="'+id+'" viewBox="0 0 640 '+h+'" role="img" '
+    +'aria-label="interval half-widths in standard deviations">'+build(640)+'</svg>';
   out+='<div class="caption">The strip runs from 0.00 to '+num(top,2)+' in lift, left to right. Stated '
-    +'here because the numbers inside the picture render at about 5px at this page&rsquo;s width.</div>';
+    +'in the page as well as in the picture, so neither end is legible only inside an svg.</div>';
   out+='<ul class="why"><li>'+swatch(A,'')+pr.half.length+' recorded 95% '+plural(pr.half.length,'interval')
     +', '+commas(pop?pop.episodes:null)+' battles each, against a recorded '+esc(String(pop?pop.opponent:''))
     +' opponent'+((pr.half.length>1&&pr.median!==null&&pr.median!==undefined)
@@ -3722,18 +3957,15 @@ function groupSpark(g){
   if(!runs.length) return why;
   if(runs.every(function(r){return r.series.length<2;}))
     return '<div class="caption">One reading each &mdash; a trend needs two.</div>'+why;
-  var w=640,h=120,padL=40,padR=64,padT=10,padB=18;
+  var h=120,padL=40,padR=64,padT=10,padB=18;
   var n=1,lo=0,hi=0;
   runs.forEach(function(r){
     n=Math.max(n,r.series.length);
     r.series.forEach(function(p){lo=Math.min(lo,p[1]);hi=Math.max(hi,p[1]);});});
   if(hi-lo<1e-9){hi+=0.5;lo-=0.5;}
   var pd=(hi-lo)*0.12;hi+=pd;lo-=pd;
-  var X=function(v){return padL+(n===1?0.5:(v-1)/(n-1))*(w-padL-padR);};
   var Y=function(v){return padT+(1-(v-lo)/(hi-lo))*(h-padT-padB);};
   var wheel=[A,D,B,C,G];
-  var body='<line class="zero" x1="'+padL+'" y1="'+Y(0).toFixed(1)+'" x2="'+(w-padR)+'" y2="'
-    +Y(0).toFixed(1)+'"/>';
   /* A ruler, not a band. A band around zero would say these readings are
      being tested against zero; a free-standing arrow says only how far one
      reading moves on its own. Chosen before the lines are drawn, because the
@@ -3748,7 +3980,7 @@ function groupSpark(g){
   var source=runs[0];
   runs.forEach(function(r){if(r.series.length>source.series.length) source=r;});
   var ruled=(source.noise!==null&&source.noise!==undefined);
-  var rx=w-padR+30,mid=(padT+h-padB)/2;
+  var mid=(padT+h-padB)/2;
   var want=ruled?(source.noise/(hi-lo))*(h-padT-padB):0;
   /* Bounded to the plot band. Unbounded, a run whose noise runs past about
      0.57 of its own domain put both end caps and the magnitude label outside
@@ -3758,49 +3990,58 @@ function groupSpark(g){
   var clipped=ruled&&want>(mid-padT-4);
   var half=clipped?(mid-padT-4):want;
   var tag=ruled?num(source.noise,2):'';
-  /* Where the names have to stop: the ruler's own magnitude label is centred
-     on rx, so half its width is the first pixel a name may not reach. 6.2
-     units per character is the same figure endLabel measures with. */
-  var lim=ruled?(rx-(1+tag.length)*6.2/2+1):w;
   var names=runs.map(function(r){return r.name;});
   var ends=unstack(runs.map(function(r){return Y(r.series[r.series.length-1][1])+3.4;}),11);
-  runs.forEach(function(r,i){
-    var col=wheel[i%wheel.length];
-    var dash=(i>=wheel.length)?' stroke-dasharray="4 3"':'';
-    if(r.series.length<2){
-      body+='<circle cx="'+X(1).toFixed(1)+'" cy="'+Y(r.series[0][1]).toFixed(1)+'" r="3.2" fill="'+col+'"/>';
-    }else{
-      body+='<path fill="none" stroke="'+col+'" stroke-width="1.5" stroke-linejoin="round"'+dash+' d="'
-        +r.series.map(function(p,k){return (k?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1);}).join(' ')
-        +'"/>';
+  function build(w){
+    var X=function(v){return padL+(n===1?0.5:(v-1)/(n-1))*(w-padL-padR);};
+    var rx=w-padR+30;
+    /* Where the names have to stop: the ruler's own magnitude label is centred
+       on rx, so half its width is the first pixel a name may not reach. 6.2
+       units per character is the same figure endLabel measures with. */
+    var lim=ruled?(rx-(1+tag.length)*6.2/2+1):w;
+    var body='<line class="zero" x1="'+padL+'" y1="'+Y(0).toFixed(1)+'" x2="'+(w-padR)+'" y2="'
+      +Y(0).toFixed(1)+'"/>';
+    runs.forEach(function(r,i){
+      var col=wheel[i%wheel.length];
+      var dash=(i>=wheel.length)?' stroke-dasharray="4 3"':'';
+      if(r.series.length<2){
+        body+='<circle cx="'+X(1).toFixed(1)+'" cy="'+Y(r.series[0][1]).toFixed(1)+'" r="3.2" fill="'+col+'"/>';
+      }else{
+        body+='<path fill="none" stroke="'+col+'" stroke-width="1.5" stroke-linejoin="round"'+dash+' d="'
+          +r.series.map(function(p,k){return (k?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1);}).join(' ')
+          +'"/>';
+      }
+      body+=endLabel(X(r.series[r.series.length-1][0])+5,ends[i],distinctPart(r.name,names),col,lim);
+    });
+    if(ruled){
+      body+='<line x1="'+rx+'" y1="'+(mid-half).toFixed(1)+'" x2="'+rx+'" y2="'+(mid+half).toFixed(1)
+        +'" stroke="'+G+'" stroke-width="1"/>'
+        +'<line x1="'+(rx-3)+'" y1="'+(mid-half).toFixed(1)+'" x2="'+(rx+3)+'" y2="'+(mid-half).toFixed(1)
+        +'" stroke="'+G+'" stroke-width="1"/>'
+        +'<line x1="'+(rx-3)+'" y1="'+(mid+half).toFixed(1)+'" x2="'+(rx+3)+'" y2="'+(mid+half).toFixed(1)
+        +'" stroke="'+G+'" stroke-width="1"/>'
+        +'<text class="lbl-s" x="'+rx+'" y="'+(mid-half-4).toFixed(1)+'" text-anchor="middle">&#177;'
+        +tag+'</text>';
     }
-    body+=endLabel(X(r.series[r.series.length-1][0])+5,ends[i],distinctPart(r.name,names),col,lim);
-  });
-  if(ruled){
-    body+='<line x1="'+rx+'" y1="'+(mid-half).toFixed(1)+'" x2="'+rx+'" y2="'+(mid+half).toFixed(1)
-      +'" stroke="'+G+'" stroke-width="1"/>'
-      +'<line x1="'+(rx-3)+'" y1="'+(mid-half).toFixed(1)+'" x2="'+(rx+3)+'" y2="'+(mid-half).toFixed(1)
-      +'" stroke="'+G+'" stroke-width="1"/>'
-      +'<line x1="'+(rx-3)+'" y1="'+(mid+half).toFixed(1)+'" x2="'+(rx+3)+'" y2="'+(mid+half).toFixed(1)
-      +'" stroke="'+G+'" stroke-width="1"/>'
-      +'<text class="lbl-s" x="'+rx+'" y="'+(mid-half-4).toFixed(1)+'" text-anchor="middle">&#177;'
-      +tag+'</text>';
+    body+='<line class="axis" x1="'+padL+'" y1="'+(h-padB)+'" x2="'+(w-padR)+'" y2="'+(h-padB)+'"/>';
+    body+='<text class="lbl-s" x="3" y="'+(padT+8)+'">'+hi.toFixed(2)+'</text>';
+    body+='<text class="lbl-s" x="3" y="'+(h-padB)+'">'+lo.toFixed(2)+'</text>';
+    body+='<text class="lbl-s" x="'+padL+'" y="'+(h-4)+'">1</text>';
+    body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(h-4)+'" text-anchor="end">'+n+'</text>';
+    return body;
   }
-  body+='<line class="axis" x1="'+padL+'" y1="'+(h-padB)+'" x2="'+(w-padR)+'" y2="'+(h-padB)+'"/>';
-  body+='<text class="lbl-s" x="3" y="'+(padT+8)+'">'+hi.toFixed(2)+'</text>';
-  body+='<text class="lbl-s" x="3" y="'+(h-padB)+'">'+lo.toFixed(2)+'</text>';
-  body+='<text class="lbl-s" x="'+padL+'" y="'+(h-4)+'">1</text>';
-  body+='<text class="lbl-s" x="'+(w-padR)+'" y="'+(h-4)+'" text-anchor="end">'+n+'</text>';
-  var out='<svg viewBox="0 0 640 120" role="img" aria-label="lift against reading number, one line per run">'
-    +body+'</svg>';
+  var id=sizedId();
+  SIZED.push({id:id,w:640,h:h,min:padL+padR+60,build:build});
+  var out='<svg id="'+id+'" viewBox="0 0 640 '+h+'" role="img" '
+    +'aria-label="lift against reading number, one line per run">'+build(640)+'</svg>';
   out+='<div class="caption">'+runs.map(function(r,i){
     return swatch(wheel[i%wheel.length],r.name);}).join('')+'</div>';
   out+='<div class="caption">The x axis is the reading number, not the step count: '+DATA.alltime.resumed+' '
     +plural(DATA.alltime.resumed,'run')+' on this page replayed '+plural(DATA.alltime.resumed,'its','their')
     +' step counter after a resume, and a step axis folds those readings on top of each other.</div>';
   out+='<div class="caption">The lines run from '+num(lo,2)+' to '+num(hi,2)+' in lift, over '
-    +'readings 1 to '+n+'. Stated here because the numbers inside the picture render at about 5px at '
-    +'this page&rsquo;s width.</div>';
+    +'readings 1 to '+n+'. Stated in the page as well as in the picture, so no bound here is '
+    +'legible only inside an svg.</div>';
   if(ruled) out+='<div class="caption">&#177;'+tag+' is '+esc(source.noise_rule)
     +', measured on '+esc(source.name)+' &mdash; the longest trajectory in this card. It stands beside the '
     +'lines rather than as a band around zero, because it says how far one reading moves, not what any of '
@@ -4101,6 +4342,9 @@ function groupsMarkup(A){
     +unnamed+' where '+plural(unnamed,'it cannot','they cannot')+'. '
     +A.unidentified+' of '+A.lift_rows+' readings sit on a scale nobody has identified, and they are not rounded to '
     +'whichever known scale is nearer. Sorting exists only inside a card.</div></div>';
+  /* Same wrapper, same reason: the cards are the second-longest panel here,
+     and a <details> is already one indivisible block. */
+  out+='<div class="groups">';
   A.groups.forEach(function(g){
     var c=scaleChip(g.scale);
     out+='<details class="card"><summary><span class="chip '+c.cls+'">'+esc(c.text)+'</span>'
@@ -4115,7 +4359,7 @@ function groupsMarkup(A){
       if(r.ranking){
         out+='<div class="lbl" style="margin-top:10px">'+esc(r.name)+' &mdash; a table of arms, not a trajectory</div>';
         if(DATA.runs[r.name]&&DATA.runs[r.name].note)
-          out+='<div class="note">'+esc(DATA.runs[r.name].note)+'</div>';
+          out+='<div class="note open">'+esc(DATA.runs[r.name].note)+'</div>';
         out+='<div class="scroll"><table class="ledger"><tbody>';
         r.arms.forEach(function(a){
           out+='<tr><td>'+esc(a.arm)+' '+modeChip(a.mode)+'</td><td class="n">'+sd(a.lift)+'</td>'
@@ -4137,7 +4381,7 @@ function groupsMarkup(A){
     });
     out+='</div></details>';
   });
-  return out;
+  return out+'</div>';
 }
 
 function everMarkup(A){
@@ -4273,8 +4517,43 @@ var split=false,picked=['',''];
    step with this one for a view that is derived from exactly the same rows. */
 var view=(recall('crsim-view','runs')==='alltime')?'alltime':'runs';
 
+/* Put the selected run back in view, and only when it has actually moved out
+   of it. The strip is repainted on every fifteen-second poll and the browser
+   keeps its scrollLeft across the innerHTML write, so scrolling
+   unconditionally here would throw a reader's place away four times a minute
+   -- hence the check that the selection changed since the last paint. Plain
+   scrollLeft arithmetic and not scrollIntoView(), which scrolls the page as
+   well and moves the thing being read. */
+var TABSHOWN;
+function showSelectedTab(strip){
+  var want=(view==='runs'&&!expanded)?picked[0]:null;
+  if(want===TABSHOWN) return;
+  TABSHOWN=want;
+  if(!want||!strip.querySelector) return;
+  var tab=strip.querySelector('.tab[aria-selected="true"]');
+  if(!tab||typeof tab.offsetLeft!=='number') return;
+  var l=tab.offsetLeft,r=l+(tab.offsetWidth||0),x=strip.scrollLeft||0,vw=strip.clientWidth||0;
+  if(!vw) return;
+  if(l<x) strip.scrollLeft=Math.max(0,l-12);
+  else if(r>x+vw) strip.scrollLeft=r-vw+12;
+}
+
+/* Which way there is more strip, as a fade at that edge. Nothing else says
+   the row scrolls at all: it has no scrollbar in either engine, and on iOS a
+   horizontal scrollbar is a transient overlay that would not have said so
+   either. The class goes away at each end as that end is reached, so the fade
+   is never a promise of more when there is none. */
+function paintTabEdges(strip){
+  if(!strip||!strip.classList) return;
+  var over=(strip.scrollWidth||0)-(strip.clientWidth||0),x=strip.scrollLeft||0;
+  var on=!expanded&&over>1;
+  strip.classList.toggle('more-l',on&&x>1);
+  strip.classList.toggle('more-r',on&&x<over-1);
+}
+
 function paintTabs(){
-  document.getElementById('tabs').innerHTML=DATA.order.map(function(n){
+  var strip=document.getElementById('tabs');
+  strip.innerHTML=DATA.order.map(function(n){
     var r=DATA.runs[n],l=r.summary.latest_lift;
     var val=(l===null||l===undefined)?'':'<span class="val">'+(l>0?'+':'')+Number(l).toFixed(2)+'</span>';
     var on=view==='runs'&&picked.slice(0,split?2:1).indexOf(n)>=0;
@@ -4291,7 +4570,9 @@ function paintTabs(){
   var ex=document.getElementById('expand');
   ex.textContent=expanded?'Collapse':'All '+DATA.order.length;
   ex.setAttribute('aria-pressed',String(expanded));
-  document.getElementById('tabs').classList.toggle('expanded',expanded);
+  strip.classList.toggle('expanded',expanded);
+  showSelectedTab(strip);
+  paintTabEdges(strip);
 }
 
 /* Repainted on every poll, so the expanded state has to survive a repaint
@@ -4310,7 +4591,13 @@ function wireExpand(){
 function draw(){
   var panesEl=document.getElementById('panes');
   var allEl=document.getElementById('alltime');
-  CHARTS=[];
+  var wrapEl=document.getElementById('wrap');
+  CHARTS=[];SIZED=[];
+  /* The wide column belongs to the two views that exist to hold things side
+     by side, and to no other. A single run's argument is not more legible at
+     2520px, and the readout cells and .grid2 charts inside it already spread
+     to fill --col. */
+  if(wrapEl&&wrapEl.classList) wrapEl.classList.toggle('wide',view==='alltime'||!!split);
   /* Drawn from in here rather than beside it: this function clears CHARTS and
      overwrites #panes unconditionally, so a view rendered anywhere else would
      have its markup thrown away on the next poll. */
@@ -4319,6 +4606,7 @@ function draw(){
     panesEl.innerHTML='';panesEl.style.display='none';
     allEl.hidden=false;
     allEl.innerHTML=allTimeMarkup(DATA.alltime);
+    layoutCharts();
     paintTabs();
     var A=DATA.alltime;
     document.getElementById('foot').textContent=A
@@ -4347,6 +4635,8 @@ function draw(){
     })(i);
   }
   paintTabs();
+  /* Before wireScrub, which reaches into the drawn svg for the scrub line. */
+  layoutCharts();
   wireScrub();
   var s=DATA.runs[picked[0]];
   document.getElementById('foot').textContent=s
@@ -4409,6 +4699,23 @@ function poll(){
       remember('crsim-alerts',p==='granted'?'1':'0');paintBell();});
   });
   paintBell();
+
+  /* The strip's own scroll, so the fades follow a finger rather than only a
+     repaint. The element survives paintTabs, which rewrites its children and
+     not itself, so this is wired once. */
+  var strip=document.getElementById('tabs');
+  if(strip&&strip.addEventListener)
+    strip.addEventListener('scroll',function(){paintTabEdges(strip);},{passive:true});
+
+  /* A card that opens has a width for the first time, so the sparkline inside
+     it is drawn again at that width instead of at the nominal one it was
+     built with. `toggle` does not bubble, so this listens in the capture
+     phase; the container survives every redraw of its contents. */
+  var atEl=document.getElementById('alltime');
+  if(atEl&&atEl.addEventListener)
+    atEl.addEventListener('toggle',function(){layoutCharts();},true);
+
+  watchWidth();
 
   DATA.order.forEach(function(n){seenEvals[n]=DATA.runs[n].summary.evaluations||0;});
   draw();

@@ -3708,10 +3708,12 @@ def test_the_greedy_and_sampled_columns_are_both_readable_on_a_phone():
     style = page.split("<style>", 1)[1].split("</style>", 1)[0]
 
     assert 'class="ledger modes"' in page, "the table cannot be targeted"
-    stacked = [b for b in style.split("@media") if ".ledger.modes" in b]
-    assert stacked, "the modes table has no narrow-screen layout at all"
-    block = stacked[0].replace(" ", "").replace(chr(10), "")
-    assert "max-width:700px" in block
+    stacked = [(head, body) for head, body in _at_rules(style, "@container")
+               if ".ledger.modes" in body]
+    assert stacked, "the modes table has no narrow-container layout at all"
+    head, block = stacked[0]
+    block = block.replace(" ", "").replace(chr(10), "")
+    assert "max-width:700px" in head.replace(" ", "")
     assert ".ledger.modestr{display:block" in block, "the rows do not stack"
     assert "content:attr(data-h)" in block, "a stacked cell with no header"
     for header in ("Greedy", "Sampled", "Gap"):
@@ -3982,3 +3984,301 @@ def test_a_ratings_table_a_probe_was_pinned_against_reaches_the_page():
     # it does not have.
     bare = [_ladder_row(1, 1000, 300.0, ladder_pinned={"random": 0.0})]
     assert summarise(bare)["ladder_ratings_source"] is None
+
+
+# ------------------------------------------------------------------ layout
+#
+# What a chart is handed, and what a rule depends on.
+#
+# `.chart svg` is width:100% over a viewBox, so the rendered size of every
+# declared length is container / viewBox width. Over a fixed 640 that ran from
+# 0.49 on the phone to 1.88 on the desktop: the same `font:600 10px` axis label
+# rendered at 4.9px and at 18.8px, on a page whose entire reason for existing
+# is being read on a phone. The tests below assert the ratio, computed from two
+# numbers neither of which is written into the page.
+#
+# The last three read the stylesheet rather than a rendered box, because there
+# is no layout engine here. Each asserts the absence of the exact construct
+# that was the defect -- a positional selector on an auto-fit grid, a viewport
+# query over a container-sized box, a pair of thresholds that disagree -- and
+# the mutation for each is the code that was there before.
+
+
+def _bare(style):
+    """The stylesheet with its comments gone.
+
+    Every one of these rules is explained by a comment above it, and several of
+    those comments name the at-rule or the selector they are about. Scanning
+    the source with them in it finds `@media` inside the sentence explaining
+    why the rule below is not a media query.
+    """
+    return re.sub(r"/\*.*?\*/", "", style, flags=re.S)
+
+
+def _at_rules(style, keyword):
+    """Every `keyword` block in `style`, brace-matched, as (head, body).
+
+    Splitting on the keyword is not enough: a fragment runs on to the next one
+    and picks up whatever rules lie between, which is how a query test can go
+    on passing after the rule it was about moved somewhere else entirely.
+    """
+    style = _bare(style)
+    out = []
+    for start in [m.start() for m in re.finditer(re.escape(keyword), style)]:
+        i = style.index("{", start)
+        depth = 0
+        for j in range(i, len(style)):
+            if style[j] == "{":
+                depth += 1
+            elif style[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        out.append((style[start:i], style[i:j + 1]))
+    return out
+
+
+def _rules(style):
+    """Every top-level rule in `style`, as (selector, declarations), with the
+    contents of at-rules flattened in beside them."""
+    style = _bare(style)
+    out, i, n = [], 0, len(style)
+    while i < n:
+        brace = style.find("{", i)
+        if brace < 0:
+            break
+        sel = style[i:brace].strip()
+        depth, j = 0, brace
+        while j < n:
+            if style[j] == "{":
+                depth += 1
+            elif style[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        body = style[brace + 1:j]
+        if sel.startswith("@") and "{" in body:
+            out.append((sel, ""))
+            out += _rules(body)
+        else:
+            out.append((sel, body))
+        i = j + 1
+    return out
+
+
+def _declares(sel, prop, style):
+    """Does any rule whose selector list contains `sel` declare `prop`?"""
+    flat = lambda s: re.sub(r"\s+", "", s)
+    for selector, body in _rules(style):
+        if sel in [flat(s) for s in selector.split(",")]:
+            if re.search(r"(^|;)" + re.escape(prop) + r"\s*:", body.strip()):
+                return True
+    return False
+
+
+_LAYOUT_HARNESS = """
+var NODES={};
+function Svg(w){var self=this;this.attrs={};this.innerHTML='';this._w=w;
+  this.setAttribute=function(k,v){self.attrs[k]=v;};
+  Object.defineProperty(this,'clientWidth',{get:function(){return self._w;}});}
+var document={getElementById:function(id){
+  return Object.prototype.hasOwnProperty.call(NODES,id)?NODES[id]:null;}};
+CHARTS=[];SIZED=[];
+chart('c1','Lift vs control',
+  [{name:'lift',color:'#2E86AB',points:[[0,0.10],[1000,0.55],[2000,0.20],[3000,0.42]]},
+   {name:'greedy',color:'#8A6516',points:[[0,0.05],[1000,0.31],[2000,0.44],[3000,0.12]]}],
+  {zero:true});
+var svg=new Svg(420); NODES.c1=svg;
+layoutCharts();
+var narrow={vb:svg.attrs.viewBox,body:svg.innerHTML};
+svg._w=1180;
+layoutCharts();
+var wide={vb:svg.attrs.viewBox,body:svg.innerHTML};
+process.stdout.write(JSON.stringify({narrow:narrow,wide:wide,
+  registered:SIZED.length,scrubbable:CHARTS.length}));
+"""
+
+
+def _viewbox(vb):
+    parts = [float(x) for x in vb.split()]
+    assert len(parts) == 4, vb
+    return parts[2], parts[3]
+
+
+@needs_node
+def test_a_chart_label_renders_at_the_size_it_declares():
+    """A `10px` label was 4.9px on the phone and 18.8px on the desktop.
+
+    `.chart svg` is `width:100%` over a viewBox, so everything inside is
+    multiplied by container / viewBox width. The fix is that the viewBox width
+    *is* the container width, which makes that ratio 1 -- and the ratio is what
+    is asserted here, out of two numbers that are measured separately, rather
+    than a literal that would go on matching if the page stopped measuring.
+    """
+    out = json.loads(_run_js([_row(1, 1000)], _LAYOUT_HARNESS))
+    assert out["registered"] == 1, "the chart registered nothing to size"
+
+    for key, container in (("narrow", 420.0), ("wide", 1180.0)):
+        width, _ = _viewbox(out[key]["vb"])
+        assert width / container == 1.0, \
+            f"a declared unit renders at {container / width:.3f}px in a {container:.0f}px box"
+
+
+@needs_node
+def test_a_chart_keeps_its_height_when_the_column_widens():
+    """Rendered height is width x viewBox height / viewBox width.
+
+    Over a fixed viewBox that made every chart's height track its width -- 122px
+    in a narrow cell and 479px in a wide one for the same 170-unit drawing --
+    and it is the reason a wider column could not simply be allowed: the matched
+    pair at 640:300 would stand 844px tall inside a 1720px one.
+    """
+    out = json.loads(_run_js([_row(1, 1000)], _LAYOUT_HARNESS))
+    hn = _viewbox(out["narrow"]["vb"])[1]
+    hw = _viewbox(out["wide"]["vb"])[1]
+    assert hn == hw, f"height followed the width: {hn} at 420, {hw} at 1180"
+
+    # And the drawing fits the box it declares: the x-axis labels of the
+    # matched pair sat at y=298 in a 300-unit box, with nowhere for a
+    # descender to go.
+    for key in ("narrow", "wide"):
+        height = _viewbox(out[key]["vb"])[1]
+        ys = [float(y) for y in
+              re.findall(r"<text[^>]*\sy=\"([-\d.]+)\"", out[key]["body"])]
+        assert ys, "nothing was labelled at all"
+        assert max(ys) <= height - 2, \
+            f"a label sits at y={max(ys)} in a {height}-unit box"
+
+
+_TABS_HARNESS = """
+var SCROLLED=[];
+var TAB={offsetLeft:8725,offsetWidth:118};
+var strip={innerHTML:'',scrollLeft:0,clientWidth:371,scrollWidth:14719,
+  classList:{toggle:function(){}},
+  querySelector:function(sel){return sel.indexOf('aria-selected')>=0?TAB:null;}};
+function Stub(){this.innerHTML='';this.textContent='';this.attrs={};
+  this.setAttribute=function(k,v){this.attrs[k]=v;};
+  this.classList={toggle:function(){}};}
+var NODES={tabs:strip,viewall:new Stub(),expand:new Stub()};
+var document={getElementById:function(id){return NODES[id];},
+              querySelectorAll:function(){return [];}};
+view='runs'; expanded=false; split=false;
+picked=[DATA.order[DATA.order.length-1],DATA.order[0]];
+paintTabs();
+SCROLLED.push(strip.scrollLeft);
+// Repainted on the poll with the selection unchanged, the way it is fifteen
+// seconds later.
+paintTabs();
+SCROLLED.push(strip.scrollLeft);
+// And after a reader has scrolled somewhere themselves.
+strip.scrollLeft=4000;
+paintTabs();
+SCROLLED.push(strip.scrollLeft);
+process.stdout.write(JSON.stringify({scrolled:SCROLLED,
+  left:TAB.offsetLeft,right:TAB.offsetLeft+TAB.offsetWidth,view:strip.clientWidth}));
+"""
+
+
+@needs_node
+def test_the_selected_run_is_visible_in_the_tab_strip():
+    """Eighty-four runs make a 14,719px strip inside a 371px window.
+
+    Selecting a run near the end left the selected tab thousands of pixels off
+    screen with nothing on the page to say the row scrolls at all. But the
+    strip is repainted on every fifteen-second poll and keeps its scrollLeft
+    across the write, so scrolling on every paint would throw a reader's place
+    away four times a minute -- both halves are asserted here.
+    """
+    runs = [("run-%02d" % i, [_row(1, 1000)], False) for i in range(6)]
+    out = json.loads(_node(_multi_body(runs) + _TABS_HARNESS))
+    first, repeat, after_reader = out["scrolled"]
+
+    assert first <= out["left"] and out["right"] <= first + out["view"], \
+        f"the selected tab at {out['left']}..{out['right']} is outside " \
+        f"{first}..{first + out['view']}"
+    assert repeat == first, "an unchanged selection moved the strip anyway"
+    assert after_reader == 4000, \
+        "a repaint threw away the place the reader had scrolled to"
+
+
+def test_the_split_button_is_offered_only_where_the_split_happens():
+    """The button was live across a 200px band where it did nothing.
+
+    `.panes.split` falls back to one column below 900px, and the button that
+    turns it on was hidden below 700px -- so between them pressing it produced
+    two stacked full-width panes. A relation between the two thresholds, not
+    the presence of either, so moving both together stays green.
+    """
+    page = render([_row(1, 1000)], "run")
+    style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+
+    hides = [head for head, body in _at_rules(style, "@media")
+             if re.search(r"\.split-toggle\s*\{[^}]*display:\s*none", body)]
+    collapses = [head for head, body in _at_rules(style, "@media")
+                 if ".panes.split" in body]
+    assert hides and collapses, "one half of the pair is not a media query at all"
+
+    def bound(head):
+        m = re.search(r"max-width:\s*(\d+)px", head)
+        assert m, head
+        return int(m.group(1))
+
+    assert bound(hides[0]) >= bound(collapses[0]), \
+        f"the button is offered down to {bound(hides[0])}px, " \
+        f"where the split has already collapsed at {bound(collapses[0])}px"
+
+
+def test_no_viewport_query_decides_a_container_sized_grid():
+    """The invariant the whole change rests on.
+
+    Every one of these boxes is as wide as its container and not as wide as the
+    window: put the page in split mode, or widen the column, and the two
+    diverge by up to 2.1x. A `@media (max-width:700px)` on `.grid2` is what
+    manufactured 4.5px axis labels at a 701px viewport -- it fired on the
+    window while the box it governed was half that.
+    """
+    page = render([_row(1, 1000)], "run")
+    style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+
+    sized_by_container = (".grid2", ".tiles", ".cell", ".readout-grid",
+                          ".ledger.modes")
+    for head, body in _at_rules(style, "@media"):
+        for name in sized_by_container:
+            assert not re.search(re.escape(name) + r"\s*[,{ ]", body), \
+                f"{name} is laid out by a viewport query: {head.strip()}"
+
+
+def test_a_readout_rule_does_not_depend_on_where_a_cell_landed():
+    """`.readout-grid` is `auto-fit`, so CSS cannot know how it wrapped.
+
+    `.cell:first-child` and `.cell:last-child` name the first and last cell in
+    the DOM, not the first and last of each visual row, which is how the panel
+    ended up with a hairline starting 111px inside it and a doubled border down
+    the right of row one. Every cell now draws its own top and left rule and
+    nothing else, the grid is pulled a pixel left, and `.readout` clips -- so
+    no rule here knows or cares where a cell landed.
+    """
+    page = render([_row(1, 1000)], "run")
+    style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+
+    assert _declares(".cell", "border-top", style), "no rule between rows"
+    assert _declares(".cell", "border-left", style), "no rule between columns"
+    for side in ("border-right", "border-bottom"):
+        assert not _declares(".cell", side, style), \
+            f"a cell draws a {side}, which doubles against its neighbour or " \
+            "against the panel"
+
+    assert _declares(".readout-grid", "margin-left", style), \
+        "nothing pulls column zero's left rule off the panel edge"
+    assert _declares(".readout", "overflow", style), \
+        "the panel does not clip, so the pulled rule is drawn outside it"
+
+    flat = re.sub(r"\s+", "", _bare(style))
+    for positional in (".cell:first-child", ".cell:last-child",
+                       ".cell:nth-child", ".cell:nth-of-type"):
+        assert positional not in flat, \
+            positional + " makes a rule depend on a cell's position in the DOM"
+    for head, body in _at_rules(style, "@media") + _at_rules(style, "@container"):
+        assert not re.search(r"\.cell\s*[,{ ]", body), \
+            "a query decides a cell's borders: " + head.strip()
