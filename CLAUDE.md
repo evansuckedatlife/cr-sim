@@ -3,6 +3,8 @@
 A mechanically exact Clash Royale battle engine, built as a training
 environment for a machine learning agent. No ladder, shop or monetization.
 
+**Changing something? Start at [`map/CLAUDE.md`](map/CLAUDE.md)** — the system map: every noun, its universe (live / leftover / ghost), and what a change hits.
+
 ## Every living python process belongs on the progress page
 
 **If a `python` process is running against this repo, it must have an entry on
