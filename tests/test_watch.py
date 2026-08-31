@@ -4282,3 +4282,178 @@ def test_a_readout_rule_does_not_depend_on_where_a_cell_landed():
     for head, body in _at_rules(style, "@media") + _at_rules(style, "@container"):
         assert not re.search(r"\.cell\s*[,{ ]", body), \
             "a query decides a cell's borders: " + head.strip()
+
+
+# --------------------------------- what the page says about a run that stopped
+
+_PANE_HARNESS = """
+/* fillPane against a DOM that is nothing but the roles it asks for. There is
+   no layout engine here and none is needed: what these check is which of two
+   facts the page prints, not where it prints it. */
+function El(){this.innerHTML='';this.textContent='';this.className='';
+  this.style={};this.dataset={};this.scrollHeight=0;this.clientHeight=0;
+  this.classList={add:function(){},remove:function(){},toggle:function(){}};
+  this.addEventListener=function(){};}
+function Pane(){var els={};this.els=els;
+  this.querySelector=function(sel){
+    var role=sel.replace('[data-role="','').replace('"]','');
+    if(!els[role]) els[role]=new El();
+    return els[role];};}
+var OUT={};
+DATA.order.forEach(function(name){
+  var p=new Pane(); CHARTS=[]; SIZED=[];
+  fillPane(p,name,0);
+  OUT[name]={general:p.els.general.innerHTML,
+             claim:p.els.claim?p.els.claim.innerHTML:'',
+             claimShown:p.els.claim?p.els.claim.style.display:'',
+             bar:p.els.bar.className,
+             c1:p.els.c1.innerHTML};
+});
+process.stdout.write(JSON.stringify(OUT));
+"""
+
+
+def _readout(markup, label):
+    """The value the readout grid printed under `label`.
+
+    Split on the cell boundary first: one regex over the whole grid matches
+    from the first cell's value to the wanted cell's label and reports the
+    row in between as the answer.
+    """
+    for chunk in markup.split('<div class="cell">')[1:]:
+        cell = re.match(r'<span class="kpi-n">(.*?)</span>'
+                        r'<span class="lbl">(.*?)</span>', chunk, re.S)
+        if cell and cell.group(2) == label:
+            return re.sub(r"<[^>]+>", "", cell.group(1)).strip()
+    raise AssertionError(f"no {label!r} cell was drawn at all: {markup}")
+
+
+def _empty_text(markup):
+    """What an empty chart said instead of drawing a curve."""
+    found = re.search(r'<div class="empty">(.*?)</div>', markup, re.S)
+    assert found, "the chart drew something rather than standing empty"
+    return re.sub(r"<[^>]+>", "", found.group(1)).strip()
+
+
+def test_a_note_claiming_to_run_over_a_silent_file_is_contradicted():
+    """Seven entries on this page say "[running]" over a file nothing writes to.
+
+    The page holds both facts -- the note and the mtime it derives `live` from
+    -- and printed only the wrong one, which is the exact thing CLAUDE.md
+    says is worse than no entry at all, because it is believed. Both clauses
+    are asserted: a live run whose note says running is simply correct, and
+    flagging it too would teach a reader to ignore the flag.
+    """
+    note = "[running] Regenerating demonstrations under the new reward."
+    rows = [_row(1, 1000)]
+    _, body = render_multi(
+        [("demos-v1v3-paired", rows, False), ("still-going", rows, True)],
+        notes={"demos-v1v3-paired": note, "still-going": note},
+        silent={"demos-v1v3-paired": 75600.0, "still-going": 11.0})
+
+    assert body["runs"]["demos-v1v3-paired"]["claims_running"] is True, \
+        "a note claiming to run over a silent file is reported as running"
+    assert body["runs"]["still-going"]["claims_running"] is False, \
+        "a run that is actually running was flagged as contradicting itself"
+    assert body["runs"]["demos-v1v3-paired"]["silent_seconds"] == 75600.0, \
+        "the page cannot say how long it has been silent for"
+
+    # A note that never claimed anything is not flagged for going quiet, and
+    # neither is one that says it stopped.
+    _, other = render_multi(
+        [("finished", rows, False), ("plain", rows, False)],
+        notes={"finished": "[done] 61k ticks/s.", "plain": "A benchmark."},
+        silent={"finished": 75600.0, "plain": 75600.0})
+    assert other["runs"]["finished"]["claims_running"] is False
+    assert other["runs"]["plain"]["claims_running"] is False
+
+    # Nor is the workflow CLAUDE.md actually asks for. "Register it when it
+    # starts, not when it produces an answer" means a job spends its whole
+    # life as one placeholder row and a note, so a page that accuses it four
+    # minutes later is a page whose warning nobody reads by the second day.
+    # The seven entries this was built for had been still for 22 to 67 hours.
+    _, young = render_multi(
+        [("bench-tick-loop", rows, False)],
+        notes={"bench-tick-loop": note},
+        silent={"bench-tick-loop": 240.0})
+    assert young["runs"]["bench-tick-loop"]["claims_running"] is False,         "a job registered four minutes ago is already being called a liar"
+
+    # And an entry with no mtime to compare against is not evidence either
+    # way, so it is not accused on the strength of its note alone.
+    _, blind = render_multi([("no-file", rows, False)], notes={"no-file": note})
+    assert blind["runs"]["no-file"]["claims_running"] is False
+
+    # Where the two disagree, `live` wins -- because `live` is what the pulse
+    # dot, the countdown and the "next eval" cell all key off, and a pane
+    # reading "stale" beside a green dot and a ticking clock is the same page
+    # holding two facts and printing both. That is the shape this whole flag
+    # exists to end, and it would be absurd to reintroduce it here.
+    _, disagreeing = render_multi(
+        [("says-live", rows, True)],
+        notes={"says-live": note}, silent={"says-live": 75600.0})
+    assert disagreeing["runs"]["says-live"]["claims_running"] is False,         "the pane contradicts a run the rest of the page is drawing as live"
+
+
+@needs_node
+def test_a_stopped_run_does_not_forecast_a_finish():
+    """`learn-1m-flat` printed "17h 9m left" and nothing was going to finish.
+
+    Eighteen stopped runs carried a time remaining, six of them negative, and
+    `learn-1m-aborted` -- whose note begins "Dead." -- printed 12h over a 2%
+    progress bar. The "next eval" cell one column over has been gated on
+    `live` since it was written; this one never was. Both directions are
+    checked, so a version that simply never forecasts fails too.
+    """
+    rows = [_row(1, 100_000, total_steps=1_000_000)]
+    runs = [("learn-1m-aborted", rows, False), ("still-going", rows, True)]
+    out = json.loads(_node(_multi_body(runs) + _PANE_HARNESS))
+
+    live_left = _readout(out["still-going"]["general"], "left")
+    assert live_left != "--", "a run that is still going forecasts nothing"
+    assert re.match(r"^\d+h \d+m$|^\d+m$", live_left), live_left
+
+    assert _readout(out["learn-1m-aborted"]["general"], "left") == "--", \
+        "a stopped run still says how long until it finishes"
+    # And its progress bar stops claiming to be filling.
+    assert out["learn-1m-aborted"]["bar"] == "stale"
+    assert out["still-going"]["bar"] == ""
+
+    # And the contradiction from the payload reaches the pane rather than
+    # sitting in the data unread.
+    shown = json.loads(_node(_multi_body(
+        [("demos-v1v3-paired", rows, False)],
+        notes={"demos-v1v3-paired": "[running] Regenerating demonstrations."},
+        silent={"demos-v1v3-paired": 75600.0}) + _PANE_HARNESS))
+    claim = shown["demos-v1v3-paired"]
+    assert "claims running" in claim["claim"], claim["claim"]
+    assert "21h" in claim["claim"], \
+        f"the pane does not say how long it has been silent: {claim['claim']}"
+    assert claim["claimShown"] != "none"
+
+
+@needs_node
+def test_a_run_with_ratings_but_no_lifts_is_not_called_unevaluated():
+    """Ten runs draw "no evaluations yet" under a cell reading "18 evals".
+
+    A `--probe ladder` run is rated and never lifted, so it has evaluations
+    and an empty lift series. This is the failure CLAUDE.md memorialises --
+    the page denying a measurement it is holding -- fixed once in the counter
+    and never in the chart that draws it. Both cases are asserted, because a
+    version that always names a count would be just as wrong for a run that
+    genuinely has none.
+    """
+    rated = [_row(u, u * 1000, ladder_elo=120.0 + u) for u in range(1, 19)]
+    runs = [("score-learn-lvl5-final", rated, False),
+            ("never-measured", [_row(1, 1000)], False)]
+    out = json.loads(_node(_multi_body(runs) + _PANE_HARNESS))
+
+    counted = _readout(out["score-learn-lvl5-final"]["general"], "evals")
+    assert counted == "18", counted
+    said = _empty_text(out["score-learn-lvl5-final"]["c1"])
+    assert counted in said, \
+        f'the chart says "{said}" over {counted} evaluations the page counted'
+    assert "no evaluations yet" not in said, said
+
+    assert _readout(out["never-measured"]["general"], "evals") == "0"
+    assert _empty_text(out["never-measured"]["c1"]) == "no evaluations yet", \
+        "a run that really has no evaluations is now told it has some"

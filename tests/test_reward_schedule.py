@@ -596,8 +596,18 @@ def test_a_run_without_the_flag_records_a_constant_schedule(
     captured = _capture_run(tmp_path, monkeypatch, ["--reward", "projected"])
     recorded = captured["config"]["reward_schedule"]
     assert recorded["constant"] is True
+    # Read off the CLI rather than written down here. Nothing is passed to
+    # this run, so what the schedule must record is precisely what argparse
+    # resolved -- and pinning the number in the test instead meant that
+    # moving --elixir-weight's default to 0.0 failed a test about whether a
+    # constant schedule is constant.
+    from cr_sim.train.run import build_parser
+
+    defaults = build_parser().parse_args(["--reward", "projected"])
     assert recorded["start"] == recorded["end"] == {
-        "tower": 1.0, "elixir": 0.3, "horizon_seconds": 3.0}
+        "tower": defaults.tower_weight,
+        "elixir": defaults.elixir_weight,
+        "horizon_seconds": 3.0}
 
     rebuilt = RewardSchedule(
         knob=recorded["knob"], start=recorded["start"], end=recorded["end"],
@@ -747,6 +757,12 @@ def test_a_resumed_run_moves_its_rollout_onto_the_resumed_steps_weight(
         "--match-seconds", "20", "--tower-level", "5", "--tps", "20",
         "--frame-skip", "30", "--device", "cpu", "--opponent", "random",
         "--reward", "projected", "--anneal", "--anneal-end", "1000",
+        # Passed rather than inherited. The elixir term is half of what this
+        # asserts -- that the ramp scales *every* weight and not just the
+        # tower -- and at the CLI's own default of 0.0 the expectation below
+        # would be 0.0 == 0.0, which a schedule that never touched elixir
+        # would satisfy just as well.
+        "--elixir-weight", "0.3",
         "--eval-every", "10000", "--save-every", "1",
         "--out", str(tmp_path), "--name", "resumed",
     ]

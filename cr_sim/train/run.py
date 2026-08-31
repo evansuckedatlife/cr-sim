@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from dataclasses import asdict
@@ -55,6 +56,42 @@ DEFAULT_DECK = (
     "Knight", "Musketeer", "Cannon", "Skeletons",
     "IceSpirits", "Log", "Fireball", "Goblins",
 )
+
+
+def save_checkpoint(payload: dict, path: Path) -> Path:
+    """Write a checkpoint so that a crash mid-write cannot destroy the old one.
+
+    ``torch.save`` straight onto the destination truncates it first, so the
+    file spends the length of a 20 MB serialisation being neither the old
+    checkpoint nor the new one. This machine bugchecks, ``supervise.ps1``
+    rewrites ``checkpoint.pt`` every three updates, and ``--resume`` from that
+    one file is the entire crash-resilience strategy -- so the window where
+    the strategy has nothing to resume from was being opened several times an
+    hour, on purpose, by the thing meant to protect it.
+
+    A sibling temporary file and ``os.replace`` instead. ``os.replace`` is
+    atomic within one volume on Windows as well as POSIX, and the temporary
+    sits beside the destination precisely so the two are always on the same
+    volume. A crash before the replace leaves the previous checkpoint whole
+    and a ``.tmp`` file the next save overwrites; a crash after it leaves the
+    new one whole. There is no third outcome.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        torch.save(payload, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        # A half-written temporary is not evidence of anything and would be
+        # loaded by nothing, but leaving 20 MB of it behind on every crash
+        # fills a disk that has 3.4 GB free.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    return path
 
 
 def _random_opponent(seed: int):
@@ -122,13 +159,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-skip", type=int, default=10, help="ticks per decision")
     parser.add_argument("--match-seconds", type=int, default=120)
     parser.add_argument(
-        "--tower-level", type=int, default=11,
-        help="Crown Tower level. At 11 a 120-second match ends with 92%% of "
-             "tower health untouched and 92%% of matches drawn, so crowns -- "
-             "the only real objective -- almost never fire and the agent "
-             "learns from shaping alone. Level 5 halves the draw rate at no "
-             "extra compute. A training-environment choice, not a change to "
-             "the simulator: evaluate at 11 to see what transfers.",
+        "--tower-level", type=int, default=5,
+        help="Crown Tower level. Defaults to 5, and that default is the "
+             "measurement: at 11 a 120-second match ends with 92%% of tower "
+             "health untouched and 92%% of matches drawn, so crowns -- the "
+             "only real objective -- almost never fire and the agent learns "
+             "from shaping alone. Level 5 halves the draw rate at no extra "
+             "compute. It defaulted to 11 for the first year here and "
+             "runs/learn-1m-factored-lvl11 is 557,056 steps of what that "
+             "buys. A training-environment choice, not a change to the "
+             "simulator: pass 11 explicitly to evaluate what transfers. "
+             "Every run records its own level in config.json, so nothing "
+             "already measured is reinterpreted by this default moving.",
     )
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument(
@@ -179,15 +221,17 @@ def build_parser() -> argparse.ArgumentParser:
              "started with.",
     )
     parser.add_argument(
-        "--elixir-weight", type=float, default=0.3,
+        "--elixir-weight", type=float, default=0.0,
         help="weight on the elixir lead inside --reward projected's "
              "potential. This is what makes a card cost something, and it is "
              "also why passing pays: spending drops the potential now while "
              "the card's effect on the board takes longer than the "
              "projection's horizon to appear. Measured on the clone's own "
              "rollouts, a pass earns +0.071 more reward than a placement at "
-             "0.3 and -0.010 less at 0.0. The searching bot needed it at 0.0 "
-             "for the same reason: at 0.3 it never played a card at all.",
+             "0.3 and -0.010 less at 0.0, which is why this defaults to 0.0. "
+             "The searching bot needed it at 0.0 for the same reason: at 0.3 "
+             "it never played a card at all. Pass 0.3 explicitly to train an "
+             "agent that is charged for its elixir.",
     )
     parser.add_argument(
         "--tower-weight", type=float, default=1.0,
@@ -865,7 +909,7 @@ def main(argv: list[str] | None = None) -> int:
                     stats[rolling_key] = rolling
                     if rolling > best["score"]:
                         best["score"] = rolling
-                        torch.save(
+                        save_checkpoint(
                             {
                                 "state_dict": net.state_dict(),
                                 # Which head these weights are, so whatever
@@ -888,7 +932,7 @@ def main(argv: list[str] | None = None) -> int:
                 # estimates are most of what a long run has learned about its
                 # own gradients; restarting without them throws that away and
                 # the updates just after a restart look like a bad checkpoint.
-                torch.save(
+                save_checkpoint(
                     {
                         "state_dict": net.state_dict(),
                         "head": args.head,
@@ -1050,8 +1094,8 @@ def main(argv: list[str] | None = None) -> int:
                 parallel.close()
 
 
-    torch.save({"state_dict": net.state_dict(), "head": args.head,
-                "observation": args.observation}, out / "final.pt")
+    save_checkpoint({"state_dict": net.state_dict(), "head": args.head,
+                     "observation": args.observation}, out / "final.pt")
     elapsed = time.perf_counter() - started
     print(f"\ndone in {elapsed / 60:.1f} min -> {out}", flush=True)
     return 0

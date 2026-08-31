@@ -41,7 +41,8 @@ from cr_sim.engine.entity import Team
 from cr_sim.train.clone import CloneConfig, Demonstrations, clone
 from cr_sim.train.evaluate import evaluate, write_verdict
 from cr_sim.train.nets import POLICY_HEADS, ActorCritic, net_config_for
-from cr_sim.train.run import DEFAULT_BUILD, DEFAULT_DECK, _random_opponent
+from cr_sim.train.run import (DEFAULT_BUILD, DEFAULT_DECK, _random_opponent,
+                              save_checkpoint)
 from cr_sim.train.selfplay import (check_lift_is_named, opponent_name,
                                    reward_name)
 
@@ -285,21 +286,21 @@ def main(argv: list[str] | None = None) -> int:
         on_epoch=report)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    torch.save({"state_dict": net.state_dict(),
-                "observation": args.observation,
-                # Which expert taught this network. A clone of a
-                # policy-guided search is a clone of a different teacher, and
-                # the whole point of expert iteration is that the teacher
-                # moves between rounds.
-                "proposer": data.proposer,
-                "demo_meta": data.meta,
-                "targets": args.targets, "pass_weight": args.pass_weight,
-                # Which head these weights are. A factored head's parameters
-                # do not fit a flat one, and whatever loads this needs to
-                # build the network they belong to.
-                "head": args.head,
-                "clone": history[-1] if history else {}},
-               args.out / "cloned.pt")
+    save_checkpoint({"state_dict": net.state_dict(),
+                      "observation": args.observation,
+                      # Which expert taught this network. A clone of a
+                      # policy-guided search is a clone of a different teacher, and
+                      # the whole point of expert iteration is that the teacher
+                      # moves between rounds.
+                      "proposer": data.proposer,
+                      "demo_meta": data.meta,
+                      "targets": args.targets, "pass_weight": args.pass_weight,
+                      # Which head these weights are. A factored head's parameters
+                      # do not fit a flat one, and whatever loads this needs to
+                      # build the network they belong to.
+                      "head": args.head,
+                      "clone": history[-1] if history else {}},
+                     args.out / "cloned.pt")
     if args.episodes <= 0:
         print(f"\n{(time.perf_counter() - started) / 60:.1f} min -> {args.out} "
               "(no battles played; --episodes 0)", flush=True)

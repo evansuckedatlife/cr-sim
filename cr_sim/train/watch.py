@@ -285,6 +285,35 @@ def _note_of(run: Path) -> str:
     return str(raw.get("note", "")) if isinstance(raw, dict) else ""
 
 
+#: How long a note may claim to be running over a still file before the page
+#: says so. Deliberately not ``_LIVE_SECONDS``: that answers "is this moving
+#: right now", which is why the pulse dot goes grey after five minutes, and
+#: this answers "should anyone still believe this note", which is a much
+#: slower question. CLAUDE.md asks that a job be registered when it starts and
+#: not when it has an answer, so an entry that has written nothing for half an
+#: hour is the normal case and accusing it would teach a reader to skip the
+#: warning -- which is how a warning becomes worse than none. The seven
+#: entries that prompted this had been still for 22 to 67 hours.
+_CLAIM_GRACE_SECONDS = 3600.0
+
+
+def _status_token(note: str) -> str:
+    """The bracketed status ``register_job.py`` prefixes to a note.
+
+    ``--status running`` writes ``[running] Profiling the tick loop.``, and
+    the instruction beside it -- update the note when the job finishes -- is
+    the one every session skips. Seven entries on this page say ``[running]``
+    over a metrics file nothing has touched in a day. Reading the token here
+    is what lets the page say so, and it returns "" for a note with no
+    prefix rather than guessing from the prose.
+    """
+    text = str(note or "").lstrip()
+    if not text.startswith("["):
+        return ""
+    end = text.find("]")
+    return text[1:end].strip().lower() if end > 0 else ""
+
+
 def _plottable(value: Any) -> bool:
     """Whether a value survives the trip through JSON into a browser.
 
@@ -2436,6 +2465,7 @@ def render_multi(
     kinds: "dict[str, str] | None" = None,
     extras: "dict[str, Any] | None" = None,
     configs: "dict[str, Any] | None" = None,
+    silent: "dict[str, float] | None" = None,
 ) -> "tuple[str, dict[str, Any]]":
     """One page holding several runs, as ``(name, rows, live)`` triples.
 
@@ -2447,6 +2477,13 @@ def render_multi(
 
     ``live`` marks a run whose metrics file was written recently, so a
     finished run is not presented as though it were still moving.
+
+    ``silent`` is how long each metrics file has gone unwritten, from the same
+    subtraction ``live`` comes out of. The page already held both facts and
+    printed only the wrong one: seven entries carried a note beginning
+    ``[running]`` while ``live`` was false for every one of them, and an entry
+    that still says it is running hours later is worse than no entry, because
+    it is believed.
     """
     body = {
         "runs": {
@@ -2459,6 +2496,23 @@ def render_multi(
                 # agent is doing is not, and an index entry whose meaning
                 # lives only in a chat log is an index entry nobody can read.
                 "note": (notes or {}).get(name, ""),
+                # How long the file has been still, so the contradiction can
+                # be stated in the units a reader thinks in rather than left
+                # as a boolean nobody is shown.
+                "silent_seconds": (silent or {}).get(name),
+                # The contradiction itself, decided here rather than in the
+                # page, because every half of it is Python's to know: the note
+                # says the job is running, and the file says nothing has
+                # written to it for an hour. Every clause matters -- a live
+                # run whose note says running is simply correct, a job
+                # registered twenty minutes ago has not done anything wrong
+                # yet, and a run with no mtime to compare against is not
+                # evidence of anything.
+                "claims_running": bool(
+                    not live
+                    and (silent or {}).get(name) is not None
+                    and (silent or {})[name] >= _CLAIM_GRACE_SECONDS
+                    and _status_token((notes or {}).get(name, "")) == "running"),
             }
             for name, rows, live in runs
         },
@@ -2619,6 +2673,11 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .tab[aria-selected="true"]{background:var(--panel);border-color:var(--rule);color:var(--ink);margin-bottom:-1px;padding-bottom:9px}
 .tab .pip{width:6px;height:6px;border-radius:50%;background:var(--muted);flex:none}
 .tab .pip.on{background:var(--good);box-shadow:0 0 0 2.5px var(--goodw)}
+/* A note that says the job is running over a file nothing is writing to. The
+   grey pip a stopped run gets is right for a run that says it stopped, and
+   wrong for one that claims otherwise -- the tab is where the claim is read
+   first and the only place the reader is choosing between runs. */
+.tab .pip.warn{background:var(--warn);box-shadow:0 0 0 2.5px var(--warnw)}
 .tab .val{font-family:"JetBrains Mono",monospace;font-size:11.5px;font-variant-numeric:tabular-nums}
 .split-toggle{appearance:none;background:var(--panel);border:1px solid var(--rule);border-radius:3px;
   font-family:Archivo,sans-serif;font-size:11px;font-weight:600;color:var(--soft);
@@ -2758,6 +2817,12 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .note.clamped::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1.7em;
   background:linear-gradient(to bottom,transparent,var(--ground));pointer-events:none}
 .note.clamped.open::after{content:none}
+/* The contradiction, stated where the note that makes it is read. Sized and
+   coloured like the hero's chip line rather than like an error, because the
+   page is reporting a disagreement between two things it knows, not a
+   failure of its own. */
+.claim{display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+  margin:0 0 12px;font-size:13px;color:var(--warn)}
 .pane-head{display:flex;align-items:center;gap:9px;margin-bottom:10px}
 .pane-head select{font-family:Archivo,sans-serif;font-size:13px;font-weight:600;color:var(--ink);
   background:var(--panel);border:1px solid var(--rule);border-radius:3px;padding:5px 8px}
@@ -2765,6 +2830,10 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .readout{background:var(--panel);border:1px solid var(--rule);border-radius:3px;box-shadow:var(--shadow);overflow:hidden}
 .bar{height:3px;background:var(--hair)}
 .bar i{display:block;height:100%;background:var(--accent)}
+/* A stopped run's bar. It is a record of how far the run got, not a thing
+   still filling, and the accent said otherwise beside a "left" cell that now
+   reads "--". */
+.bar i.stale{background:var(--grey)}
 /* Every cell draws its own top and left hairline and never a right or a
    bottom one; the grid is pulled one pixel left and .readout already clips,
    so column zero's left rules fall outside. Every interior boundary then
@@ -3142,6 +3211,7 @@ function paneMarkup(id){
   return '<div class="pane" data-pane="'+id+'">'
     +'<div class="pane-head"><span class="lbl">showing</span><select data-role="pick"></select></div>'
     +'<div data-role="note" class="note"></div>'
+    +'<div data-role="claim" class="claim"></div>'
     +'<div class="readout"><div class="bar"><i data-role="bar" style="width:0%"></i></div>'
     +'<div class="readout-grid" data-role="general"></div></div>'
     +'<div data-role="hero"></div><div class="tiles" data-role="tiles"></div>'
@@ -3171,9 +3241,33 @@ function fillPane(pane,name,slot){
         if(noteEl.classList) noteEl.classList.toggle('open');});
     }
   }
+  /* The one thing a progress view must never do is hold two facts and print
+     only the wrong one. Seven entries here carried a note beginning
+     "[running]" over a metrics file nothing had written to in a day, and the
+     page said "running" for all of them. Both halves are checked in Python;
+     this states the result in the units a reader thinks in. */
+  var claimEl=q('claim');
+  if(claimEl){
+    var contradicted=!!run.claims_running;
+    claimEl.innerHTML=contradicted
+      ? ('<span class="chip warn">stale</span><span>claims running &mdash; silent for '
+         +dur(run.silent_seconds)+'</span>')
+      : '';
+    claimEl.style.display=contradicted?'flex':'none';
+  }
   var done=s.total_steps?Math.min(1,(s.steps||0)/s.total_steps):0;
-  q('bar').style.width=(done*100).toFixed(1)+'%';
-  var remain=(s.total_steps&&s.steps_per_second)?(s.total_steps-s.steps)/s.steps_per_second:null;
+  var barEl=q('bar');
+  barEl.style.width=(done*100).toFixed(1)+'%';
+  /* Muted where the run has stopped, so a bar frozen at 2% does not read as
+     a bar still filling. */
+  barEl.className=run.live?'':'stale';
+  /* Gated on `live`, exactly as the "next eval" cell one column over already
+     was. Eighteen stopped runs printed a time to finish, six of them
+     negative: learn-1m-flat said 17h left and learn-1m-aborted, whose note
+     begins "Dead.", said 12h over a 2% bar. Those are not stale numbers, they
+     are false ones -- nothing is going to finish. */
+  var remain=(run.live&&s.total_steps&&s.steps_per_second)
+    ? (s.total_steps-s.steps)/s.steps_per_second : null;
   q('general').innerHTML=[
     cell(commas(s.steps),'steps',s.total_steps?('/ '+commas(s.total_steps)):''),
     cell(num(s.steps_per_second,1),'per sec'),
@@ -3227,7 +3321,16 @@ function fillPane(pane,name,slot){
   q('c1').innerHTML=chart('ch'+p+'a','Lift vs control',
       [{name:S.lift_greedy.length?'sampled':'lift',color:A,points:S.lift}]
       .concat(S.lift_greedy.length?[{name:'greedy',color:B,points:S.lift_greedy}]:[]),
-      {zero:true,fill:!S.lift_greedy.length})
+      /* Ten runs drew "no evaluations yet" directly under a readout cell
+         reading "18 evals". A --probe ladder run is rated and never lifted,
+         so it has evaluations and an empty lift series -- and denying a
+         measurement the page is holding is the failure this file was
+         rewritten for, fixed once in the counter and never here. An empty
+         chart now says which of the two things it is. */
+      {zero:true,fill:!S.lift_greedy.length,
+       emptyText:s.evaluations
+         ? (commas(s.evaluations)+' evaluations, none of them a lift')
+         : 'no evaluations yet'})
     +'<div class="grid2">'
     +chart('ch'+p+'b','Beating its past',
       [{name:'wins',color:D,points:S.ancestor_win},{name:'losses',color:C,points:S.ancestor_loss}],
@@ -4558,7 +4661,7 @@ function paintTabs(){
     var val=(l===null||l===undefined)?'':'<span class="val">'+(l>0?'+':'')+Number(l).toFixed(2)+'</span>';
     var on=view==='runs'&&picked.slice(0,split?2:1).indexOf(n)>=0;
     return '<button class="tab" role="tab" data-run="'+n+'" aria-selected="'+on+'">'
-      +'<span class="pip'+(r.live?' on':'')+'"></span>'+n+val+'</button>';
+      +'<span class="pip'+(r.live?' on':(r.claims_running?' warn':''))+'"></span>'+n+val+'</button>';
   }).join('');
   Array.prototype.forEach.call(document.querySelectorAll('.tab'),function(t){
     t.addEventListener('click',function(){
@@ -4976,6 +5079,10 @@ def main(argv: list[str] | None = None) -> int:
         notes: dict[str, str] = {}
         kinds: dict[str, str] = {}
         configs: dict[str, Any] = {}
+        # How long each file has been still, from the same subtraction `live`
+        # is derived from -- so the page can print the gap rather than only
+        # know that there is one.
+        silent: dict[str, float] = {}
         skipped: list[str] = []
         for run in discover():
             metrics = run / "metrics.jsonl"
@@ -5005,7 +5112,10 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     deduped.append(row)
             rows = deduped
-            live = metrics.is_file() and (now - metrics.stat().st_mtime) < _LIVE_SECONDS
+            still_for = (now - metrics.stat().st_mtime) if metrics.is_file() else None
+            live = still_for is not None and still_for < _LIVE_SECONDS
+            if still_for is not None:
+                silent[label] = max(0.0, still_for)
             collected.append((label, rows, live))
             note = _note_of(run)
             if note:
@@ -5019,7 +5129,8 @@ def main(argv: list[str] | None = None) -> int:
         extras = _extras_of(_run_roots())
         extras["skipped"] = skipped
         html, body = render_multi(collected, notes=notes, kinds=kinds,
-                                  extras=extras, configs=configs)
+                                  extras=extras, configs=configs,
+                                  silent=silent)
         out.write_text(html, encoding="utf-8")
         # Beside the page, because a served copy polls this rather than
         # reloading itself. Written second so a reader never sees data newer

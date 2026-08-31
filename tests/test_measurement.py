@@ -937,11 +937,27 @@ def test_the_expert_evaluation_survives_a_caller_who_wants_one_arm(tmp_path):
     assert row["eval_lift_sd_greedy"] == verdict["greedy"]["lift"]
     assert "eval_lift_sd_sampled" not in row
 
-    # And the arena agrees with the other two evaluation entry points. This
-    # defaulted to 5 while cr_sim.train.evaluate's CLI and cr_sim.train.run
-    # both defaulted to 11 -- the same silent-disagreement shape that trained
-    # a whole run at level 11 while its config.json recorded 5.
+    # And the arena agrees with the other evaluation entry point. This
+    # defaulted to 5 while cr_sim.train.evaluate's CLI defaulted to 11 -- the
+    # same silent-disagreement shape that trained a whole run at level 11
+    # while its config.json recorded 5.
+    #
+    # Read off cr_sim.train.evaluate and no longer off cr_sim.train.run, which
+    # now defaults to 5 on purpose: at 11 a 120-second match draws 92% of the
+    # time and the agent learns from shaping alone, so training and measuring
+    # want different arenas. That difference is deliberate and documented on
+    # --tower-level; what must never happen is two *evaluations* quietly
+    # playing in different ones, which is what this still checks. Both numbers
+    # are read, neither is written here, so moving either alone goes red.
     config = json.loads((out / "config.json").read_text(encoding="utf-8"))
-    from cr_sim.train.run import build_parser
+    import inspect
+    import re as _re
 
-    assert config["tower_level"] == build_parser().get_default("tower_level")
+    from cr_sim.train import evaluate as _evaluate
+
+    found = _re.search(r'"--tower-level",\s*type=int,\s*default=(\d+)',
+                       inspect.getsource(_evaluate.main))
+    assert found, "cr_sim.train.evaluate's CLI no longer declares --tower-level"
+    assert config["tower_level"] == int(found.group(1)), (
+        f"the arena evaluates at {config['tower_level']} while "
+        f"cr_sim.train.evaluate's CLI defaults to {found.group(1)}")

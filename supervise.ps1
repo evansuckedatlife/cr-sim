@@ -9,13 +9,25 @@
 # After a reboot, run this same command again -- it will find the checkpoint
 # and pick up where the run stopped.
 #
-#   powershell -File supervise.ps1 -Name projected-v2 -Steps 500000
+#   powershell -File supervise.ps1 -Name my-run -Steps 500000
+#
+# -Name has no default on purpose. It used to be "projected-v2", which is an
+# existing 20-row run directory, so launching this with no arguments -- the
+# thing you do after a bugcheck, from muscle memory -- quietly resumed
+# somebody else's experiment from its checkpoint and wrote into its metrics.
+# Refused with a message rather than declared Mandatory, because a mandatory
+# parameter prompts, and the caller here is as often an agent as a person.
 
 param(
-    [string]$Name    = "projected-v2",
+    [string]$Name,
     [int]$Steps      = 500000,
     [int]$MaxRestarts = 50
 )
+
+if (-not $Name) {
+    Write-Error "-Name is required: it is the run directory under runs\ and the label on the progress page. There is no safe default, because every default is some other run's name."
+    exit 2
+}
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $runDir = Join-Path $root "runs\$Name"
@@ -31,6 +43,17 @@ $common = @(
     "--match-seconds", "120",
     "--reward", "projected",
     "--horizon-seconds", "3",
+    # Both spelled out, and neither is optional. They are the two settings the
+    # handoff calls load-bearing, they used to be left to run.py's defaults of
+    # 11 and 0.3, and this launcher is the one you reach for after a bugcheck
+    # -- so every crash-resilient run silently trained at the level where 92%
+    # of matches draw, charged for elixir it was never rewarded for spending.
+    # runs/learn-1m-factored-lvl11 is 557,056 steps of that. Written here even
+    # though run.py now defaults the same way, because a launcher that relies
+    # on a default records nothing, and config.json is where a run says what
+    # it was.
+    "--tower-level", "5",
+    "--elixir-weight", "0.0",
     "--opponent", "self",
     "--eval-every", "10",
     # Frequent on purpose. A checkpoint every ten updates is roughly half an
