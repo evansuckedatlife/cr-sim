@@ -64,11 +64,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tower-level", type=int, default=11,
         help="Crown Tower level. 11, agreeing with cr_sim.train.evaluate's "
-             "CLI and with cr_sim.train.run -- this defaulted to 5 while both "
-             "of those defaulted to 11, which is two evaluation entry points "
-             "quietly playing in different arenas. That class of mismatch "
-             "already trained a whole run at level 11 while config.json "
-             "recorded 5. Pass --tower-level 5 explicitly for the arena the "
+             "CLI, which is the other way a checkpoint gets measured -- "
+             "this defaulted to 5 while that defaulted to 11, which is two "
+             "evaluation entry points quietly playing in different arenas. "
+             "It deliberately differs from cr_sim.train.run, which defaults "
+             "to 5: that is a training-arena choice made because at 11 a "
+             "120-second match ends with 92%% of matches drawn, and it is "
+             "not a claim about where a finished checkpoint should be "
+             "scored. Pass --tower-level 5 explicitly for the arena the "
              "clones were measured in.")
     parser.add_argument("--tps", type=int, default=20)
     parser.add_argument("--frame-skip", type=int, default=30)

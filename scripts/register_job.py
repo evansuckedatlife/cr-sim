@@ -154,6 +154,18 @@ def register(name: str, note: str, rows: "list[dict] | None" = None,
         # a row to a file is not a reason to forget them.
         if isinstance(raw, dict):
             existing_config = dict(raw)
+        elif had_config:
+            # Unreadable, or readable and not an object. There is nothing to
+            # carry forward and the write below lands straight on top of it,
+            # so a config holding a tower_level, an eval_opponent and a
+            # total_steps behind one trailing comma became exactly
+            # ``{"note": ..., "registered_at": ...}`` and the text was gone.
+            # That is worse than the default path, which refuses this very
+            # directory *because* the config is unreadable and names --append
+            # as the safe route. Moved aside instead: the bytes stay in the
+            # directory under a name ``watch.discover`` does not glob, so what
+            # the rows meant is still readable by a person.
+            _stamped_aside(config)
     elif replace:
         _stamped_aside(metrics)
         _stamped_aside(config)
@@ -181,8 +193,17 @@ def register(name: str, note: str, rows: "list[dict] | None" = None,
     for index, row in enumerate(body, start=start):
         row.setdefault("updates", index)
 
-    metrics.write_text(
-        "".join(json.dumps(r) + "\n" for r in kept + body), encoding="utf-8")
+    # Only when there is something to add. A note-only registration -- which
+    # is what CLAUDE.md tells every session to do the moment a job finishes --
+    # otherwise rewrites the file byte for byte and moves its mtime, and the
+    # page derives "is this run live" from exactly that mtime. So marking a
+    # run dead redrew it as alive: green pip, accent progress bar and a
+    # seventeen-hour countdown to a finish, on a run that had not written a
+    # row in three days. The config write below is the only file a note needs.
+    if body:
+        metrics.write_text(
+            "".join(json.dumps(r) + "\n" for r in kept + body),
+            encoding="utf-8")
 
     stamped = note if not status else f"[{status}] {note}"
     payload = dict(existing_config)

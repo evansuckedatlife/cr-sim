@@ -653,6 +653,13 @@ def test_a_constant_schedule_pushes_nothing_at_all(tmp_path, monkeypatch):
             "--tps", "20", "--frame-skip", "30", "--device", "cpu",
             "--opponent", "random", "--reward", "projected",
             "--eval-every", "10000", "--save-every", "10000",
+            # Two fresh runs under one name, on purpose: the comparison is
+            # between an annealed run and an un-annealed one and nothing here
+            # reads what either wrote to disk. `run.py` refuses a second start
+            # over an existing run's metrics and checkpoints -- rightly, since
+            # runs/ is gitignored with no backup -- and --replace is the flag
+            # that says "yes, start over here", which is exactly the intent.
+            "--replace",
             "--out", str(tmp_path), "--name", "pushes", *extra])
         return list(pushes)
 

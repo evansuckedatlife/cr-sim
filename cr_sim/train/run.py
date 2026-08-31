@@ -94,6 +94,171 @@ def save_checkpoint(payload: dict, path: Path) -> Path:
     return path
 
 
+#: The settings that decide which arena a metrics row was measured in. Two
+#: readings that disagree on any of these are not one series: at tower level 11
+#: a 120-second match ends with 92% of matches drawn and at 5 it does not, and a
+#: lift is a difference of returns, so the reward is in the numerator and the
+#: denominator both. `_ladder_ratings` already refuses a rating table that
+#: disagrees about `tower_level`; this is the same refusal for a resume.
+_ARENA_KEYS = ("tower_level", "elixir_weight", "reward", "match_seconds",
+               "frame_skip")
+
+#: The keys a `register_job.py` placeholder row is made of. A metrics file
+#: holding nothing outside this set has measured nothing, so a name registered
+#: as a job and then trained is not a name that loses anything. Kept identical
+#: to `register_job._PLACEHOLDER_KEYS` on purpose: two guards over the same
+#: directory that disagree about what "empty" means are worse than one.
+_PLACEHOLDER_KEYS = {"updates", "steps", "episodes"}
+
+
+def _stamp_aside(path: Path) -> "Path | None":
+    """Move ``path`` out of the way under a timestamp, and say where it went.
+
+    The same move ``scripts/register_job.py`` makes, for the same reason: a
+    name that already holds a run is refused, and the escape hatch has to keep
+    the bytes rather than truncate them. ``metrics.<stamp>.jsonl`` because
+    ``watch.discover`` globs the exact string ``metrics.jsonl``, so what is
+    moved aside does not reappear on the page as a second copy of the entry.
+    """
+    if not path.exists():
+        return None
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for attempt in range(100):
+        suffix = stamp if not attempt else f"{stamp}-{attempt}"
+        target = path.with_name(f"{path.stem}.{suffix}{path.suffix}")
+        if not target.exists():
+            path.rename(target)
+            return target
+    raise SystemExit(f"cannot find a free name to move {path} aside")
+
+
+def _measured_rows(metrics: Path) -> int:
+    """How many rows in ``metrics`` carry something that was measured.
+
+    A line this cannot parse counts: the question is "is there anything here
+    to lose", and answering "no" because a file is malformed is exactly the
+    wrong way round.
+    """
+    if not metrics.is_file():
+        return 0
+    count = 0
+    for line in metrics.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            count += 1
+            continue
+        if not isinstance(row, dict) or set(row) - _PLACEHOLDER_KEYS:
+            count += 1
+    return count
+
+
+def _guard_run_directory(out: Path, args: Any) -> None:
+    """Refuse to start a fresh run on top of one that already exists.
+
+    ``register_job.py`` grew this guard because one mistyped ``--name``
+    replaced a training run's rows and its config. ``cr_sim.train.run`` is the
+    thing that *produces* those rows and had no guard at all: it opens
+    ``metrics.jsonl`` with mode ``"w"`` whenever ``--resume`` is absent,
+    rewrites ``config.json`` unconditionally, and overwrites
+    ``checkpoint.pt``, ``best.pt`` and ``final.pt`` as it goes -- with exit
+    code 0 and a "done" line. ``runs/`` is gitignored and there is no backup.
+
+    Measured before this existed: a directory holding updates 1-4 out to step
+    128, re-run under the same name without ``--resume``, came back holding
+    update 1 alone, a config claiming ``total_steps`` 32 and ``seed`` 7, and a
+    checkpoint at 32 steps. Nothing said so.
+
+    ``--resume`` is the sanctioned way to continue a run and is let through
+    here; ``--replace`` is the escape hatch, and it stamps the old files aside
+    rather than deleting them.
+    """
+    if args.resume:
+        return
+    metrics = out / "metrics.jsonl"
+    rows = _measured_rows(metrics)
+    weights = [name for name in ("checkpoint.pt", "best.pt", "final.pt")
+               if (out / name).is_file()]
+    if not rows and not weights:
+        return
+
+    if args.replace:
+        for name in ("metrics.jsonl", "config.json",
+                     "checkpoint.pt", "best.pt", "final.pt"):
+            _stamp_aside(out / name)
+        return
+
+    held = []
+    if rows:
+        held.append(f"{metrics} holds {rows} row(s) carrying measurements")
+    if weights:
+        held.append("it holds " + ", ".join(weights))
+    raise SystemExit(
+        f"{out} is not an empty slot: {'; and '.join(held)}. Starting a fresh "
+        f"run here would truncate the metrics, rewrite config.json and "
+        f"overwrite every checkpoint, and runs/ is gitignored with no backup. "
+        f"Pass --resume to continue this run from its checkpoint, or --name "
+        f"something else to start a new one, or --replace to move the "
+        f"existing files aside under a timestamp first.")
+
+
+def _check_resume_arena(out: Path, record: dict) -> dict:
+    """Keep a resumed run's config honest about the rows it already holds.
+
+    ``config.json`` is rewritten from the current CLI on every start, resume
+    included -- so resuming a run trained at ``--tower-level 11`` with today's
+    launcher, which passes 5, trained the remainder in a different arena *and*
+    rewrote the run's own config to claim it had always been 5. The earlier
+    rows record no level of their own; that config was the only thing that
+    knew what they meant.
+
+    Two rules, and between them nothing already on disk is relabelled:
+
+    * A key the recorded config carries and the CLI disagrees with is refused,
+      the way ``_ladder_ratings`` refuses a rating table fitted at another
+      tower level.
+    * A key the recorded config does not carry is left out rather than
+      invented. Seven runs here predate these being recorded at all, and
+      stamping today's value onto them would put a number where the file's
+      silence is the only honest answer.
+    """
+    config = out / "config.json"
+    if not config.is_file():
+        return record
+    try:
+        recorded = json.loads(config.read_text(encoding="utf-8"))
+    except (ValueError, OSError, UnicodeDecodeError):
+        # Unreadable, so nothing can be checked against it -- and overwriting
+        # it is what destroys the evidence. Leave it where it is.
+        raise SystemExit(
+            f"--resume, but {config} cannot be read, so what this run's "
+            f"existing rows were measured under cannot be established. Move it "
+            f"aside by hand if the rows are genuinely worth continuing.")
+    if not isinstance(recorded, dict):
+        return record
+
+    out_record = dict(record)
+    for key in _ARENA_KEYS:
+        if key not in recorded:
+            # Never invent a claim about rows that predate the key.
+            out_record.pop(key, None)
+            continue
+        if recorded[key] != record.get(key):
+            raise SystemExit(
+                f"--resume, but {config} records {key}={recorded[key]!r} and "
+                f"this command asks for {key}={record.get(key)!r}. The rows "
+                f"already in this run were measured at {recorded[key]!r}; "
+                f"training the rest at {record.get(key)!r} puts two arenas in "
+                f"one series and rewrites the only record of what the first "
+                f"half meant. Pass --{key.replace('_', '-')} "
+                f"{recorded[key]!r} to continue this run, or --name something "
+                f"else to start a new one.")
+    return out_record
+
+
 def _random_opponent(seed: int):
     """An opponent that spends its elixir on legal placements.
 
@@ -318,6 +483,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="continue from checkpoint.pt in the run directory, keeping the "
              "optimiser state and step count. Metrics are appended rather "
              "than overwritten.",
+    )
+    parser.add_argument(
+        "--replace", action="store_true",
+        help="start fresh in a --name that already holds a run, moving its "
+             "metrics.jsonl, config.json and checkpoints aside under a "
+             "timestamp first. Not a delete: the old files stay in the "
+             "directory under names the watcher does not enumerate. Without "
+             "this, a name already holding measurements or a checkpoint is "
+             "refused rather than overwritten.",
     )
     parser.add_argument(
         "--reward", choices=("simple", "five-term", "projected"), default="five-term",
@@ -557,6 +731,17 @@ def main(argv: list[str] | None = None) -> int:
     anchor_path = args.kl_reference or args.init_from
 
     out = args.out / args.name
+    # Both guards before the mkdir, and before anything at all is loaded or
+    # written. A fresh run on top of an existing one truncates its metrics and
+    # overwrites its checkpoints; a resume into a different arena relabels the
+    # rows it is continuing. A refusal that only arrives after twenty minutes
+    # of rollouts is not a guard, and the config write is a hundred lines
+    # further down -- so the arena is settled here and the result carried to
+    # it, rather than checked where it happens to be written.
+    _guard_run_directory(out, args)
+    arena = _check_resume_arena(out, {key: getattr(args, key)
+                                      for key in _ARENA_KEYS}) \
+        if args.resume else None
     out.mkdir(parents=True, exist_ok=True)
     metrics_path = out / "metrics.jsonl"
 
@@ -646,57 +831,65 @@ def main(argv: list[str] | None = None) -> int:
         head=args.head,
         kl_coefficient=args.kl,
     )
-    (out / "config.json").write_text(
-        json.dumps({**asdict(config), "deck": list(DEFAULT_DECK), "tps": args.tps,
-                    "frame_skip": args.frame_skip, "match_seconds": args.match_seconds,
-                    "shaping": args.shaping, "reward": args.reward,
-                    "tower_level": args.tower_level,
-                    "horizon_seconds": args.horizon_seconds,
-                    "opponent": args.opponent, "head": args.head,
-                    # Self-play's cadence, and the weights the run started
-                    # from. None of these were recorded, so a run directory
-                    # could not answer "was this actually self-play, against
-                    # what, drawn how often, from which clone?" -- which is
-                    # exactly the question its flat metrics provoke.
-                    "pool_size": args.pool_size,
-                    "refresh_every": args.refresh_every,
-                    # 0 disables the ladder entirely, which is worth stating:
-                    # a run with no ancestor rows is not a run whose ladder
-                    # broke, it is a run that never measured one.
-                    "ancestor_episodes": args.ancestor_episodes,
-                    "opponent_temperature": args.opponent_temperature,
-                    "init_from": str(args.init_from) if args.init_from else None,
-                    "resumed": bool(args.resume),
-                    "kl": args.kl, "elixir_weight": args.elixir_weight,
-                    "kl_reference": str(anchor_path) if anchor_path else None,
-                    "observation": args.observation,
-                    "observation_channels": list(grid_channels(observation)),
-                    # Which opponent the in-run lift is measured against, read
-                    # off a real evaluation environment rather than asserted.
-                    # A run's own lift series is only comparable to another
-                    # run's when these agree.
-                    "eval_opponent": opponent_name(_eval_env()),
-                    # One new key, not four: watch.py pairs two runs for A/B
-                    # only while their config key sets differ by at most four,
-                    # so every field added here is spent out of that budget.
-                    "probe": args.probe,
-                    # Two new keys, nested, and that is the whole budget:
-                    # watch.py pairs two runs for A/B only while their config
-                    # key sets differ by at most four. "shaping" above stays
-                    # where it is for the same reason -- deleting a key
-                    # changes the key set and would make every new run
-                    # unpairable with every old one -- but shaping_is_inert
-                    # inside here finally says what it is.
-                    "reward_schedule": {
-                        **schedule.as_dict(),
-                        "shaping_is_inert": args.reward != "simple",
-                    },
-                    # The scale the in-run lift is measured on, which is now a
-                    # constant rather than whatever --reward happened to be.
-                    "eval_reward": {"kind": "projected", **EVAL_REWARD.as_dict()},
-                    "eval_episodes": args.eval_episodes}, indent=2),
-        encoding="utf-8",
-    )
+    record = {**asdict(config), "deck": list(DEFAULT_DECK), "tps": args.tps,
+              "frame_skip": args.frame_skip, "match_seconds": args.match_seconds,
+              "shaping": args.shaping, "reward": args.reward,
+              "tower_level": args.tower_level,
+              "horizon_seconds": args.horizon_seconds,
+              "opponent": args.opponent, "head": args.head,
+              # Self-play's cadence, and the weights the run started
+              # from. None of these were recorded, so a run directory
+              # could not answer "was this actually self-play, against
+              # what, drawn how often, from which clone?" -- which is
+              # exactly the question its flat metrics provoke.
+              "pool_size": args.pool_size,
+              "refresh_every": args.refresh_every,
+              # 0 disables the ladder entirely, which is worth stating:
+              # a run with no ancestor rows is not a run whose ladder
+              # broke, it is a run that never measured one.
+              "ancestor_episodes": args.ancestor_episodes,
+              "opponent_temperature": args.opponent_temperature,
+              "init_from": str(args.init_from) if args.init_from else None,
+              "resumed": bool(args.resume),
+              "kl": args.kl, "elixir_weight": args.elixir_weight,
+              "kl_reference": str(anchor_path) if anchor_path else None,
+              "observation": args.observation,
+              "observation_channels": list(grid_channels(observation)),
+              # Which opponent the in-run lift is measured against, read
+              # off a real evaluation environment rather than asserted.
+              # A run's own lift series is only comparable to another
+              # run's when these agree.
+              "eval_opponent": opponent_name(_eval_env()),
+              # One new key, not four: watch.py pairs two runs for A/B
+              # only while their config key sets differ by at most four,
+              # so every field added here is spent out of that budget.
+              "probe": args.probe,
+              # Two new keys, nested, and that is the whole budget:
+              # watch.py pairs two runs for A/B only while their config
+              # key sets differ by at most four. "shaping" above stays
+              # where it is for the same reason -- deleting a key
+              # changes the key set and would make every new run
+              # unpairable with every old one -- but shaping_is_inert
+              # inside here finally says what it is.
+              "reward_schedule": {
+                  **schedule.as_dict(),
+                  "shaping_is_inert": args.reward != "simple",
+              },
+              # The scale the in-run lift is measured on, which is now a
+              # constant rather than whatever --reward happened to be.
+              "eval_reward": {"kind": "projected", **EVAL_REWARD.as_dict()},
+              "eval_episodes": args.eval_episodes}
+    # Written from the CLI every start, resume included -- so on a resume the
+    # arena-defining half of it is whatever `_check_resume_arena` settled at
+    # the top of this function, which is a key short wherever the recorded
+    # config predates that key. Silence about rows nobody can characterise is
+    # the honest answer; a number is not.
+    if arena is not None:
+        for key in _ARENA_KEYS:
+            if key not in arena:
+                record.pop(key, None)
+    (out / "config.json").write_text(json.dumps(record, indent=2),
+                                     encoding="utf-8")
 
     # The anchors' fitted ratings, read once. Without them a ladder probe
     # still rates the policy against its anchors, but every anchor sits at 0

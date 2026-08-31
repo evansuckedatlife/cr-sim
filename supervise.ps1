@@ -75,6 +75,17 @@ for ($attempt = 0; $attempt -le $MaxRestarts; $attempt++) {
         -WorkingDirectory $root -NoNewWindow -PassThru `
         -RedirectStandardOutput "$root\$Name.out" `
         -RedirectStandardError  "$root\$Name.err"
+    # Touching .Handle before waiting, which is not optional in Windows
+    # PowerShell 5.1: Start-Process -PassThru hands back a Process object
+    # whose native handle is never opened, so WaitForExit() has nothing to
+    # cache the exit code from and .ExitCode is $null for every outcome.
+    # Measured here on 5.1.26100: a child exiting 0 and one exiting 3 both
+    # reported $null without this line, and 0 and 3 with it. Without it
+    # `if ($code -eq 0) { break }` below can never fire, so a run that
+    # finished cleanly was relaunched MaxRestarts more times -- fifty by
+    # default -- each attempt resuming an already-finished checkpoint and
+    # logging "exited , restarting in 15s" with the code missing.
+    $null = $p.Handle
     $p.WaitForExit()
     $code = $p.ExitCode
 

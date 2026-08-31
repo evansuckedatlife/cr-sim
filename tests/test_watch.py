@@ -23,7 +23,9 @@ produce, not what strings happen to appear in the template.
 from __future__ import annotations
 
 import json
+import math
 import time
+import urllib.parse
 
 import pytest
 
@@ -461,6 +463,71 @@ process.stdout.write(JSON.stringify({
     assert out["lineHiddenAfterLeave"] == "none", "the scrub line should hide once the pointer leaves"
 
 
+@needs_node
+def test_a_reading_that_is_drawn_is_a_reading_that_can_be_read():
+    """Two readings at one step are both on the chart, so both must be readable.
+
+    Every per-run chart is drawn against `steps`, and a run that resumed
+    replays its step counter -- so the two segments overlap on one x band, the
+    line steps backwards, and the drawing paints a vertical stroke between two
+    real values. `wireScrub` picked the nearest point with a strict `<`, which
+    always keeps the earlier of two at the same x: the later one was drawn and
+    could never be named. 914 readings over 23 runs of the corpus on disk,
+    including `probe-bandit`'s entropy at step 22,784, where the two values are
+    0.000 and 5.303 and the readout said 0.000.
+
+    Asserted on the readout's own text against the values the fixture put at
+    that step, not on the shape of the search.
+    """
+    harness = r"""
+var elements = {};
+function makeEl(id){
+  var el = {
+    style: {display:''}, innerHTML: '',
+    getBoundingClientRect: function(){ return {left:0, width:640}; },
+    addEventListener: function(evt, fn){ this['on_'+evt] = fn; },
+    setAttribute: function(k,v){ this['attr_'+k] = v; },
+    getAttribute: function(k){ return this['attr_'+k]; },
+  };
+  elements[id] = el;
+  return el;
+}
+var document = { getElementById: function(id){ return elements[id] || null; } };
+
+/* A resume: the counter runs to 3000, restarts, and replays 2000 and 3000
+   with different readings. Two values sit on x=2000 and two on x=3000. */
+chart('t','n',[{name:'lift',color:'#000',
+  points:[[1000,0.100],[2000,0.200],[3000,0.300],
+          [2000,0.910],[3000,0.920]]}],{});
+makeEl('t'); makeEl('t-read'); makeEl('t-line');
+wireScrub();
+
+var read={};
+[[1000,'x1000'],[2000,'x2000'],[3000,'x3000']].forEach(function(pair){
+  /* padL is 42 and padR is at least 50, so this is the x in client space
+     for a step, computed the way the chart's own X() does. */
+  var t=(pair[0]-1000)/2000;
+  elements['t'].on_mousemove({clientX:42+t*(640-42-50)});
+  read[pair[1]]=elements['t-read'].innerHTML;
+});
+process.stdout.write(JSON.stringify(read));
+"""
+    out = json.loads(_run_js([_row(1, 1000)], harness))
+
+    # The step that carries one reading still reads as one number.
+    assert "0.100" in out["x1000"], out["x1000"]
+    assert "0.910" not in out["x1000"] and "0.200" not in out["x1000"], \
+        f"a step with one reading printed a neighbour's: {out['x1000']}"
+
+    # And the two steps that carry two each name both of them.
+    for step, first, second in (("x2000", "0.200", "0.910"),
+                                ("x3000", "0.300", "0.920")):
+        for value in (first, second):
+            assert value in out[step], \
+                f"{value} is drawn at this step and the readout says " \
+                f"{out[step]!r} -- a reading that cannot be read"
+
+
 # ------------------------------------------------------------ several at once
 
 
@@ -620,6 +687,59 @@ def test_the_page_is_installable_to_a_home_screen():
     assert 'rel="manifest"' in page
     assert 'rel="apple-touch-icon"' in page
     assert "standalone" in page, "the manifest should ask to run standalone, not in a browser chrome"
+
+    # Parsed, not grepped. The manifest is a data: URI, so a value that no
+    # parser accepts is invisible in the page source: `"theme_color":"0D1218"`
+    # lost its `#` and Chrome answered `property 'theme_color' ignored,
+    # '0D1218' is not a valid color`, leaving the installed page with no
+    # toolbar colour while `background_color` on the same line parsed fine.
+    href = re.search(r'<link rel="manifest" href="data:application/json,([^"]+)"',
+                     page).group(1)
+    manifest = json.loads(urllib.parse.unquote(href))
+    assert manifest["display"] == "standalone"
+    for key in ("theme_color", "background_color"):
+        assert re.fullmatch(r"#[0-9A-Fa-f]{6}", manifest[key]), \
+            f"the manifest's {key} is {manifest[key]!r}, which is not a colour"
+
+
+def test_the_browser_chrome_is_painted_the_colour_of_the_page_under_it():
+    """A theme-color with no media attribute is one answer to two questions.
+
+    The page is theme-aware through two token sets and the meta was a single
+    hardcoded `#0D1218`, so a phone in light mode painted its toolbar near
+    black above an `#EFF2F5` page. Both values are read out of the two
+    `--ground` tokens here rather than written down, so moving a token moves
+    the toolbar with it or this goes red.
+    """
+    page = render([_row(1, 1000)], "run")
+    head = page.split("</head>", 1)[0]
+    style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+
+    metas = {re.search(r'media="([^"]*)"', tag).group(1)
+             if "media=" in tag else None:
+             re.search(r'content="([^"]*)"', tag).group(1)
+             for tag in re.findall(r'<meta name="theme-color"[^>]*>', head)}
+    assert None not in metas, \
+        f"a theme-color with no media attribute answers for both themes: {metas}"
+    assert set(metas) == {"(prefers-color-scheme: light)",
+                          "(prefers-color-scheme: dark)"}, sorted(metas)
+
+    # The light block is the bare `:root`; every other `:root` here is a dark
+    # override -- `:root[data-theme="dark"]` and the
+    # `:root:not([data-theme="light"])` inside the prefers-color-scheme query.
+    grounds = {}
+    for selector, body in _rules(style):
+        hit = re.search(r"(?:^|;)\s*--ground\s*:\s*([^;]+)", body.strip())
+        if not hit:
+            continue
+        bare_root = _norm(selector).replace(" ", "") == ":root"
+        grounds["light" if bare_root else "dark"] = hit.group(1).strip()
+    assert set(grounds) == {"light", "dark"}, grounds
+    for theme, ground in grounds.items():
+        painted = metas[f"(prefers-color-scheme: {theme})"]
+        assert painted.lower() == ground.lower(), \
+            f"in {theme} theme the toolbar is painted {painted} over a " \
+            f"{ground} page"
 
 
 @needs_node
@@ -3576,6 +3696,138 @@ def test_the_watcher_writes_a_page_and_names_the_runs_it_could_not(tmp_path):
     assert body["alltime"]["skipped"] == ["empty"],         "a run that started and wrote nothing vanished from the census"
 
 
+def test_one_row_missing_one_key_does_not_freeze_the_served_page():
+    """A reader cannot tell a frozen page from a dead server.
+
+    `once()` raising takes the whole refresh down: the loop catches it, prints
+    "refresh failed, keeping the last page" to a console nobody is watching,
+    and the phone goes on showing a page whose timestamp has stopped. Sweeping
+    all 64 metric keys on disk, dropping one at a time from every row and
+    re-rendering, `updates` was the only key whose absence raised -- a bare
+    `r["updates"]` in `_next_evaluation` where every neighbouring reader uses
+    `.get` plus `_plottable`.
+
+    Every key is swept here rather than the one that was found, because the
+    next one added is as easy to subscript as this one was.
+    """
+    full = _row(2, 2000, eval_lift_sd=0.7, eval_win=0.5, control_win=0.26,
+                eval_episodes=40, eval_opponent="random", entropy=1.2,
+                value_loss=0.3, win_rate=0.4, ladder_elo=30.0,
+                explained_variance=0.1, elapsed_seconds=20)
+    keys = sorted(full)
+    assert "updates" in keys and len(keys) > 8, keys
+
+    for dropped in keys:
+        rows = [
+            _row(1, 1000, eval_lift_sd=0.5, eval_win=0.4, control_win=0.26,
+                 eval_episodes=40, eval_opponent="random", elapsed_seconds=10),
+            {k: v for k, v in full.items() if k != dropped},
+            _row(3, 3000, eval_lift_sd=0.9, eval_win=0.6, control_win=0.26,
+                 eval_episodes=40, eval_opponent="random", elapsed_seconds=30),
+        ]
+        try:
+            render_multi([("r", rows, True)])
+        except Exception as failure:            # noqa: BLE001 - that is the point
+            raise AssertionError(
+                f"a row written without {dropped!r} raises "
+                f"{failure!r} out of once(), which freezes the served page "
+                f"on its last render") from failure
+
+
+def test_a_page_is_written_even_when_nothing_has_measured_anything_yet(tmp_path):
+    """`run.py` opens metrics.jsonl with mode "w" the moment training starts.
+
+    So a fresh run is a config and an empty metrics file for as long as the
+    first update takes, and if that is the only run on disk then every
+    discovered run has an empty metrics file. That returned early, wrote no
+    files at all, and printed `1 run(s), 0 updates -> <path>` naming a page
+    that does not exist -- with `--serve` answering 503 and no reason until a
+    row landed. The zero-run page is a perfectly good page and it names the
+    directory it could not read rows from, which is what a reader needs.
+    """
+    from cr_sim.train.watch import main
+
+    runs = tmp_path / "runs"
+    (runs / "started-nothing").mkdir(parents=True)
+    (runs / "started-nothing" / "metrics.jsonl").write_text("", encoding="utf-8")
+    (runs / "started-nothing" / "config.json").write_text(
+        json.dumps({"total_steps": 1000000}), encoding="utf-8")
+
+    out = tmp_path / "progress.html"
+    assert main([str(runs / "started-nothing"), "--once", "--out", str(out)]) == 0
+    assert out.is_file(), \
+        "the report named a page it never wrote, and --serve has nothing to serve"
+    assert out.with_suffix(".json").is_file(), "no payload beside the page"
+
+    body = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
+    assert body["runs"] == {} and body["order"] == []
+    assert body["alltime"]["skipped"] == ["started-nothing"], \
+        "the page does not say which directory it found and could not read"
+    assert "<html" in out.read_text(encoding="utf-8")
+
+
+def test_the_page_and_its_payload_are_never_seen_half_written(tmp_path):
+    """`serve()` is a threading server reading the file the refresh loop rewrites.
+
+    `write_text` truncates the destination and then fills it, so a phone that
+    polls during the 6ms rewrite gets a short body -- and the server returns
+    503 only on `OSError`, so a torn page ships as a 200 and renders blank,
+    which is indistinguishable from a dead server. Measured on this box: 1,734
+    concurrent reads of a 765 KB page during a rewrite loop gave 451 with no
+    closing tag and 419 at zero bytes.
+
+    What is asserted is that neither file is ever the destination of a write
+    in progress: every write lands on a sibling first and arrives by rename.
+    """
+    import os
+    from pathlib import Path
+
+    from cr_sim.train import watch
+
+    runs = tmp_path / "runs"
+    (runs / "real").mkdir(parents=True)
+    _write(runs / "real" / "metrics.jsonl", [_row(1, 1000, episodes=40)])
+
+    out = tmp_path / "progress.html"
+    out.write_text("the page that was already there", encoding="utf-8")
+    out.with_suffix(".json").write_text("{}", encoding="utf-8")
+
+    opened = []
+    real_open = Path.open
+
+    def watched_open(self, *args, **kwargs):
+        if args and "w" in str(args[0]):
+            opened.append(self)
+        return real_open(self, *args, **kwargs)
+
+    renamed = []
+    real_replace = os.replace
+
+    def watched_replace(src, dst, *args, **kwargs):
+        renamed.append((Path(src).name, Path(dst).name))
+        return real_replace(src, dst, *args, **kwargs)
+
+    watch.Path.open = watched_open
+    watch.os.replace = watched_replace
+    try:
+        assert watch.main([str(runs / "real"), "--once", "--out", str(out)]) == 0
+    finally:
+        watch.Path.open = real_open
+        watch.os.replace = real_replace
+
+    for target in (out, out.with_suffix(".json")):
+        assert target not in opened, \
+            f"{target.name} is truncated in place, so a reader mid-write gets " \
+            "a short body and a blank page"
+    assert (out.name, out.name) not in renamed
+    assert sorted(renamed) == sorted([(out.name + ".tmp", out.name),
+                                      (out.with_suffix(".json").name + ".tmp",
+                                       out.with_suffix(".json").name)]), \
+        f"the files did not arrive by rename: {renamed}"
+    assert "<html" in out.read_text(encoding="utf-8"), "the page was not replaced"
+    assert not list(tmp_path.glob("*.tmp")), "a temporary was left behind"
+
+
 def test_the_same_run_path_twice_is_still_one_run(tmp_path):
     """The de-duplication was applied to discovery and not to the arguments.
 
@@ -3718,6 +3970,26 @@ def test_the_greedy_and_sampled_columns_are_both_readable_on_a_phone():
     assert "content:attr(data-h)" in block, "a stacked cell with no header"
     for header in ("Greedy", "Sampled", "Gap"):
         assert 'data-h="' + header + '"' in page,             header + " has no label once the table stacks"
+
+    # A @container block with nothing above it declared a query container is
+    # fourteen declarations that can never match. `.ledger.modes` is emitted
+    # into `#alltime`, a sibling of `#panes`, so `.pane` cannot be an ancestor
+    # of it and `.at` is its only possible container: delete `container-type`
+    # from `.at` and the table stays four columns wide at 390px with every
+    # assertion above still true.
+    containers = _container_selectors(style)
+    assert ".at" in containers, \
+        "nothing above .ledger.modes declares container-type, so this whole " \
+        f"@container block is dead: the containers are {sorted(containers)}"
+
+    # And a stacked cell can break its line. A flex item's min-width is auto,
+    # so the label and the value sum along one line that cannot wrap: the
+    # stacked table measured 397px inside a 316px scroll box and all 63 values
+    # sat off the right edge, which is worse than the four columns it replaced.
+    wrap = _declares(".ledger.modes td", "flex-wrap", style)
+    assert wrap == "wrap", \
+        f"a stacked cell cannot break its line (flex-wrap: {wrap!r}), so the " \
+        "value is pushed off the scroll box and the reader sees the label alone"
 
 
 def test_the_page_asks_nothing_of_a_network_it_may_not_have():
@@ -4067,14 +4339,59 @@ def _rules(style):
     return out
 
 
+def _norm(selector):
+    """One selector with its whitespace runs collapsed, for comparing.
+
+    A single space and not none: descendant combinators are whitespace, so
+    stripping it entirely turns `.ledger.modes td` into a string that matches
+    nothing anybody would write, which is how a lookup for a descendant rule
+    silently answered "not declared".
+    """
+    return re.sub(r"\s+", " ", selector).strip()
+
+
 def _declares(sel, prop, style):
-    """Does any rule whose selector list contains `sel` declare `prop`?"""
-    flat = lambda s: re.sub(r"\s+", "", s)
+    """What any rule whose selector list contains `sel` sets `prop` to.
+
+    The declared *value*, and `None` where the property is never declared --
+    not a bool. A bool only answers "is the property named here", which three
+    separate mutations walked straight through: `margin-left:-1px` became
+    `margin-left:0` and `border-left:1px solid` became `border-left:0px solid`
+    while every assertion, and every assertion's failure message, went on
+    reading true. A cap of `none` is the property named and not applied.
+
+    The last matching declaration wins, which is what the cascade does with
+    two rules of equal specificity.
+    """
+    found = None
     for selector, body in _rules(style):
-        if sel in [flat(s) for s in selector.split(",")]:
-            if re.search(r"(^|;)" + re.escape(prop) + r"\s*:", body.strip()):
-                return True
-    return False
+        if _norm(sel) not in [_norm(s) for s in selector.split(",")]:
+            continue
+        for hit in re.finditer(
+                r"(?:^|;)\s*" + re.escape(prop) + r"\s*:([^;]*)", body.strip()):
+            found = hit.group(1).strip()
+    return found
+
+
+def _length(value):
+    """The leading CSS length in `value`, in px, or None.
+
+    So a test can say "this is a negative pull" or "this rule has width"
+    rather than "this property is mentioned somewhere".
+    """
+    if value is None:
+        return None
+    hit = re.search(r"(-?[\d.]+)px\b", value)
+    return float(hit.group(1)) if hit else None
+
+
+def _container_selectors(style):
+    """Every selector that is declared an inline-size query container."""
+    out = set()
+    for selector, body in _rules(style):
+        if re.search(r"(?:^|;)\s*container-type\s*:", body.strip()):
+            out.update(_norm(s) for s in selector.split(",") if _norm(s))
+    return out
 
 
 _LAYOUT_HARNESS = """
@@ -4124,6 +4441,85 @@ def test_a_chart_label_renders_at_the_size_it_declares():
         assert width / container == 1.0, \
             f"a declared unit renders at {container / width:.3f}px in a {container:.0f}px box"
 
+    # And the drawing is *built* at that width, not merely wrapped in a viewBox
+    # of it. Those are two different numbers: build every chart at the old
+    # fixed 640 inside a correctly measured 1180 viewBox and the ratio above is
+    # still exactly 1.0 while the right half of the card is blank.
+    #
+    # Asserted out of two measurements and no literal. The x-axis spans the
+    # plot box, its left end is padL and its right end is w - padR, and padR is
+    # a function of the series names rather than of the width -- so widening
+    # the container by N units must move the axis's right end right by N and
+    # leave its left end alone. Drawing at a fixed 640 leaves both where they
+    # were, and the drawing then fills 50.5% of its box.
+    def axis(key):
+        hit = re.search(r'<line class="axis"[^>]*\sx1="([\d.]+)"[^>]*\sx2="([\d.]+)"',
+                        out[key]["body"])
+        assert hit, "the chart drew no x-axis to measure"
+        return float(hit.group(1)), float(hit.group(2))
+
+    (left_n, right_n), (left_w, right_w) = axis("narrow"), axis("wide")
+    grew = _viewbox(out["wide"]["vb"])[0] - _viewbox(out["narrow"]["vb"])[0]
+    assert left_n == left_w, \
+        f"the plot's left edge moved with the width: {left_n} then {left_w}"
+    assert abs((right_w - right_n) - grew) < 1.0, \
+        f"the box grew by {grew:.0f} units and the drawing grew by " \
+        f"{right_w - right_n:.0f}, so the chart is not built at the size it " \
+        f"declares: it fills {right_w / (left_w + grew + right_n - left_n):.0%} of the box"
+
+
+_RESIZE_HARNESS = """
+var NODES={},FIRED=null,WATCHED=null,QUEUED=[];
+function Svg(w){var self=this;this.attrs={};this.innerHTML='';this._w=w;
+  this.setAttribute=function(k,v){self.attrs[k]=v;};
+  Object.defineProperty(this,'clientWidth',{get:function(){return self._w;}});}
+function ResizeObserver(fn){FIRED=fn;
+  this.observe=function(el){WATCHED=el;};}
+var document={getElementById:function(id){
+  return Object.prototype.hasOwnProperty.call(NODES,id)?NODES[id]:null;}};
+setTimeout=function(fn){QUEUED.push(fn);return QUEUED.length;};
+clearTimeout=function(){};
+CHARTS=[];SIZED=[];
+chart('c1','Lift vs control',
+  [{name:'lift',color:'#2E86AB',points:[[0,0.10],[1000,0.55],[2000,0.20]]}],{});
+var svg=new Svg(390); NODES.c1=svg; NODES.wrap={};
+layoutCharts();
+var atLoad=svg.attrs.viewBox;
+watchWidth();
+/* The rotation: the box is 844 wide now and nothing has told the page. */
+svg._w=844;
+var beforeNotice=svg.attrs.viewBox;
+if(FIRED) FIRED();
+while(QUEUED.length) QUEUED.shift()();
+process.stdout.write(JSON.stringify({atLoad:atLoad,beforeNotice:beforeNotice,
+  after:svg.attrs.viewBox,observed:WATCHED!==null,installed:FIRED!==null}));
+"""
+
+
+@needs_node
+def test_a_rotation_redraws_the_charts_at_the_width_it_produced():
+    """`layoutCharts` runs once at load, and a phone gets turned sideways.
+
+    That is the only reason the page observes its own width at all: without
+    the observer every chart keeps its portrait viewBox through a rotation, so
+    a 390-unit drawing is stretched across an 844px landscape box and every
+    declared length renders 2.16x too large -- which is the exact defect the
+    measured viewBox exists to remove, reintroduced by a gesture.
+
+    Driven through the real `watchWidth` with a stubbed observer and a stubbed
+    timer, and asserted on the viewBox the charts end up with.
+    """
+    out = json.loads(_run_js([_row(1, 1000)], _RESIZE_HARNESS))
+
+    assert out["installed"] and out["observed"], \
+        "nothing watches the page's width, so a rotation is never noticed"
+    assert _viewbox(out["atLoad"])[0] == 390.0, out["atLoad"]
+    assert _viewbox(out["beforeNotice"])[0] == 390.0, \
+        "the fixture resized the box and the page had already redrawn itself"
+    assert _viewbox(out["after"])[0] == 844.0, \
+        f"after the rotation the charts still declare {out['after']!r}, so " \
+        "every 10px label renders at 21.6px"
+
 
 @needs_node
 def test_a_chart_keeps_its_height_when_the_column_widens():
@@ -4151,12 +4547,157 @@ def test_a_chart_keeps_its_height_when_the_column_widens():
             f"a label sits at y={max(ys)} in a {height}-unit box"
 
 
+_SCATTER_LAYOUT_HARNESS = """
+var NODES={};
+function Svg(w){var self=this;this.attrs={};this.innerHTML='';this._w=w;
+  this.setAttribute=function(k,v){self.attrs[k]=v;};
+  Object.defineProperty(this,'clientWidth',{get:function(){return self._w;}});}
+function Cap(){this.innerHTML='';this.style={};}
+var document={getElementById:function(id){
+  return Object.prototype.hasOwnProperty.call(NODES,id)?NODES[id]:null;}};
+SIZED=[];CHARTS=[];
+/* The picture as the page builds it, at its nominal 400, then through the
+   real layout pass at two container widths. */
+var nominal=gvsMarkup(DATA.alltime.modes);
+var spec=SIZED[SIZED.length-1];
+var svg=new Svg(400); NODES[spec.id]=svg;
+var cap=new Cap(); NODES[spec.id+'-unlab']=cap;
+var laid={};
+[400,640].forEach(function(w){
+  svg._w=w;
+  layoutCharts();
+  laid[w]={vb:svg.attrs.viewBox,body:svg.innerHTML,
+           caption:cap.innerHTML,unlabelled:spec.unlabelled};
+});
+process.stdout.write(JSON.stringify({nominal:nominal,laid:laid,
+  registered:SIZED.length,scrubbable:CHARTS.length}));
+"""
+
+
+def _diagonal(body):
+    """The `greedy = sampled` line's endpoints, out of a laid-out scatter.
+
+    The first `class="zero"` line: the two after it are the x=0 and y=0 rules,
+    which are axis-parallel and say nothing about the aspect.
+    """
+    hit = re.search(r'<line class="zero" x1="([-\d.]+)" y1="([-\d.]+)"'
+                    r' x2="([-\d.]+)" y2="([-\d.]+)"', body)
+    assert hit, "the scatter drew no diagonal"
+    return [float(v) for v in hit.groups()]
+
+
+@needs_node
+def test_every_laid_out_chart_declares_a_viewbox_a_browser_will_parse():
+    """The scatter is the one chart whose height is a function of its width.
+
+    `layoutCharts` calls it -- `typeof c.h === 'function' ? c.h(w) : c.h` --
+    and nothing tested that it does, because the only chart the layout harness
+    registered had a numeric height. Drop the call and the scatter's viewBox is
+    written as `0 0 640 function(w){return w;}`, which is not a viewBox at all:
+    the browser discards the attribute and the picture renders at whatever the
+    fallback happens to be, with every existing test green.
+    """
+    out = json.loads(_node(_multi_body(_QUIET, extras={"verdicts": {"v": _BOTH_WAYS}})
+                           + _SCATTER_LAYOUT_HARNESS))
+    assert out["registered"] == 1, "the scatter registered nothing to size"
+    assert out["scrubbable"] == 0, "a picture with no step axis registered a scrub"
+
+    for width, laid in out["laid"].items():
+        numbers = laid["vb"].split()
+        assert len(numbers) == 4, f"{laid['vb']!r} is not a viewBox"
+        for value in numbers:
+            assert re.fullmatch(r"-?\d+(\.\d+)?", value), \
+                f"{laid['vb']!r} carries {value!r}, which no parser will read"
+        assert all(math.isfinite(float(v)) for v in numbers), laid["vb"]
+        assert float(numbers[2]) == float(width), \
+            f"a {width}-unit box declared a {numbers[2]}-unit viewBox"
+
+
+@needs_node
+def test_the_scatter_stays_square_at_every_width_it_is_drawn_at():
+    """`greedy = sampled` has to be a true 45 degrees or the gap cannot be read.
+
+    That holds only while the plot box is square, which is why this picture's
+    height is a function of its width and why `padL + padR` equals
+    `padT + padB`. Pin the height at the nominal 400 and the diagonal is 30.00
+    degrees at a 640px container -- and the existing scatter test does not
+    notice, because it asserts against the coordinates of the 400-unit build
+    and never runs the picture through the layout pass at all.
+
+    The invariant, not the coordinates: a 45 degree line rises by exactly as
+    much as it runs. That survives any future change to the padding and dies
+    the moment the box stops being square.
+    """
+    out = json.loads(_node(_multi_body(_QUIET, extras={"verdicts": {"v": _BOTH_WAYS}})
+                           + _SCATTER_LAYOUT_HARNESS))
+    for width, laid in out["laid"].items():
+        x1, y1, x2, y2 = _diagonal(laid["body"])
+        run, rise = x2 - x1, y1 - y2
+        assert run > 0 and rise > 0, f"the diagonal is degenerate at {width}"
+        assert abs(run - rise) < 0.5, \
+            f"at a {width}-unit container the diagonal runs {run:.1f} and " \
+            f"rises {rise:.1f}, which is " \
+            f"{math.degrees(math.atan2(rise, run)):.2f} degrees and not 45"
+        # And the box it is drawn in is as tall as it is wide, which is the
+        # thing the aspect actually rests on.
+        assert _viewbox(laid["vb"])[0] == _viewbox(laid["vb"])[1], \
+            f"the viewBox is {laid['vb']}, so the picture is not square"
+
+
+@needs_node
+def test_the_scatter_caption_counts_the_names_the_layout_pass_dropped():
+    """"N points are drawn without a name" is a fact about the drawn picture.
+
+    So it cannot be written before the picture is sized: how many labels fit is
+    a function of the width the drawing was finally built at. `layoutCharts`
+    calls `c.after(w, h)` for exactly this, and nothing touched `c.after`,
+    `unlabText` or the `-unlab` node -- so removing the hook left the caption
+    stating a count from a width the picture was never drawn at, which is the
+    page-denies-its-own-measurement failure CLAUDE.md memorialises.
+
+    Asserted against the drawing rather than a literal: count the labels the
+    body actually carries, subtract from the points it actually drew, and
+    require the caption's number to be that difference.
+    """
+    crowd = []
+    for i in range(24):
+        arm = "w%02d" % i
+        crowd += [_record(arm, "big", arm, "greedy", 1.0 + i * 0.001),
+                  _record(arm, "big", arm, "sampled", 0.2 + i * 0.0001)]
+    out = json.loads(_node(_multi_body(_QUIET, extras={"verdicts": {"v": crowd}})
+                           + _SCATTER_LAYOUT_HARNESS))
+
+    counts = {}
+    for width, laid in out["laid"].items():
+        drawn = len([t for t in _tags(laid["body"], "circle") if t.get("r") == "3.2"])
+        named = len(re.findall(r'<text class="lbl-s" x="[\d.]+" y="[\d.]+" fill=',
+                               laid["body"]))
+        assert drawn == 24, f"the picture did not draw its input at {width}"
+        missing = drawn - named
+        counts[width] = missing
+        if missing:
+            assert ("%d points are drawn without a name" % missing) in laid["caption"], \
+                f"at {width} the drawing dropped {missing} names and the " \
+                f"caption says {laid['caption']!r}"
+        else:
+            assert laid["caption"] == "", \
+                f"at {width} every name was drawn and the caption still reads " \
+                f"{laid['caption']!r}"
+
+    # Non-vacuous: the two widths must disagree, or the caption could be
+    # written once before layout and still match at both.
+    assert len(set(counts.values())) == 2, \
+        f"the fixture no longer changes how many names fit: {counts}"
+
+
 _TABS_HARNESS = """
-var SCROLLED=[];
+var SCROLLED=[],EDGES=[];
 var TAB={offsetLeft:8725,offsetWidth:118};
+var CLASSES={};
 var strip={innerHTML:'',scrollLeft:0,clientWidth:371,scrollWidth:14719,
-  classList:{toggle:function(){}},
+  classList:{toggle:function(name,on){CLASSES[name]=!!on;}},
   querySelector:function(sel){return sel.indexOf('aria-selected')>=0?TAB:null;}};
+function edges(){return {l:!!CLASSES['more-l'],r:!!CLASSES['more-r']};}
 function Stub(){this.innerHTML='';this.textContent='';this.attrs={};
   this.setAttribute=function(k,v){this.attrs[k]=v;};
   this.classList={toggle:function(){}};}
@@ -4175,8 +4716,29 @@ SCROLLED.push(strip.scrollLeft);
 strip.scrollLeft=4000;
 paintTabs();
 SCROLLED.push(strip.scrollLeft);
-process.stdout.write(JSON.stringify({scrolled:SCROLLED,
-  left:TAB.offsetLeft,right:TAB.offsetLeft+TAB.offsetWidth,view:strip.clientWidth}));
+
+// The edge fades, driven at four known scroll positions: hard left, the
+// middle, hard right, and a strip that fits its own window.
+[0,4000,14719-371].forEach(function(x){
+  CLASSES={}; strip.scrollLeft=x; paintTabEdges(strip); EDGES.push(edges());
+});
+CLASSES={};
+paintTabEdges({scrollWidth:371,clientWidth:371,scrollLeft:0,
+               classList:strip.classList});
+EDGES.push(edges());
+
+// The other direction. A reader scrolls the strip, switches to the all-time
+// view -- which is what resets TABSHOWN -- and comes back to an early run.
+CLASSES={};
+TAB.offsetLeft=40; TAB.offsetWidth=118;
+view='alltime'; paintTabs();
+view='runs'; strip.scrollLeft=8000;
+paintTabs();
+var back={scroll:strip.scrollLeft,left:TAB.offsetLeft,
+          right:TAB.offsetLeft+TAB.offsetWidth};
+
+process.stdout.write(JSON.stringify({scrolled:SCROLLED,edges:EDGES,back:back,
+  left:8725,right:8725+118,view:strip.clientWidth}));
 """
 
 
@@ -4201,6 +4763,43 @@ def test_the_selected_run_is_visible_in_the_tab_strip():
     assert after_reader == 4000, \
         "a repaint threw away the place the reader had scrolled to"
 
+    # Both directions. Only the tab that is off to the *right* was ever driven
+    # here, so deleting the scroll-left branch left a selected tab thousands of
+    # pixels off screen to the left with every assertion above still true. The
+    # sequence is reachable and ordinary: scroll the strip, look at the
+    # all-time view, come back to an early run.
+    back = out["back"]
+    assert back["scroll"] <= back["left"] and \
+        back["right"] <= back["scroll"] + out["view"], \
+        f"coming back to an early run left its tab at " \
+        f"{back['left']}..{back['right']}, outside the visible " \
+        f"{back['scroll']}..{back['scroll'] + out['view']} -- " \
+        f"{back['scroll'] - back['left']}px off screen to the left"
+
+
+@needs_node
+def test_the_tab_strip_says_which_way_there_is_more_of_it():
+    """A 14,719px row inside a 371px window, with no scrollbar in either engine.
+
+    On iOS a horizontal scrollbar is a transient overlay, so nothing on the
+    page said the row scrolled at all and most of the runs were behind a
+    gesture with no sign it existed. The fades are the only thing that says so,
+    and each one has to go away at its own end or it is a promise of more where
+    there is none.
+    """
+    runs = [("run-%02d" % i, [_row(1, 1000)], False) for i in range(6)]
+    out = json.loads(_node(_multi_body(runs) + _TABS_HARNESS))
+    at_left, middle, at_right, fits = out["edges"]
+
+    assert not at_left["l"] and at_left["r"], \
+        f"at scrollLeft 0 the strip should fade on the right alone: {at_left}"
+    assert middle["l"] and middle["r"], \
+        f"scrolled into the middle, both ends have more: {middle}"
+    assert at_right["l"] and not at_right["r"], \
+        f"at the far end the strip still promises more to the right: {at_right}"
+    assert not fits["l"] and not fits["r"], \
+        f"a strip that fits its own window is faded at both ends: {fits}"
+
 
 def test_the_split_button_is_offered_only_where_the_split_happens():
     """The button was live across a 200px band where it did nothing.
@@ -4224,9 +4823,228 @@ def test_the_split_button_is_offered_only_where_the_split_happens():
         assert m, head
         return int(m.group(1))
 
-    assert bound(hides[0]) >= bound(collapses[0]), \
-        f"the button is offered down to {bound(hides[0])}px, " \
-        f"where the split has already collapsed at {bound(collapses[0])}px"
+    # Every block, not `[0]`, and equality, not `>=`. The widest query that
+    # hides the button is the width the button is actually offered down to, and
+    # the narrowest that collapses the split is where two panes stop existing;
+    # reading only the first match let a second `@media (max-width:1200px)`
+    # hiding the button pass, which leaves a 300px band where the split works
+    # and the only way to turn it on is display:none. The source comment says
+    # these are deliberately the same number, so that is what is asserted.
+    offered = max(bound(h) for h in hides)
+    splits = min(bound(c) for c in collapses)
+    assert offered == splits, \
+        f"the button is hidden below {offered}px and the split collapses " \
+        f"below {splits}px, so one of them is live where the other is not"
+
+
+def _tokens(style):
+    """The colour tokens, as {"light": {...}, "dark": {...}}.
+
+    The bare `:root` is the light set; every other `:root` rule here is a dark
+    override, so the dark set is the light one updated by them.
+    """
+    light, dark = {}, {}
+    for selector, body in _rules(style):
+        flat = _norm(selector).replace(" ", "")
+        if not flat.startswith(":root"):
+            continue
+        found = dict(re.findall(r"(--[a-z0-9-]+)\s*:\s*(#[0-9A-Fa-f]{3,8})", body))
+        (light if flat == ":root" else dark).update(found)
+    return {"light": light, "dark": dict(light, **dark)}
+
+
+def _contrast(fore, back):
+    """The WCAG 2.1 contrast ratio between two `#rrggbb` strings."""
+    def luminance(hexed):
+        parts = [int(hexed[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        parts = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+                 for c in parts]
+        return 0.2126 * parts[0] + 0.7152 * parts[1] + 0.0722 * parts[2]
+
+    a, b = sorted((luminance(fore), luminance(back)), reverse=True)
+    return (a + 0.05) / (b + 0.05)
+
+
+def test_no_run_of_prose_is_left_uncapped_and_none_is_capped_on_a_cell():
+    """`--measure` is only a cap on the elements that are named in the rule.
+
+    Three were not, and ran to 288, 163 and 177 characters a line at 1920 --
+    measured in Chrome against 86 for the same blocks once capped. The third
+    is the interesting one: `td.caption` *was* named and still rendered
+    1686px, because `max-width` on a table cell is discarded by the automatic
+    table layout. So the cap has to land on a block inside the cell, which is
+    why nothing here may carry `class="caption"` on a `<td>`.
+    """
+    page = render([_row(1, 1000)], "run")
+    style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+
+    for selector in (".at .caption", ".at .seen", ".at ul.why li",
+                     ".at .tile2 .rule", ".lrow .name"):
+        assert _declares(selector, "max-width", style) == "var(--measure)", \
+            f"{selector} runs the full width of the column: its max-width is " \
+            f"{_declares(selector, 'max-width', style)!r}"
+
+    # And no cap lands anywhere the table layout throws it away. Driven through
+    # the markup the page actually builds, with a fixture that produces one:
+    # a checkpoint whose two arms faced two different opponents emits the
+    # widest of the three colspan captions.
+    verdict = [
+        {"checkpoint": "runs/x/cloned.pt", "name": "w0.1", "mode": "greedy",
+         "lift": -1.3, "episodes": 150, "eval_opponent": "random"},
+        {"checkpoint": "runs/x/cloned.pt", "name": "w0.1", "mode": "sampled",
+         "lift": 0.05, "episodes": 150, "eval_opponent": "idle"},
+    ]
+    markup = _call_multi([("x", [_row(1, 1000)], False)],
+                         "modesMarkup(DATA.alltime)",
+                         extras={"verdicts": {"v": verdict}})
+    assert "Greedy was measured against" in markup, \
+        "the fixture no longer emits a full-width caption row"
+    cells = re.findall(r'<td[^>]*\bclass="[^"]*\bcaption\b[^"]*"[^>]*>', markup)
+    assert not cells, \
+        f"a caption is capped on the cell itself, where automatic table " \
+        f"layout discards max-width and the line ran to 177 characters: {cells[:2]}"
+    assert re.search(r'<td colspan="4"><div class="caption">', markup), \
+        "the caption row carries no block for the cap to land on"
+
+
+def test_every_colour_on_the_page_comes_out_of_the_token_sets():
+    """A hardcoded colour is a colour that is right in one theme only.
+
+    `.note` carried `rgba(255,255,255,.02)`, which is a lift over a dark
+    ground and nothing at all over a light one: measured in Chrome, the light
+    note composited to `rgb(239,242,245)` against a body of `rgb(239,242,245)`
+    -- a difference of exactly zero on all three channels, so the panel the
+    rule exists to draw did not exist.
+    """
+    page = render([_row(1, 1000)], "run")
+    style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+    bare = _bare(style)
+
+    # Every literal outside the three token blocks and the mask gradients.
+    stray = []
+    for selector, body in _rules(style):
+        if _norm(selector).replace(" ", "").startswith(":root"):
+            continue
+        for hit in re.finditer(r"#[0-9A-Fa-f]{3,8}\b|rgba?\([^)]*\)", body):
+            if "gradient" in body[max(0, hit.start() - 60):hit.start()]:
+                continue          # the fade masks, which are alpha and not ink
+            if "shadow" in body[max(0, hit.start() - 60):hit.start()]:
+                continue
+            stray.append((_norm(selector), hit.group(0)))
+    assert not stray, \
+        f"colour literals outside the token blocks, so they are right in one " \
+        f"theme only: {stray}"
+
+    # And the token the note now spends is a real lift in both themes.
+    assert _declares(".note", "background", style) == "var(--lift)", \
+        f".note's background is {_declares('.note', 'background', style)!r}"
+    tokens = _tokens(style)
+    for theme, values in tokens.items():
+        assert "--lift" in values, f"--lift is not defined for {theme}"
+        assert values["--lift"].lower() != values["--ground"].lower(), \
+            f"in {theme} theme --lift is --ground, so the note has no panel"
+
+
+def test_the_smallest_text_on_the_page_still_meets_its_contrast_floor():
+    """`.chip.dim` is 10px uppercase, which needs 4.5:1, and had 4.31.
+
+    Only in light theme, and on seven chips: "not measured", "40 battles",
+    "greedy", "sampled", "the control itself", "vs idle (inferred)". Both
+    colours came out of tokens; it was the light pairing that was short. The
+    ratio is computed here from the token values rather than asserted as a
+    literal, so it follows a palette change.
+    """
+    page = render([_row(1, 1000)], "run")
+    style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+    tokens = _tokens(style)
+
+    ink = _declares(".chip.dim", "color", style)
+    ground = _declares(".chip.dim", "background", style)
+    named = [re.search(r"var\((--[a-z0-9-]+)\)", value)
+             for value in (ink, ground)]
+    assert all(named), f".chip.dim is not painted out of tokens: {ink}, {ground}"
+
+    for theme, values in tokens.items():
+        ratio = _contrast(values[named[0].group(1)], values[named[1].group(1)])
+        assert ratio >= 4.5, \
+            f"in {theme} theme .chip.dim is {ratio:.2f}:1 " \
+            f"({values[named[0].group(1)]} on {values[named[1].group(1)]}), " \
+            "under the 4.5 that 10px text requires"
+
+
+def test_the_page_measures_what_it_lays_out_against():
+    """Five rules the layout rests on that nothing was asserting at all.
+
+    Each was deletable outright with the whole suite green, and each of the
+    five is a measurement rather than a taste: the wide column exists because a
+    split pane drew its charts at 457px against a single pane's 966px; the
+    square cap exists because a square tracking a 1720px column stands 1720px
+    tall; the note clamp was 162px of the 315px between opening the page and
+    reading the first number on a 390px screen; the insets exist because
+    `viewport-fit=cover` put the leftmost readout cell under the notch in
+    landscape; and the grid minimum has to yield to a container narrower than
+    itself or the body scrolls sideways on the phone the page is built for.
+
+    Values, not property names. Every one of these survives being declared and
+    set to nothing.
+    """
+    page = render([_row(1, 1000)], "run")
+    style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+
+    col = _length(_declares(":root", "--col", style))
+    wide = _length(_declares(":root", "--wide", style))
+    assert col and wide, f"the column tokens are {col} and {wide}"
+    assert wide > col, \
+        f"--wide is {wide}px against --col's {col}px, so split mode and the " \
+        "all-time view get no more room than a single run"
+    assert _declares(".wrap.wide", "max-width", style) == "var(--wide)", \
+        "the wide class does not spend the token it exists for"
+
+    # The one square picture, capped at the width every other chart is built
+    # at, and starting where its own title does.
+    cap = _length(_declares(".chart svg.sq", "max-width", style))
+    assert cap == 640, f"the square picture is capped at {cap}, not at 640"
+    assert 'viewBox="0 0 640 ' in page, \
+        "640 is no longer the width the other charts are built at, so the " \
+        "cap above is now an unrelated number"
+    assert _declares(".chart svg.sq", "margin-left", style) != "auto", \
+        "the picture is centred inside a card whose title and every caption " \
+        "start at the left edge, which indents it 283px from its own words"
+
+    # The note is clamped until it is tapped.
+    clamp = _declares(".note", "max-height", style)
+    assert clamp and clamp != "none", \
+        f"the note is not clamped (max-height: {clamp!r}), so it stands "        "between the reader and the first number"
+    assert _declares(".note.open", "max-height", style) == "none", \
+        "a clamped note cannot be opened"
+
+    # And the safe-area insets survive, in both of the two that a notch eats
+    # in landscape.
+    for side in ("padding-left", "padding-right"):
+        value = _declares("body", side, style)
+        assert value and "env(safe-area-inset" in value, \
+            f"body {side} is {value!r}, so a notch covers the content in " \
+            "landscape -- which is the orientation a wide chart is read in"
+
+    # The grid track minimum yields to a container narrower than itself.
+    # `minmax(380px,1fr)` resolves a 380px track inside a 350px column, which
+    # is 10px of body overflow at 390, 40 at 360 and 80 at 320.
+    tracks = _declares(".grid2", "grid-template-columns", style)
+    assert tracks and "auto-fit" in tracks, tracks
+    assert "minmax(" in tracks, tracks
+    # Split at the first top-level comma: the minimum is itself a function
+    # call now, so a plain `[^,]+` stops inside it.
+    depth, minimum = 0, ""
+    for char in tracks[tracks.index("minmax(") + len("minmax("):]:
+        if char == "," and depth == 0:
+            break
+        depth += (char == "(") - (char == ")")
+        if depth < 0:
+            break
+        minimum += char
+    assert "100%" in minimum, \
+        f"the grid's track minimum is {minimum.strip()!r}, which cannot " \
+        "shrink to a container narrower than it, so the page scrolls sideways"
 
 
 def test_no_viewport_query_decides_a_container_sized_grid():
@@ -4262,17 +5080,27 @@ def test_a_readout_rule_does_not_depend_on_where_a_cell_landed():
     page = render([_row(1, 1000)], "run")
     style = page.split("<style>", 1)[1].split("</style>", 1)[0]
 
-    assert _declares(".cell", "border-top", style), "no rule between rows"
-    assert _declares(".cell", "border-left", style), "no rule between columns"
+    # The values, not the property names. `border-left:0px solid var(--hair)`
+    # still "declares border-left", `margin-left:0` still "declares
+    # margin-left" and `overflow:visible` still "declares overflow" -- three
+    # mutations that each restore exactly the defect the message below names.
+    for side in ("border-top", "border-left"):
+        width = _length(_declares(".cell", side, style))
+        assert width is not None and width > 0, \
+            f"no rule between {'rows' if side.endswith('top') else 'columns'}: " \
+            f".cell sets {side} to {_declares('.cell', side, style)!r}"
     for side in ("border-right", "border-bottom"):
-        assert not _declares(".cell", side, style), \
+        assert _declares(".cell", side, style) is None, \
             f"a cell draws a {side}, which doubles against its neighbour or " \
             "against the panel"
 
-    assert _declares(".readout-grid", "margin-left", style), \
-        "nothing pulls column zero's left rule off the panel edge"
-    assert _declares(".readout", "overflow", style), \
-        "the panel does not clip, so the pulled rule is drawn outside it"
+    pull = _length(_declares(".readout-grid", "margin-left", style))
+    assert pull is not None and pull < 0, \
+        "nothing pulls column zero's left rule off the panel edge: " \
+        f"margin-left is {_declares('.readout-grid', 'margin-left', style)!r}"
+    clip = _declares(".readout", "overflow", style)
+    assert clip is not None and clip != "visible", \
+        f"the panel does not clip ({clip!r}), so the pulled rule is drawn outside it"
 
     flat = re.sub(r"\s+", "", _bare(style))
     for positional in (".cell:first-child", ".cell:last-child",

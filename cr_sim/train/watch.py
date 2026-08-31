@@ -27,6 +27,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import time
 import sys
@@ -123,7 +124,14 @@ def _next_evaluation(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     long recent updates actually took, which is what a countdown should
     follow rather than an average over a run that has changed speed.
     """
-    updates = [r["updates"] for r in rows if _is_evaluation(r)]
+    # `.get` plus `_plottable`, the way `_by_update` guards the same field.
+    # A bare subscript here raised `KeyError` out of `once()` on one
+    # evaluation row written without `updates`; the refresh loop catches it
+    # and prints to a console nobody is watching, so the served page simply
+    # freezes on its last render with a timestamp that has stopped. Of the
+    # 64 metric keys on disk this was the only one whose absence raised.
+    updates = [r["updates"] for r in rows
+               if _is_evaluation(r) and _plottable(r.get("updates"))]
     if len(updates) < 2 or len(rows) < 2:
         return {"eval_every": None, "next_eval_seconds": None}
     gaps = [b - a for a, b in zip(updates, updates[1:]) if b > a]
@@ -332,6 +340,29 @@ def _plottable(value: Any) -> bool:
     if isinstance(value, float):
         return math.isfinite(value)
     return isinstance(value, int)
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` in one step, via a sibling and ``os.replace``.
+
+    ``write_text`` truncates the destination and then fills it, so for the
+    length of the write the file on disk is neither the old page nor the new
+    one -- and ``serve()`` is a threading server reading it per request while
+    the refresh loop rewrites it. A short read is not an error it can detect:
+    it returns 503 only on ``OSError``, so a torn page goes out as a 200 with
+    a short body, renders blank, and is indistinguishable from a dead server.
+    Measured on this box: 1,734 concurrent reads of a 765 KB page during a
+    rewrite loop gave 451 with no closing tag and 419 at zero bytes.
+
+    A torn ``data.json`` heals on the next poll, because ``poll()`` swallows
+    the parse failure. A torn page does not: the reader sees nothing and
+    reloads. ``os.replace`` is atomic on both platforms this runs on, which
+    is the same guarantee ``save_checkpoint`` gives the four ``torch.save``
+    sites for the same reason.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _json_safe(value: Any) -> Any:
@@ -2561,9 +2592,13 @@ _PAGE = r"""<!doctype html>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="cr-sim">
-<meta name="theme-color" content="#0D1218">
+<!-- One per theme, and the two values are the two --ground tokens. A
+     single dark value painted the browser chrome #0D1218 against a
+     #EFF2F5 page for every reader whose phone is in light mode. -->
+<meta name="theme-color" content="#EFF2F5" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0D1218" media="(prefers-color-scheme: dark)">
 <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='40' fill='%230D1218'/%3E%3Cpath d='M40 128V52h18l22 34 22-34h18v76h-18V82l-22 33-22-33v46z' fill='%2358B4D0'/%3E%3C/svg%3E">
-<link rel="manifest" href="data:application/json,%7B%22name%22%3A%22cr-sim%20training%22%2C%22short_name%22%3A%22cr-sim%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%230D1218%22%2C%22theme_color%22%3A%220D1218%22%2C%22start_url%22%3A%22.%22%7D">
+<link rel="manifest" href="data:application/json,%7B%22name%22%3A%22cr-sim%20training%22%2C%22short_name%22%3A%22cr-sim%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%230D1218%22%2C%22theme_color%22%3A%22%230D1218%22%2C%22start_url%22%3A%22.%22%7D">
 <!-- No webfont link. This page is read over the LAN from a phone that is
      often on a wifi with no route out, and three render-blocking requests to
      a font host it cannot reach buy nothing: every font-family here already
@@ -2579,6 +2614,7 @@ _PAGE = r"""<!doctype html>
   --warn:#8A6516;--warnw:#F7EFDD;
   --crit:#A2352C;--critw:#F7E7E5;
   --grey:#8695A4;
+  --lift:#E7EAEE;
   --shadow:0 1px 2px rgba(18,26,36,.06),0 8px 24px -12px rgba(18,26,36,.18);
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
@@ -2590,6 +2626,7 @@ _PAGE = r"""<!doctype html>
   --warn:#DCAB57;--warnw:#362B15;
   --crit:#E58177;--critw:#3A201D;
   --grey:#7C8B9A;
+  --lift:#12191F;
   --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px -14px rgba(0,0,0,.7);
 }}
 :root[data-theme="dark"]{
@@ -2601,15 +2638,20 @@ _PAGE = r"""<!doctype html>
   --warn:#DCAB57;--warnw:#362B15;
   --crit:#E58177;--critw:#3A201D;
   --grey:#7C8B9A;
+  --lift:#12191F;
   --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px -14px rgba(0,0,0,.7);
 }
 /* Not colours, so deliberately not in the two theme blocks above: those sets
    differ from this one only in colour, and a measurement duplicated across
    all three is a three-place edit the next time one of them moves.
 
-   --measure caps prose, on the prose. The glossary measured 91 characters a
-   line at 78ch on this stack; 72ch lands near 84, and every other block of
-   prose here measured 156 to 174 with no cap at all. --col and --wide cap
+   --measure caps prose, on the prose. 72ch is a ceiling and not a promise:
+   `ch` is the zero's advance in whichever font the capped element uses, so
+   the same token lands at 466px on a 12px caption and 505px on a 13px list
+   item, and a proportional face fits more than 72 of its own characters in
+   either. Measured on the built page at 1920: captions 86 characters a
+   line, .why items 89, .tile2 rules 90, the glossary 92 -- against 156 to
+   289 for the same blocks with no cap at all. --col and --wide cap
    containers, and the width of a container is a chart question, never a
    reading-measure one -- which is why one number could not serve both.
 
@@ -2720,10 +2762,16 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .at ul.why li{margin:3px 0}
 .at .caption{font-size:12px;color:var(--muted);margin-top:6px;line-height:1.45}
 .at .scroll{overflow-x:auto}
-/* Capped on the element, not on the column. These three measured 156 to 174
+/* Capped on the element, not on the column. These measured 156 to 174
    characters a line inside a 1000px column and would measure 200 inside
-   1180; the column got wider for the charts' sake, not theirs. */
-.at .caption,.at .seen,.lrow .name{max-width:var(--measure)}
+   1180; the column got wider for the charts' sake, not theirs.
+
+   `ul.why li` and `.tile2 .rule` are on the list because they were the
+   two blocks of prose that were not, and they ran to 288 and 163
+   characters a line at 1920. A cap belongs on every run of prose here or
+   on none of them; naming three of five was the bug. */
+.at .caption,.at .seen,.at ul.why li,.at .tile2 .rule,
+.lrow .name{max-width:var(--measure)}
 .ladder{margin-top:10px}
 .lrow{padding:7px 0;border-top:1px solid var(--hair)}
 .lrow:first-child{border-top:0}
@@ -2775,8 +2823,14 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 @container (max-width:700px){
   .ledger.modes thead{position:absolute;left:-9999px}
   .ledger.modes tr{display:block;border-top:1px solid var(--rule);padding:6px 0}
+  /* flex-wrap, because a flex item's min-width is auto: the label and
+     the value sum along one line that cannot break, which made the
+     stacked table 397px inside a 316px box and parked every number off
+     the right edge -- so the reader saw GREEDY / SAMPLED / GAP with no
+     figures at all, which is worse than the four columns this replaced.
+     Wrapping puts the value on its own line instead. */
   .ledger.modes td{display:flex;justify-content:space-between;align-items:baseline;
-    gap:12px;border-top:0;padding:2px 0}
+    flex-wrap:wrap;gap:12px;border-top:0;padding:2px 0}
   .ledger.modes td.n{text-align:right}
   .ledger.modes td.n::before{content:attr(data-h);font-family:Archivo,sans-serif;
     font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
@@ -2810,7 +2864,7 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
    text actually overflows, so a short note gets neither a fade nor a cursor
    promising something to open. */
 .note{font-size:13.5px;line-height:1.5;color:var(--muted);margin:0 0 12px;padding:10px 12px;
-  border-left:2px solid var(--rule);background:rgba(255,255,255,.02);border-radius:0 6px 6px 0;
+  border-left:2px solid var(--rule);background:var(--lift);border-radius:0 6px 6px 0;
   white-space:pre-wrap;max-width:var(--measure);max-height:4.6em;overflow:hidden;position:relative}
 .note.open{max-height:none}
 .note.clamped{cursor:pointer}
@@ -2857,7 +2911,12 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 .chip.good{background:var(--goodw);color:var(--good)}
 .chip.warn{background:var(--warnw);color:var(--warn)}
 .chip.crit{background:var(--critw);color:var(--crit)}
-.chip.dim{background:var(--hair);color:var(--muted)}
+/* --soft, not --muted. This is the one chip whose ink is not already
+   carried by a --*w pairing, and --muted on --hair measured 4.31:1 in
+   light theme at 10px uppercase, under the 4.5 that size requires --
+   on "not measured", "greedy", "sampled" and four others. --soft on
+   --hair is 8.9:1, and dark theme was never the short one. */
+.chip.dim{background:var(--hair);color:var(--soft)}
 .hero .best{margin-top:8px;font-size:12.5px;color:var(--muted)}
 
 /* No narrow override: auto-fit already yields two columns at a 445px
@@ -2880,7 +2939,7 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
    wide. Capped at the width every other chart declares, because a square
    tracking a 1720px column would be 1720px tall. Inside the cap the svg is
    still as wide as its container, so its labels still render at 10px. */
-.chart svg.sq{max-width:640px;margin-left:auto;margin-right:auto}
+.chart svg.sq{max-width:640px;margin-right:auto}
 .empty{padding:18px;text-align:center;color:var(--muted);font-size:13.5px;background:var(--panel2);border-radius:3px}
 .axis{stroke:var(--rule);stroke-width:1}
 .zero{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3;opacity:.5}
@@ -2890,8 +2949,15 @@ h1{font-size:clamp(22px,4vw,30px);font-weight:700;letter-spacing:-.02em;margin:0
 /* 380 rather than 320, and no query. The query was what manufactured 4.5px
    axis labels at a 701px viewport; now that a label renders at the size it
    declares whatever the width, this minimum is only about how many points
-   fit on an axis. */
-.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:10px}
+   fit on an axis.
+
+   `min(380px,100%)` and not a bare 380px: auto-fit resolves the minimum
+   even when the container is narrower than it, so a 350px column got one
+   380px track and the body itself scrolled sideways by 10px at 390, 40 at
+   360 and 80 at 320 -- on the phone this page is built for. The min()
+   caps the track at the container and changes nothing at 420 and up,
+   which is the first width where 380 fits anyway. */
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr));gap:10px}
 /* The two longest panels in the all-time view -- the sweep ladders measure
    2231px tall at a 1280px viewport and 3086px at 390 -- as two internal
    columns once the container has the room. @container, so a split pane does
@@ -3174,10 +3240,22 @@ function wireScrub(){
       var parts=[];
       c.series.forEach(function(s){
         var pts=s.points||[]; if(!pts.length) return;
-        var best=pts[0],bd=Infinity;
-        pts.forEach(function(p){var d=Math.abs(p[0]-step); if(d<bd){bd=d;best=p;}});
-        parts.push('<span style="color:'+s.color+'">'+(c.asPct?pct(best[1]):num(best[1],3))+'</span>');
-        step=best[0];
+        /* Every point at the nearest x, and not merely the first one found.
+           These charts are drawn against `steps`, and a run that resumed
+           replays its step counter -- so two readings share one x, the chart
+           draws a vertical line between them, and a strict `d<bd` kept the
+           earlier of the two every time. The later one was then drawn and
+           unreadable: 914 readings over 23 runs of the corpus this was
+           measured on, including probe-bandit's entropy at step 22,784 where
+           the two values are 0.000 and 5.303 and the readout said 0.000.
+           A reading that is drawn is a reading that can be read. */
+        var bd=Infinity;
+        pts.forEach(function(p){var d=Math.abs(p[0]-step); if(d<bd) bd=d;});
+        var hits=pts.filter(function(p){return Math.abs(p[0]-step)===bd;});
+        parts.push('<span style="color:'+s.color+'">'
+          +hits.map(function(p){return c.asPct?pct(p[1]):num(p[1],3);}).join(' &amp; ')
+          +'</span>');
+        step=hits[0][0];
       });
       read.innerHTML=commas(Math.round(step))+' &middot; '+parts.join(' / ');
       var ln=line(); if(!ln) return;
@@ -4367,15 +4445,19 @@ function modesMarkup(A){
       +'<td class="n" data-h="Sampled">'+sd(p.sampled.lift)
       +(p.straddles_zero?'<div class="caption">interval straddles zero</div>':'')+'</td>'
       +'<td class="n" data-h="Gap">'+(p.gap===null||p.gap===undefined?'&mdash;':sd(p.gap))+'</td></tr>';
-    if(p.opponent_mismatch) out+='<tr><td colspan="4" class="caption">Greedy was measured against '
+    /* A div inside the cell rather than the class on the cell. `max-width`
+       on a table cell is discarded by the automatic table layout, so these
+       three ran to 177 characters a line at 1920 while the sibling
+       `div.caption` two lines up honoured the same 72ch cap. */
+    if(p.opponent_mismatch) out+='<tr><td colspan="4"><div class="caption">Greedy was measured against '
       +esc(String(p.opponent_greedy))+' and sampled against '+esc(String(p.opponent_sampled))
-      +'. The difference between them is not a play-mode gap, so none is shown.</td></tr>';
-    if(p.ambiguous) out+='<tr><td colspan="4" class="caption">Two different checkpoints are recorded under this name ('
-      +esc(p.ambiguous.join(', '))+'), so no metrics row can be attributed to either of them.</td></tr>';
-    if(p.half_transcribed) out+='<tr><td colspan="4" class="caption">Only the '+esc(p.half_transcribed.mode)
+      +'. The difference between them is not a play-mode gap, so none is shown.</div></td></tr>';
+    if(p.ambiguous) out+='<tr><td colspan="4"><div class="caption">Two different checkpoints are recorded under this name ('
+      +esc(p.ambiguous.join(', '))+'), so no metrics row can be attributed to either of them.</div></td></tr>';
+    if(p.half_transcribed) out+='<tr><td colspan="4"><div class="caption">Only the '+esc(p.half_transcribed.mode)
       +' half of this checkpoint was written into metrics, so '
       +p.half_transcribed.runs.map(function(r){return esc(r.run)+' reports '+sd(r.lift);}).join(', ')
-      +' for a checkpoint that reads '+sd(p.half_transcribed.hidden)+' the other way.</td></tr>';
+      +' for a checkpoint that reads '+sd(p.half_transcribed.hidden)+' the other way.</div></td></tr>';
   });
   out+='</tbody></table></div>';
   out+='<div class="caption">A row carries an opponent chip only where the file it came from put the lift, the play '
@@ -5124,19 +5206,25 @@ def main(argv: list[str] | None = None) -> int:
             if kind:
                 kinds[label] = kind
             configs[label] = _config_of(run)
-        if not collected:
-            return 0
+        # Deliberately no early return on an empty `collected`. A run whose
+        # metrics file exists and is empty is the ordinary state of a run
+        # that has just started -- `run.py` opens it with mode "w" before
+        # the first update lands -- and returning here wrote no file at all
+        # while the report below still printed the path as though it had.
+        # `--serve` then answered 503 with no explanation until a row
+        # arrived. `render_multi([])` is a perfectly good page: the all-time
+        # view names config-and-no-rows directories through
+        # `extras["skipped"]`, which is exactly what a reader needs to see.
         extras = _extras_of(_run_roots())
         extras["skipped"] = skipped
         html, body = render_multi(collected, notes=notes, kinds=kinds,
                                   extras=extras, configs=configs,
                                   silent=silent)
-        out.write_text(html, encoding="utf-8")
+        _write_atomic(out, html)
         # Beside the page, because a served copy polls this rather than
         # reloading itself. Written second so a reader never sees data newer
         # than the page that shipped with it.
-        out.with_suffix(".json").write_text(
-            json.dumps(body), encoding="utf-8")
+        _write_atomic(out.with_suffix(".json"), json.dumps(body))
         return sum(len(rows) for _, rows, _ in collected)
 
     count = once()
