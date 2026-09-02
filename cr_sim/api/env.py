@@ -35,7 +35,9 @@ from .reward import (
 )
 from .encoding import (
     NUM_CARD_SLOTS,
+    OBSERVATION_V1,
     EncodingConfig,
+    ObservationFeatures,
     build_encoding_config,
     decode_action,
     encode_observation,
@@ -207,6 +209,23 @@ def _shaped_value(battle: Battle, team: Team, shaping_weight: float) -> float:
     return crown_diff + shaping_weight * (own_frac - enemy_frac)
 
 
+def _build_reward(team, registry, reward_weights):
+    """The reward object ``reward_weights`` selects, by its type.
+
+    Pulled out of ``CRSimEnv.__init__`` so that :meth:`CRSimEnv.reset` can
+    rebuild the reward when a schedule has moved its weights, through this one
+    dispatch rather than a second copy of it. Rebuilding rather than mutating
+    ``self._reward.weights`` is deliberate: a rebuild cannot change the
+    reward's *type* by accident, and reset() re-baselines the potential
+    anyway.
+    """
+    if isinstance(reward_weights, ProjectionWeights):
+        return ProjectedReward(team, reward_weights)
+    if reward_weights is not None:
+        return RewardTracker(team, registry, reward_weights)
+    return None
+
+
 def _info(battle: Battle) -> dict[str, Any]:
     """The hash, tick and crowns every step's ``info`` carries. The hash is
     what a determinism check compares across two runs of the same seed; the
@@ -239,8 +258,26 @@ class CRSimEnv(_EnvBase):
     full tower health, so the initial value is always 0 and cannot bias the
     sum). That means ``reward_shaping_weight=0`` recovers the pure sparse
     crown-difference objective through this same one code path rather than a
-    second one to keep in sync, and annealing the weight toward zero over
-    training is a one-line change wherever this constructor is called.
+    second one to keep in sync.
+
+    **``reward_shaping_weight`` is read only when ``reward_weights`` is
+    None.** This paragraph used to end by saying that annealing it toward
+    zero over training was "a one-line change wherever this constructor is
+    called", and that sentence was a trap. Every call site of
+    ``_shaped_value`` is inside the ``else`` of ``if self._reward is not
+    None``, so under ``--reward projected`` or ``--reward five-term`` -- which
+    is every fine-tune this project has run -- the weight is never read at
+    all. Measured on identical seeds and an identical action stream, 0.01
+    against 5.00, a five hundred fold change:
+
+        projected: IDENTICAL     five-term: IDENTICAL     simple: DIFFERS
+
+    So an anneal aimed here is a run that reports an anneal and performs
+    none. The shaping actually in force under ``projected`` is
+    ``ProjectionWeights.tower`` and ``.elixir``; under ``five-term`` it is the
+    five non-crown ``RewardWeights`` fields. To move any of them over
+    training, hand the new weights to :meth:`set_reward_weights`, which
+    applies them at the next reset -- see there for why the boundary matters.
 
     **Opponent.** ``opponent_policy(observation, mask) -> action`` is called
     once per decision point for the team ``CRSimEnv`` does not control,
@@ -279,6 +316,7 @@ class CRSimEnv(_EnvBase):
         max_ticks: int | None = None,
         render_mode: str | None = None,
         skip_forced: bool = True,
+        observation: ObservationFeatures = OBSERVATION_V1,
     ) -> None:
         self.data = data
         self.levels = levels
@@ -300,12 +338,12 @@ class CRSimEnv(_EnvBase):
         # the change in what the board projects to. Dispatching on the type
         # rather than a separate flag keeps the two from being set
         # inconsistently.
-        if isinstance(reward_weights, ProjectionWeights):
-            self._reward = ProjectedReward(team, reward_weights)
-        elif reward_weights is not None:
-            self._reward = RewardTracker(team, registry, reward_weights)
-        else:
-            self._reward = None
+        self._reward = _build_reward(team, registry, reward_weights)
+        #: A weights object waiting for the next reset(), as a zero-or-one
+        #: element list because ``None`` is itself a valid value -- it selects
+        #: the simple shaped reward -- so it cannot double as "nothing
+        #: pending". See :meth:`set_reward_weights`.
+        self._pending_reward: list = []
         self.max_ticks = max_ticks
         self.render_mode = render_mode
         self.skip_forced = skip_forced
@@ -314,7 +352,9 @@ class CRSimEnv(_EnvBase):
         # tilemap never changes within an env's lifetime, and re-parsing its
         # CSV on every reset() would be pure waste across a long training run.
         self._arena: Arena = load_arena(data)
-        self._config = build_encoding_config(self._arena, self.blue_deck, self.red_deck)
+        self.observation = observation
+        self._config = build_encoding_config(
+            self._arena, self.blue_deck, self.red_deck, observation)
         shapes = observation_shapes(self._config)
         self.observation_space = DictSpace(
             {
@@ -328,6 +368,16 @@ class CRSimEnv(_EnvBase):
 
         self.battle: Battle | None = None
         self._prev_value = 0.0
+
+    @property
+    def encoding(self) -> EncodingConfig:
+        """The encoder this environment's observations and actions are built
+        with. Public because a policy network's shapes -- and, for a
+        card-conditioned head, the layout of the hand inside the observation
+        vector -- are properties of the encoding, and every caller that builds
+        a network for this env needs them from one place rather than
+        restating them."""
+        return self._config
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         del options  # accepted for Gymnasium API compatibility; unused here
@@ -347,6 +397,15 @@ class CRSimEnv(_EnvBase):
             ),
             arena=self._arena,
         )
+        # The one safe point to adopt a scheduled weight. See
+        # set_reward_weights for why anywhere else is a correctness bug.
+        if self._pending_reward:
+            self.reward_weights, pending_shaping = self._pending_reward.pop()
+            if pending_shaping is not None:
+                self.reward_shaping_weight = pending_shaping
+            self._reward = _build_reward(
+                self.team, self.registry, self.reward_weights)
+
         if self._reward is not None:
             self._reward.reset(self.battle)
             self._prev_value = 0.0
@@ -355,6 +414,32 @@ class CRSimEnv(_EnvBase):
                 self.battle, self.team, self.reward_shaping_weight
             )
         return self._observe(self.team), _info(self.battle)
+
+    def set_reward_weights(self, weights, *,
+                           shaping_weight: float | None = None) -> None:
+        """Take effect at the next :meth:`reset`, never mid-episode.
+
+        Mid-episode the reward stops being potential-based. The tracker's
+        ``_previous`` holds the potential under the *old* weight, so the very
+        next step is paid ``phi_new(s_new) - phi_old(s_old)`` -- a genuine
+        reward plus a fabricated one for the weight change, charged in full to
+        whatever action happened to be taken there. Measured, switching
+        ``ProjectionWeights`` from (tower=1, elixir=0.3) to (0, 0) at step 5
+        of an episode:
+
+            step 5 reward:  no-switch -0.007802   switched -0.159656
+
+        Nineteen times the genuine reward, handed to one arbitrary action.
+        And it is invisible in aggregate, which is what makes it dangerous:
+        the episode return still telescopes correctly to its own endpoint
+        weights, so the existing telescoping invariant stays green over it.
+
+        ``weights`` is the object whose *type* selects the reward, exactly as
+        the constructor's argument does, so ``None`` is meaningful -- it
+        selects the simple shaped reward, whose own knob is
+        ``shaping_weight``.
+        """
+        self._pending_reward = [(weights, shaping_weight)]
 
     def step(self, action: Sequence[int]):
         if self.battle is None:
@@ -368,19 +453,37 @@ class CRSimEnv(_EnvBase):
 
         _advance(self.battle, self.frame_skip)
 
+        # Decided before the reward, because whether a run-out follows is what
+        # says whether this state needs scoring at all.
+        terminated = self.battle.finished
+        truncated = (
+            not terminated and self.max_ticks is not None and self.battle.tick >= self.max_ticks
+        )
+        running_out = self.skip_forced and not terminated and not truncated
+
+        reward = 0.0
         if self._reward is not None:
-            reward = self._reward.step(self.battle, self.frame_skip)
+            # A telescoping reward that is about to be scored again at the end
+            # of the run-out is scored *there and only there*. score() is a
+            # pure function of state, so (phi_mid - phi_prev) + (phi_end -
+            # phi_mid) is phi_end - phi_prev and the intermediate term
+            # cancels exactly -- measured bit-identical on two of three
+            # episodes and 2.2e-16 on the third, which is the same floating
+            # point floor the potential identity itself sits at.
+            #
+            # It was not free: under `projected` this state was scored on
+            # every single non-terminal decision purely to have its
+            # contribution cancelled a few lines later -- exactly 2.00 score
+            # calls per decision, 48.7% of all projections, and 26.4% of all
+            # environment wall time.
+            if not (running_out and getattr(self._reward, "telescopes", False)):
+                reward = self._reward.step(self.battle, self.frame_skip)
         else:
             value = _shaped_value(self.battle, self.team, self.reward_shaping_weight)
             reward = value - self._prev_value
             self._prev_value = value
 
-        terminated = self.battle.finished
-        truncated = (
-            not terminated and self.max_ticks is not None and self.battle.tick >= self.max_ticks
-        )
-
-        if self.skip_forced and not terminated and not truncated:
+        if running_out:
             reward += self._run_out_forced_decisions()
             terminated = self.battle.finished
             truncated = (
@@ -532,6 +635,15 @@ class CRSimSelfPlayEnv:
     base class would add a second hard dependency on top of gymnasium already
     being optional, for what is, underneath, the same dict-of-per-team
     reset/step this class already provides directly.
+    
+    **No ``reward_weights``, so no schedule.** This class takes only
+    ``reward_shaping_weight``, which means the only shaping it can anneal is
+    the simple reward's -- the one case where that flag is real. Deliberately
+    not extended: nothing but ``tests/test_api_env.py`` builds this today,
+    ``cr_sim.train.run`` does self-play through :class:`CRSimEnv`'s
+    ``opponent_policy`` instead, and a second reward-construction site to keep
+    in sync is how two rewards drift apart. Noted so whoever adopts this knows
+    what they are not getting.
     """
 
     def __init__(

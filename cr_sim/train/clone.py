@@ -64,6 +64,58 @@ class Demonstrations:
     #: an expert that mostly passes teaches a policy to mostly pass, and that
     #: is a comfortable local optimum this environment rewards.
     play_rate: float = 0.0
+    #: The encoding these grids are in, by the name
+    #: :func:`~cr_sim.api.encoding.parse_observation` accepts.
+    #:
+    #: Recorded because ``clone_policy --observation`` was a *declaration*
+    #: about a file rather than a fact read from it. Most mismatches happen to
+    #: crash on the channel count, but two variants with the same width and
+    #: different meaning train quietly and stamp the wrong name onto the
+    #: checkpoint -- and from there the run's ``check_observation`` agrees with
+    #: it, because it is comparing a shape. Empty means a shard written before
+    #: this field existed, which is not the same as "v1" and must not be
+    #: silently treated as it.
+    observation: str = ""
+    #: Which reward the ``value`` column was harvested under.
+    #:
+    #: The value head is the part of the clone reinforcement learning
+    #: inherits, so a critic trained on one reward and fine-tuned under
+    #: another arrives predicting the wrong quantity: this set was collected
+    #: under the simple shaped reward while every fine-tune ran ``projected``,
+    #: and the arriving critic predicted +1.48 where returns averaged +0.47.
+    reward: str = ""
+    #: Who proposed the candidates the search then scored.
+    #:
+    #: ``"random"`` is the stratified draw that produced every shard on this
+    #: machine; ``"policy:<sha12>@t<temperature>p<policy_candidates>"`` is a
+    #: policy-guided proposal, named by the *content* of the weights rather
+    #: than by their path -- ``runs/iter-2/cloned.pt`` is a different network
+    #: on Tuesday than it was on Monday.
+    #:
+    #: Recorded for the same reason ``observation`` and ``reward`` are, and
+    #: the reason is sharper here: changing the proposal changes the
+    #: **labels**. The target is a distribution over the candidates that were
+    #: actually scored, so two shards from two proposers carry two different
+    #: supervision signals, and merging them makes a set whose target means
+    #: something different row to row with nothing downstream able to detect
+    #: it. Empty means a shard written before this field existed, which is not
+    #: the same as "random" and must not be silently treated as it.
+    proposer: str = ""
+    #: What the collection measured about its own targets, as a JSON object:
+    #: the candidate spread, how often the ``min_spread`` fallback fired, and
+    #: the proposer's full identity including the thread count its forwards
+    #: ran under.
+    #:
+    #: The fallback rate is the number that matters and it is why this field
+    #: exists. Support collapse under a policy proposer is a *measured*
+    #: quantity rather than a worry to be argued about: a proposer nominates
+    #: placements the policy already likes, alike placements score alike, the
+    #: spread falls below ``min_spread``, and the row collapses onto the
+    #: single chosen action -- at which point the policy is training on its
+    #: own preference wearing the search's clothes. ``scripts/make_demos.py``
+    #: refuses to recommend merging a shard whose rate has run away from the
+    #: unguided baseline.
+    meta: str = ""
 
     def __len__(self) -> int:
         return len(self.action)
@@ -73,7 +125,9 @@ class Demonstrations:
         payload = dict(
             grid=self.grid, vector=self.vector, mask=self.mask,
             action=self.action, value=self.value,
-            episodes=self.episodes, play_rate=self.play_rate)
+            episodes=self.episodes, play_rate=self.play_rate,
+            observation=self.observation, reward=self.reward,
+            proposer=self.proposer, meta=self.meta)
         if self.target is not None:
             payload["target"] = self.target
         np.savez_compressed(path, **payload)
@@ -85,7 +139,103 @@ class Demonstrations:
             grid=raw["grid"], vector=raw["vector"], mask=raw["mask"],
             action=raw["action"], value=raw["value"],
             episodes=int(raw["episodes"]), play_rate=float(raw["play_rate"]),
-            target=raw["target"] if "target" in raw.files else None)
+            target=raw["target"] if "target" in raw.files else None,
+            # str() through numpy's 0-d unicode array. Absent on any shard
+            # written before provenance existed, and left empty there rather
+            # than guessed at.
+            observation=(str(raw["observation"])
+                         if "observation" in raw.files else ""),
+            reward=(str(raw["reward"]) if "reward" in raw.files else ""),
+            # Left empty on a shard written before the field existed. The six
+            # shards in data_cache/demos were in fact all collected by the
+            # unguided bot, but "" and "random" must stay different strings:
+            # the merge guard's whole job is to refuse a set it cannot vouch
+            # for, and filling the gap in with a true-but-unrecorded guess is
+            # how it would quietly stop doing that job.
+            proposer=(str(raw["proposer"]) if "proposer" in raw.files else ""),
+            meta=(str(raw["meta"]) if "meta" in raw.files else ""))
+
+
+
+def _expert_patience(expert) -> float:
+    """The margin a play had to beat waiting by for the expert to take it.
+
+    Recorded into the target because the target has to be over the same
+    numbers the decision was made from. Without it a state where waiting was
+    chosen -- because nothing beat it by the margin -- produces a target whose
+    largest entry is a placement, which is the opposite of what happened.
+    """
+    bot = getattr(expert, "bot", expert)
+    return float(getattr(getattr(bot, "config", None), "patience", 0.0) or 0.0)
+
+
+def _target_row(scores, index, width, height, slots, patience, temperature,
+                min_spread, size):
+    """The search's beliefs about one decision, as a distribution.
+
+    Returns ``(row, spread)``. Falls back to the action actually taken in the
+    two cases where the scores say nothing: when there are none, and when they
+    are all within ``min_spread`` of each other. See :func:`collect`'s
+    ``min_spread`` for the measurement behind the second.
+
+    The spread comes back with the row because it is the collapse diagnostic,
+    and the only place it can be computed honestly is here, where the patience
+    margin has already been added to the waiting entry. A caller recomputing
+    it from the candidate values alone would get a different number and would
+    not know it. See :attr:`Demonstrations.meta`: a policy proposer nominates
+    placements that are more alike than a stratified draw, so this is the
+    quantity that says whether the target still spans anything.
+    """
+    row = np.zeros(size, dtype=np.float32)
+    if not scores:
+        row[index] = 1.0
+        return row, 0.0
+    indices = np.array([i for i, _ in scores])
+    raw = np.array([v for _, v in scores], dtype=np.float64)
+    # Waiting is scored the way the bot scored it: with its patience margin.
+    raw = raw + patience * (indices == (slots - 1) * width * height)
+    spread = float(raw.std())
+    if spread < min_spread:
+        row[index] = 1.0
+        return row, spread
+    scale = max(1e-6, temperature * spread)
+    weights = np.exp((raw - raw.max()) / scale)
+    row[indices] = (weights / weights.sum()).astype(np.float32)
+    return row, spread
+
+
+def _target_meta(spreads, collapsed, min_spread, temperature, extra):
+    """What the targets looked like, as the JSON blob a shard carries.
+
+    ``min_spread_fallback_rate`` is the one that gates a merge. A row that
+    fell back is a one-hot: the search could not separate its candidates, so
+    the only label left is the move it happened to make.
+
+    The feared direction is that a policy proposer drives this up, because it
+    nominates placements the policy already likes and alike placements score
+    alike. **Measured, it went the other way**: four episodes at the shipped
+    settings came back at a mean candidate spread of 0.0585 unguided and
+    0.0936 with nine of fourteen placements proposed by
+    ``checkpoints/headablate-flat.pt``, both with a 0% fallback rate. The
+    policy nominates placements that differ in value rather than placements
+    that are alike. That is one checkpoint on four episodes and does not
+    generalise on its own -- which is exactly why the number is recorded on
+    every shard instead of being argued about.
+    """
+    import json
+
+    values = np.asarray(spreads, dtype=np.float64)
+    body = {
+        "decisions": int(len(values)),
+        "min_spread": float(min_spread),
+        "target_temperature": float(temperature),
+        "min_spread_fallback_rate": (float(collapsed) / len(values)
+                                     if len(values) else 0.0),
+        "spread_mean": float(values.mean()) if len(values) else 0.0,
+        "spread_median": float(np.median(values)) if len(values) else 0.0,
+    }
+    body.update(extra or {})
+    return json.dumps(body, sort_keys=True)
 
 
 def collect(
@@ -98,20 +248,78 @@ def collect(
     #: At 0.35 the best action takes roughly half the mass while the
     #: near-equivalent ones keep enough to say they were nearly as good.
     target_temperature: float = 0.35,
-) -> Demonstrations:
+    #: Below this spread in the search's candidate values, the search had no
+    #: preference at all and the only signal left is which action it took.
+    #:
+    #: Not a guess. Measured over 120 real decisions: on the ones where the
+    #: bot chose to wait the candidate values had a standard deviation of
+    #: 0.00014, and on the ones where it played, 0.10 -- three orders of
+    #: magnitude apart, with nothing in between. The softmax below is scaled
+    #: by that same spread, so it is scale-free and turns a set of values that
+    #: are equal to four decimal places into a *confident* preference for
+    #: whichever arbitrary placement happened to round highest. Where they are
+    #: exactly equal it produces a uniform distribution over the fifteen-odd
+    #: candidates, of which fourteen are placements and one is waiting.
+    #:
+    #: The damage that did: 86% of the states where the expert waited carried
+    #: an exactly uniform target, and the pass action was the target's argmax
+    #: in *none* of 10,940 recorded decisions. A policy trained on it played a
+    #: card at every single decision, against the expert's 56%.
+    min_spread: float = 1e-3,
+    variants: "dict[str, Any] | None" = None,
+    #: Stamped onto every set this returns, so the file on disk states what it
+    #: is instead of relying on whoever loads it to declare correctly. With
+    #: ``variants`` the observation name comes from the variant's own key.
+    #:
+    #: Both are ``_name`` on purpose. This function's own loop binds
+    #: ``observation`` and ``reward`` once per step -- ``observation, reward,
+    #: terminated, truncated, _ = env.step(choice)`` -- so a parameter by
+    #: either name is silently overwritten before it is ever read. The first
+    #: version of this stamped 0.0 into every shard's reward and the last
+    #: observation *dict* into its encoding name, which numpy then wrote as an
+    #: object array that would not load back without allow_pickle.
+    reward_name: str = "",
+    observation_name: str = "v1",
+    #: Who proposed the candidates the search scored, as
+    #: :func:`cr_sim.train.proposal.proposer_identity` writes it. Stamped onto
+    #: the set so the file states it, rather than leaving whoever merges the
+    #: shards to remember which run used which network.
+    proposer_name: str = "",
+    #: Merged into the recorded :attr:`Demonstrations.meta` beside the spread
+    #: statistics this function measures for itself.
+    meta: "dict[str, Any] | None" = None,
+):
     """Watch an expert play and write down every decision it faced.
 
     Only states where a real choice existed are kept. A state with one legal
     action teaches nothing -- the expert had no alternative, so copying it
     conveys no preference -- and including them would let the pass action
     dominate the dataset, since a player is broke for most of a match.
+
+    ``variants`` maps a name to an
+    :class:`~cr_sim.api.encoding.ObservationFeatures`, and makes this return a
+    dict of one :class:`Demonstrations` per name instead of a single set. The
+    expert reads the *battle*, not the observation, so every variant sees the
+    identical trajectory and the identical decisions -- which is the only way
+    an observation ablation is a comparison rather than two experiments. It is
+    also the only affordable way: a demonstration set costs seventeen seconds
+    a battle to produce, and collecting one per encoding would multiply that
+    by the number of things being compared.
     """
+    if variants:
+        return _collect_variants(make_env, make_expert, episodes, gamma,
+                                 on_episode, target_temperature, min_spread,
+                                 variants, reward_name, proposer_name, meta)
     grids: list[np.ndarray] = []
     vectors: list[np.ndarray] = []
     masks: list[np.ndarray] = []
     actions: list[int] = []
     values: list[float] = []
     targets: list[np.ndarray] = []
+    # How separable the search found its own candidates, decision by decision,
+    # and how often it found them inseparable. See Demonstrations.meta.
+    spreads: list[float] = []
+    collapsed = 0
     played = total = 0
 
     for episode in range(episodes):
@@ -119,7 +327,8 @@ def collect(
         observation, _ = env.reset(seed=episode)
         expert = make_expert(env)
         rewards: list[float] = []
-        start = len(actions)
+        # The env step each kept decision was made at; see the returns below.
+        decisions: list[int] = []
 
         while True:
             mask = env.legal_action_mask()
@@ -135,6 +344,10 @@ def collect(
                 vectors.append(observation["vector"])
                 masks.append(flat.copy())
                 actions.append(index)
+                # rewards holds one entry per step already taken, so the next
+                # one appended -- the reward for leaving this state -- is at
+                # this index, and so is this state's own return.
+                decisions.append(len(rewards))
                 total += 1
                 played += int(choice[0] != slots - 1)
 
@@ -142,45 +355,41 @@ def collect(
                 # temperature keeps this close to "the best few", while still
                 # telling the policy that several placements were nearly as
                 # good -- which a single label cannot say, and which is most
-                # of the signal when tiles are near-equivalent.
+                # of the signal when tiles are near-equivalent. Scaled by this
+                # position's own spread, because how much placements differ
+                # varies enormously; floored by min_spread, because below that
+                # they do not differ at all.
                 scores = list(getattr(expert, "last_scores", None)
                               or getattr(getattr(expert, "bot", None),
                                          "last_scores", []) or [])
-                row = np.zeros(len(flat), dtype=np.float32)
-                if scores:
-                    indices = np.array([i for i, _ in scores])
-                    raw = np.array([v for _, v in scores], dtype=np.float64)
-                    # Scaled by this position's own spread, not by a fixed
-                    # constant. How much placements differ varies enormously:
-                    # with a quiet board they are all worth about the same,
-                    # and mid-push they are not. A fixed temperature produced
-                    # a target with 8% of its mass on the best action out of
-                    # fifteen -- barely distinguishable from uniform, and so
-                    # carrying almost no signal.
-                    spread = float(raw.std())
-                    scale = max(1e-6, target_temperature * spread) if spread > 1e-9                         else 1e-6
-                    weights = np.exp((raw - raw.max()) / scale)
-                    row[indices] = (weights / weights.sum()).astype(np.float32)
-                else:
-                    row[index] = 1.0
+                row, spread = _target_row(
+                    scores, index, width, height, slots,
+                    _expert_patience(expert), target_temperature, min_spread,
+                    len(flat))
                 targets.append(row)
+                spreads.append(spread)
+                collapsed += int(spread < min_spread)
             observation, reward, terminated, truncated, _ = env.step(choice)
             rewards.append(float(reward))
             if terminated or truncated:
                 break
 
-        # Discounted return to the end of the episode, walked backwards. Only
-        # the states that were kept get one, so the two arrays stay aligned.
+        # Discounted return to the end of the episode, walked backwards.
         running = 0.0
         tail: list[float] = []
         for reward in reversed(rewards):
             running = reward + gamma * running
             tail.append(running)
         tail.reverse()
-        kept = len(actions) - start
-        step = max(1, len(tail) // max(1, kept))
-        values.extend(tail[i * step] if i * step < len(tail) else 0.0
-                      for i in range(kept))
+        # Each kept state takes the return from its own step. Kept decisions
+        # are sparse and unevenly spaced -- only states with more than one
+        # legal action are recorded, and how long a player stays broke varies
+        # -- so walking them at an even stride, which is what this did, hands
+        # the value head the return of a nearby but different position.
+        #
+        # Every recorded decision is followed by exactly one env.step, so the
+        # index is always inside tail.
+        values.extend(tail[t] for t in decisions)
         if on_episode is not None:
             on_episode(episode + 1, len(actions))
 
@@ -193,7 +402,123 @@ def collect(
         episodes=episodes,
         play_rate=(played / total) if total else 0.0,
         target=np.asarray(targets, dtype=np.float32) if targets else None,
+        observation=observation_name,
+        reward=reward_name,
+        proposer=proposer_name,
+        meta=_target_meta(spreads, collapsed, min_spread, target_temperature,
+                          meta),
     )
+
+
+
+def _collect_variants(make_env, make_expert, episodes, gamma, on_episode,
+                      target_temperature, min_spread, variants,
+                      reward_name="", proposer_name="", meta=None):
+    """:func:`collect`, recording every observation variant off one playthrough.
+
+    Implemented by re-encoding the live battle once per variant at each
+    decision the plain path would have kept, rather than by replaying the
+    episode. The engine is deterministic and a replay would produce the same
+    states, but it would also cost the same seventeen seconds a battle again
+    for every variant compared.
+    """
+    from ..api.encoding import build_encoding_config, encode_observation
+
+    out: dict[str, dict[str, list]] = {
+        name: {"grid": [], "vector": []} for name in variants}
+    masks: list = []
+    actions: list[int] = []
+    values: list[float] = []
+    targets: list = []
+    spreads: list[float] = []
+    collapsed = 0
+    played = total = 0
+
+    for episode in range(episodes):
+        env = make_env(episode)
+        observation, _ = env.reset(seed=episode)
+        expert = make_expert(env)
+        configs = {
+            name: build_encoding_config(
+                env.battle.arena, env.blue_deck, env.red_deck, features)
+            for name, features in variants.items()
+        }
+        rewards: list[float] = []
+        # The env step each kept decision was made at; see the returns below.
+        decisions: list[int] = []
+
+        while True:
+            mask = env.legal_action_mask()
+            flat = mask.reshape(-1)
+            if not flat.any():
+                break
+            choice = expert(observation, mask, env.battle)
+            if int(flat.sum()) > 1:
+                slots, width, height = (int(v) for v in env.action_space.nvec)
+                index = (int(choice[0]) * width * height
+                         + int(choice[1]) * height + int(choice[2]))
+                for name, config in configs.items():
+                    encoded = encode_observation(
+                        env.battle, env.team, env.registry, config)
+                    out[name]["grid"].append(encoded["grid"])
+                    out[name]["vector"].append(encoded["vector"])
+                masks.append(flat.copy())
+                actions.append(index)
+                # rewards holds one entry per step already taken, so the next
+                # one appended -- the reward for leaving this state -- is at
+                # this index, and so is this state's own return.
+                decisions.append(len(rewards))
+                total += 1
+                played += int(choice[0] != slots - 1)
+                scores = list(getattr(expert, "last_scores", None)
+                              or getattr(getattr(expert, "bot", None),
+                                         "last_scores", []) or [])
+                row, spread = _target_row(
+                    scores, index, width, height, slots,
+                    _expert_patience(expert), target_temperature, min_spread,
+                    len(flat))
+                targets.append(row)
+                spreads.append(spread)
+                collapsed += int(spread < min_spread)
+            observation, reward, terminated, truncated, _ = env.step(choice)
+            rewards.append(float(reward))
+            if terminated or truncated:
+                break
+
+        running = 0.0
+        tail: list[float] = []
+        for reward in reversed(rewards):
+            running = reward + gamma * running
+            tail.append(running)
+        tail.reverse()
+        # By each decision's own step, not an even stride; see collect.
+        values.extend(tail[t] for t in decisions)
+        if on_episode is not None:
+            on_episode(episode + 1, len(actions))
+
+    shared = dict(
+        mask=np.asarray(masks, dtype=bool),
+        action=np.asarray(actions, dtype=np.int64),
+        value=np.asarray(values, dtype=np.float32),
+        episodes=episodes,
+        play_rate=(played / total) if total else 0.0,
+        target=np.asarray(targets, dtype=np.float32) if targets else None,
+        reward=reward_name,
+        proposer=proposer_name,
+        meta=_target_meta(spreads, collapsed, min_spread, target_temperature,
+                          meta),
+    )
+    return {
+        name: Demonstrations(
+            grid=np.asarray(parts["grid"], dtype=np.float32),
+            vector=np.asarray(parts["vector"], dtype=np.float32),
+            # The variant's own key, not the caller's default: this is the one
+            # place that knows which encoding produced these grids.
+            observation=name,
+            **shared,
+        )
+        for name, parts in out.items()
+    }
 
 
 @dataclass(slots=True)

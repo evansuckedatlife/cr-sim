@@ -239,10 +239,19 @@ class Entity:
 
         Collapsing the two would make invisibility a blanket immunity, which
         would let a Royal Ghost walk through Poison untouched.
+
+        Spelt out rather than written as ``is_targetable and ...``: this is
+        tested for every candidate of every retargeting unit every tick, and
+        chaining to another property doubled the interpreter-level calls to
+        re-read three attributes.
         """
-        if not self.is_targetable:
+        if self.dead or self.deploy_ticks_left > 0:
             return False
-        return self.buffs is None or not self.buffs.is_invisible()
+        spec = self.spec
+        if spec is not None and spec.is_fuse:
+            return False
+        buffs = self.buffs
+        return buffs is None or not buffs.is_invisible()
 
     def clone(self) -> "Entity":
         """A copy carrying its own mutable state, sharing its spec.

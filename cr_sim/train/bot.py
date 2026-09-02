@@ -121,8 +121,12 @@ def describe(runs_dir: Path, name: str) -> str:
         if verdict_file.is_file():
             try:
                 verdict = json.loads(verdict_file.read_text(encoding="utf-8"))
+                # Named for the same reason report.py names it: a bare
+                # lift read beside one measured against a different opponent
+                # is worse than no number at all.
+                foe = verdict.get("eval_opponent") or "an unnamed opponent"
                 out.append(
-                    f"**{verdict['episodes']} paired battles**: "
+                    f"**{verdict['episodes']} paired battles vs {foe}**: "
                     f"{verdict['lift']:+.3f} sd "
                     f"[{verdict['ci_low']:+.3f}, {verdict['ci_high']:+.3f}]"
                     + ("  — the interval clears zero"

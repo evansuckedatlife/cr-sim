@@ -516,9 +516,19 @@ def _spell_payload(data: LogicData, scale, level: int, card: Card, summary: dict
     # spawns (and that supplies "damage" above) carries -87. Falling back to
     # the top-level projectile/area keeps every other spell's answer
     # unchanged, since there ``damage_source_obj`` already *is* that object.
+    #
+    # The buff is the last link and it is not optional. Poison, Tornado and
+    # Earthquake carry *all* of their damage on the buff -- no ``Damage``
+    # anywhere in the chain, only ``DamagePerSecond`` -- and the reduction
+    # with it: -77, -70 and -40 respectively, which ``buffs.BuffSpec.
+    # damage_to`` applies. Without this link the summary reported no reduction
+    # at all, which is the same answer a spell that genuinely has none gets,
+    # so Poison read as hitting a tower for four times what it does.
     crown_pct = damage_source_obj.get("CrownTowerDamagePercent")
     if crown_pct is None:
         crown_pct = area.get("CrownTowerDamagePercent", projectile.get("CrownTowerDamagePercent"))
+    if crown_pct is None and buff:
+        crown_pct = buff.get("CrownTowerDamagePercent")
     if crown_pct is not None:
         summary["crown_tower_damage_percent"] = crown_pct
 

@@ -36,8 +36,177 @@ from .nets import ActorCritic
 
 __all__ = [
     "FrozenOpponent", "OpponentPool", "PooledOpponent",
-    "evaluation_probe", "ancestor_probe",
+    "evaluation_probe", "ancestor_probe", "opponent_name", "reward_name",
+    "check_lift_is_named", "SCORED_FAMILIES",
 ]
+
+
+#: Statistic families that report a *score* rather than a lift, each with its
+#: own opponent fields.
+#:
+#: A score is not a lift, so :func:`check_lift_is_named`'s original clause
+#: never fired on one -- the accidental exemption ``ancestor_probe`` enjoyed
+#: for its whole life, emitting a win rate against "the oldest one" and
+#: recording which ancestor that was as an integer age against a pool that
+#: evicts from the middle.
+SCORED_FAMILIES = ("ladder_", "ancestor_")
+
+
+def check_lift_is_named(stats: dict) -> dict:
+    """Refuse to record a lift that does not say who it was measured against.
+
+    A comment is not a guardrail, and this class of error has already cost
+    this project two rounds of invalid comparisons: the in-run probe faced an
+    opponent that never plays a card while the large paired verdicts faced a
+    random agent, both were called "lift", and they were compared to each
+    other. The control wins 92% of the idle matches and 26% of the random
+    ones, so the two numbers never lived on the same scale.
+
+    Every writer of a metrics row goes through here, so a lift without its
+    opponent cannot reach the file at all. Rows written before the field
+    existed have no ``eval_opponent`` and are the idle ones.
+
+    **And what was counted, not only who was played.** A lift is a difference
+    of *returns*, and a return is denominated in whatever reward the
+    environment was scoring, so the same two policies produce a different lift
+    under ``projected`` than under ``five-term`` -- and a run that anneals its
+    shaping produces both within itself, its own arm shrinking against a
+    control that was evaluated once and cached with the scale it had then.
+    That is the identical mistake one axis over, so it gets the identical
+    refusal: ``eval_reward``, written by :func:`reward_name` off the
+    environment that actually played. Pinning the in-run probe's reward
+    (``cr_sim.train.run.EVAL_REWARD``) is what removes the drift; this is what
+    makes the omission unrecordable.
+
+    **A ladder row needs a second door, because it would walk past the first
+    one.** A ladder reports a *score* -- the fraction of a mirrored pairing a
+    player took -- not a lift, so ``eval_lift_sd`` is absent and the clause
+    above never fires. That is exactly the accidental exemption
+    :func:`ancestor_probe` used to enjoy: it emitted ``ancestor_win`` and no
+    ``eval_lift_sd``, so nothing checked it, and it recorded which ancestor it
+    faced as an integer age against a pool that evicts. The existing self-play
+    ladder was already an unnamed measurement; the new one does not get to
+    copy it.
+
+    Two things are demanded of a ladder row and they are different questions.
+    *Who* is the kind of opponent -- "pool", "ladder", "random". *Which* is
+    the weights: "pool" is not an opponent, ``runs/clone-v3-paired/cloned.pt``
+    is. A rating is transitive, so a row naming only the kind cannot be placed
+    on the graph at all.
+
+    **Each family of scores names its own side, and that is not a loophole.**
+    One metrics row genuinely carries several measurements against several
+    different opponents: cr_sim.train.run merges the random-control probe,
+    the self-play ancestor ladder and the rating ladder into one dict. A
+    single ``eval_opponent`` cannot name all of them, and whichever writer
+    happened to run last would relabel the others -- measured on a smoke run,
+    where the ancestor's score arrived on a row saying it had been played
+    against the rating ladder's anchors. So ``ladder_score`` looks for
+    ``ladder_opponent`` and ``ancestor_score`` for ``ancestor_opponent``,
+    each falling back to ``eval_opponent`` only where the row carries a single
+    measurement and that field is unambiguous. A row carrying neither is
+    refused exactly as before.
+    """
+    if "eval_lift_sd" in stats and not stats.get("eval_opponent"):
+        raise ValueError(
+            "a metrics row carries eval_lift_sd but no eval_opponent. A lift "
+            "is meaningless without the opponent it was measured against -- "
+            "the same policy scores wildly differently against an idle and a "
+            "random one. See cr_sim.train.selfplay.opponent_name."
+        )
+    if "eval_lift_sd" in stats and not stats.get("eval_reward"):
+        raise ValueError(
+            "a metrics row carries eval_lift_sd but no eval_reward. A lift is "
+            "a difference of *returns*, and a return is denominated in "
+            "whatever reward the environment was scoring -- so the same two "
+            "policies produce a different lift under `projected` than under "
+            "`five-term`, and a run that anneals its shaping shrinks its own "
+            "arm's returns while a cached control keeps the scale it was "
+            "measured on. This is the identical mistake eval_opponent already "
+            "refuses, one axis over: naming who was played and not what was "
+            "counted. See cr_sim.train.selfplay.reward_name."
+        )
+    for prefix in SCORED_FAMILIES:
+        if f"{prefix}score" not in stats and f"{prefix}elo" not in stats:
+            continue
+        if not (stats.get(f"{prefix}opponent") or stats.get("eval_opponent")):
+            raise ValueError(
+                f"a metrics row carries {prefix}score but no "
+                f"{prefix}opponent and no eval_opponent. A score against an "
+                "unnamed player is not a rating -- the whole point of a "
+                "ladder is that the pairing graph is connected, and an edge "
+                "with one end missing connects nothing. See "
+                "cr_sim.train.selfplay.opponent_name."
+            )
+        if not stats.get(f"{prefix}opponent_ref"):
+            raise ValueError(
+                f"a {prefix.rstrip('_')} row names its opponent's kind but "
+                "not which weights they were. 'pool' is not an opponent; "
+                "'runs/clone-v3-paired/cloned.pt' is."
+            )
+    if "ladder_elo" in stats and "ladder_pinned" not in stats:
+        raise ValueError(
+            "a metrics row carries ladder_elo but does not say what the "
+            "rating was pinned to. An Elo is only a number relative to "
+            "whatever the fit held fixed: the same battles with one anchor "
+            "pinned at its offline +382 and with that anchor missing from the "
+            "table -- pinned at 0, i.e. level with a uniform random agent -- "
+            "came out 377 points apart, with every other field on the row "
+            "identical. This is the same failure eval_opponent already "
+            "refuses, one scale over: naming who was played and not what the "
+            "measurement was measured against. Record `ladder_pinned` as "
+            "{name: elo} for every player the fit held fixed."
+        )
+    return stats
+
+
+def reward_name(env: CRSimEnv) -> str:
+    """The scale ``env`` measures returns on, as a label to record beside a lift.
+
+    Read off the environment rather than taken as an argument, for exactly the
+    reason :func:`opponent_name` is: a caller cannot then label a measurement
+    with a scale it was not taken on.
+
+    The full weight tuple, not the variant name. "projected" alone does not
+    identify a scale -- the same variant at ``tower=1.0`` and at ``tower=0.0``
+    produces returns an order of magnitude apart, and under an anneal it
+    produces both within one run. The variant name is what
+    ``Demonstrations.reward`` recorded, and the set collected under
+    ``--elixir-weight 0`` is indistinguishable in that file from one collected
+    at 0.3.
+    """
+    weights = getattr(env, "reward_weights", None)
+    if weights is None:
+        return f"simple:shaping={getattr(env, 'reward_shaping_weight', 0.0):g}"
+    kind = ("projected" if type(weights).__name__ == "ProjectionWeights"
+            else "five-term")
+    terms = ",".join(f"{k}={v!r}" if v is None else f"{k}={v:g}"
+                     for k, v in sorted(weights.as_dict().items()))
+    return f"{kind}:{terms}"
+
+
+def opponent_name(env: CRSimEnv) -> str:
+    """What ``env``'s opponent is, as a short label to record beside a lift.
+
+    Read off the environment rather than taken as an argument, so a caller
+    cannot label a measurement with an opponent it did not actually face.
+    Policies carry their own ``opponent_name``; anything that does not is
+    reported as ``"unknown"`` rather than guessed at, because a wrong label is
+    worse than an absent one.
+
+    This exists because "lift" was reported on two incompatible scales for
+    most of this project's life: the in-run probe faced an opponent that never
+    plays a card, the large paired verdicts faced a random agent, and the two
+    numbers were compared to each other. The random control wins 92% of the
+    idle matches and 26% of the random ones, so a lift means nothing at all
+    without this string next to it.
+    """
+    from ..api.env import idle_opponent_policy
+
+    policy = getattr(env, "opponent_policy", None)
+    if policy is None or policy is idle_opponent_policy:
+        return "idle"
+    return str(getattr(policy, "opponent_name", None) or "unknown")
 
 
 class FrozenOpponent:
@@ -48,16 +217,50 @@ class FrozenOpponent:
     mid-rollout.
     """
 
-    __slots__ = ("_net", "_nvec", "_torch", "_rng", "refreshes", "temperature")
+    __slots__ = ("_net", "_nvec", "_torch", "_rng", "refreshes", "temperature",
+                 "opponent_name", "greedy", "generator")
 
     def __init__(self, net: ActorCritic, nvec: Sequence[int], seed: int = 0,
-                 temperature: float = 1.0) -> None:
+                 temperature: float = 1.0, *, name: str = "unknown",
+                 greedy: bool = False,
+                 generator: "Any | None" = None) -> None:
         import torch
 
         self._torch = torch
         self._nvec = [int(v) for v in nvec]
         self._rng = np.random.default_rng(seed)
         self.refreshes = 0
+        #: What a measurement records as the opponent it faced.
+        #:
+        #: Without this slot the class had no ``__dict__`` either, so
+        #: ``opponent.opponent_name = "..."`` raised AttributeError and
+        #: :func:`opponent_name` reported every frozen opponent as "unknown".
+        #: A checkpoint-vs-checkpoint ladder could not name its own opponent,
+        #: which means no row it wrote could pass
+        #: :func:`check_lift_is_named`. It is a string rather than a
+        #: reference to the weights because a name is what a metrics row can
+        #: hold; the weights themselves are named by
+        #: ``ladder_opponent_ref``.
+        self.opponent_name = str(name)
+        #: Play the argmax, exactly, rather than sampling.
+        #:
+        #: A real flag and not ``temperature=1e-3``. The entire argument for
+        #: a greedy ladder is that it reproduces bit-identically, and 1e-3 is
+        #: *nearly* argmax: two logits within 1e-3 of each other still get
+        #: sampled between, so a run can differ from its own repeat on the
+        #: battles where the policy is undecided -- which are exactly the
+        #: battles a close pairing turns on. "Nearly reproducible" is how a
+        #: reproducibility claim quietly becomes false.
+        self.greedy = bool(greedy)
+        #: The sampled draw's own stream, when it has one.
+        #:
+        #: ``None`` keeps the original ``Categorical(...).sample()`` call on
+        #: torch's global stream, which is what every self-play run so far
+        #: has used and what its numbers reproduce from. A ladder cannot
+        #: afford that -- an unreproducible yardstick cannot settle whether a
+        #: change moved anything -- so it passes a generator derived
+        #: arithmetically from the battles being played.
+        self.generator = generator
         #: How sharply the opponent plays its own policy. 1.0 samples from it
         #: as-is, which sounds neutral and is not: an early policy has an
         #: entropy near the uniform maximum, so an opponent sampling from it
@@ -93,7 +296,16 @@ class FrozenOpponent:
             return (0, 0, 0)
         torch = self._torch
         with torch.no_grad():
-            logits, _ = self._net(
+            # The actor only. An opponent chooses an action and never reads
+            # a value, and with a separate critic encoder ``forward`` spends
+            # about half its time computing one to throw away -- 2393us
+            # against 1334us on the batch of one an opponent does.
+            #
+            # It is waste rather than a bottleneck, which is worth stating
+            # because the microbenchmark invites the opposite reading: an
+            # interleaved A/B over whole self-play battles came back at ~1.0x.
+            # A decision is ~118ms and this forward is ~1.1ms of it.
+            logits = self._net.policy_logits(
                 torch.from_numpy(observation["grid"]).unsqueeze(0),
                 torch.from_numpy(observation["vector"]).unsqueeze(0),
                 torch.from_numpy(flat).unsqueeze(0),
@@ -103,8 +315,19 @@ class FrozenOpponent:
             # placement; sampling at 1.0 leaves an opponent barely different
             # from random. A temperature below one keeps the opponent varied
             # while making it predictable enough to learn against.
-            index = int(torch.distributions.Categorical(
-                logits=logits / self.temperature).sample())
+            #
+            # Training wants that variety. A ladder wants the opposite: an
+            # opponent that plays the same line every time, so a pairing
+            # measures the policies and not the two generators behind them.
+            if self.greedy:
+                index = int(logits.argmax(dim=-1))
+            elif self.generator is not None:
+                index = int(torch.multinomial(
+                    torch.softmax(logits / self.temperature, dim=-1), 1,
+                    generator=self.generator))
+            else:
+                index = int(torch.distributions.Categorical(
+                    logits=logits / self.temperature).sample())
         slots, width, height = self._nvec
         slot, remainder = divmod(index, width * height)
         gx, gy = divmod(remainder, height)
@@ -219,9 +442,31 @@ def evaluation_probe(
     control = evaluate(control_env, None, episodes=episodes, seeds=seeds)
     control_wins = float(np.mean([c > 0 for c in control["crowns"]]))
     control_return = float(np.mean(control["returns"]))
+    # Recorded here, from the environment the control actually played in, so
+    # every lift this probe produces arrives with the scale it was measured
+    # on attached. See :func:`opponent_name`.
+    faced = opponent_name(control_env)
+    # And the scale it was measured on, from the same environment. A lift is
+    # a difference of returns, so it is denominated in whatever reward the
+    # env was scoring -- see check_lift_is_named.
+    scale = reward_name(control_env)
 
     def probe(net: ActorCritic) -> dict[str, Any]:
-        result = evaluate(make_env(), net, episodes=episodes, seeds=seeds, greedy=False)
+        import torch
+
+        # The sampled arm's own stream, built fresh from the probe's seed on
+        # every reading, so this probe is a function of (net, seeds) and
+        # nothing else. Without it the draw came off torch's global stream:
+        # three consecutive readings of one net over one seed list measured
+        # +0.905, +1.228 and +0.970 -- a 0.32 sd spread, against a documented
+        # sampled noise floor of 0.062 and a full PPO run that moved greedy by
+        # 0.024. run.py promotes on the mean of three of these, so the
+        # promotion was partly a function of where the global stream happened
+        # to be. The same discipline rotating_probe already uses; this is the
+        # probe that is actually the default.
+        stream = torch.Generator().manual_seed(int(seed) % (2 ** 31 - 1))
+        result = evaluate(make_env(), net, episodes=episodes, seeds=seeds,
+                          greedy=False, generator=stream)
         wins = float(np.mean([c > 0 for c in result["crowns"]]))
         spread = float(np.std(control["returns"])) or 1.0
         return {
@@ -232,6 +477,9 @@ def evaluation_probe(
             # In control standard deviations, because the raw gap means
             # nothing without knowing how noisy the control is.
             "eval_lift_sd": (float(np.mean(result["returns"])) - control_return) / spread,
+            "eval_opponent": faced,
+            "eval_reward": scale,
+            "eval_episodes": int(episodes),
         }
 
     return probe
@@ -262,19 +510,65 @@ def ancestor_probe(
     seeds = [int(s) for s in np.random.default_rng(seed).integers(0, 2**31 - 1, episodes)]
 
     def probe(net: ActorCritic) -> dict:
+        # No battles means no measurement, and no keys. np.mean([]) is NaN,
+        # which json.dumps writes as a bare NaN token that is not valid JSON,
+        # and which every consumer downstream then has to recognise: the page
+        # drew an empty self-play ladder for a whole run because --ancestor
+        # -episodes was 0 and the rows said NaN rather than saying nothing.
+        # An absent key is the honest report of a measurement not taken.
+        if episodes <= 0:
+            return {}
         ancestor = pool.oldest()
         if ancestor is None:
             return {}
-        env = make_env(FrozenOpponent(ancestor, nvec, seed=seed))
-        result = evaluate(env, net, episodes=episodes, seeds=seeds, greedy=False)
+        age = pool.generations - len(pool) + 1
+        import torch
+
+        # Two streams, both derived from this probe's seed and neither of them
+        # torch's global one: the ancestor's own sampling and the policy's.
+        # Every self-play run promotes partly on this number, and without the
+        # generators two readings of one net against one ancestor over one
+        # seed list are two different measurements.
+        opponent_stream = torch.Generator().manual_seed(int(seed) % (2 ** 31 - 1))
+        stream = torch.Generator().manual_seed(
+            (int(seed) * 8191 + 1) % (2 ** 31 - 1))
+        # Named, at last. This probe used to build its opponent anonymously
+        # and report a win rate against "the oldest one", which is a
+        # measurement whose scale moves every time the pool evicts.
+        env = make_env(FrozenOpponent(ancestor, nvec, seed=seed,
+                                      name=f"pool:gen{age}",
+                                      generator=opponent_stream))
+        result = evaluate(env, net, episodes=episodes, seeds=seeds,
+                          greedy=False, generator=stream)
         crowns = result["crowns"]
-        return {
-            "ancestor_win": float(np.mean([c > 0 for c in crowns])),
-            "ancestor_loss": float(np.mean([c < 0 for c in crowns])),
+        if len(crowns) == 0:
+            return {}
+        wins = float(np.mean([c > 0 for c in crowns]))
+        losses = float(np.mean([c < 0 for c in crowns]))
+        return check_lift_is_named({
+            "ancestor_win": wins,
+            "ancestor_loss": losses,
             "ancestor_return": float(np.mean(result["returns"])),
             # How far back the benchmark sits, so a rising win rate can be
             # read against a benchmark that is itself getting older.
-            "ancestor_age": pool.generations - len(pool) + 1,
-        }
+            "ancestor_age": age,
+            # The same statistic the offline ladder fits ratings from --
+            # wins plus half the draws -- so a self-play run's own ladder and
+            # runs/<name>/ladder.json speak one language.
+            "ancestor_score": wins + 0.5 * (1.0 - wins - losses),
+            # Its own keys, not eval_opponent and not the rating ladder's.
+            # cr_sim.train.run merges this dict into one row with the
+            # random-control probe's and, under --probe ladder, the rating
+            # probe's too. Sharing a field means whichever writer runs last
+            # relabels the others: measured, the ancestor's score arrived on
+            # a row claiming it had been played against the rating ladder's
+            # anchors. See check_lift_is_named.
+            "ancestor_opponent": "pool",
+            # Which weights, not just which kind. An integer age against a
+            # pool that evicts from the middle is not a reference anything
+            # can be scored relative to later.
+            "ancestor_opponent_ref": f"gen{age}",
+            "ancestor_episodes": int(episodes),
+        })
 
     return probe

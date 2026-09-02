@@ -81,6 +81,24 @@ class VecEnvConfig:
     reward_weights: Any = None
     #: Seed for a random opponent, or ``None`` for an idle or network one.
     opponent_seed: int | None = None
+    #: The run's own seed, made distinct per worker by
+    #: :class:`CRSimVecEnv`, and the only thing that makes a self-play
+    #: worker's opponent reproducible.
+    #:
+    #: A self-play opponent samples from its policy, and until this existed
+    #: that draw came off torch's *global* stream. ``_worker`` sets the thread
+    #: count and nothing else, and the workers are spawned rather than forked,
+    #: so every worker imported torch fresh and seeded itself from OS entropy:
+    #: three fresh processes running the identical construction on one fixed
+    #: board reported ``torch.initial_seed()`` of 81036942797900,
+    #: 81144705125800 and 81234665151700 and shared not one of their first
+    #: twenty opponent actions. End to end, two runs of
+    #: ``--steps 1600 --workers 4 --seed 0`` from one tree gave update-1
+    #: mean_return +0.2556 and -0.1125, while the same command at
+    #: ``--workers 0`` -- where the rollout runs in the seeded parent --
+    #: matched exactly. That is what made every ``--workers`` self-play run,
+    #: runs/learn-lvl5-kl01 included, impossible to replay.
+    seed: int = 0
     #: Shapes for a network opponent, if one will be sent. Weights arrive
     #: separately through ``set_opponent`` rather than living in the config:
     #: they change every refresh, and a config is pickled once per worker.
@@ -88,6 +106,11 @@ class VecEnvConfig:
     #: Environments this worker owns. Sharding several onto one process keeps
     #: the number of pipes down and amortises the round trip.
     shard: int = 1
+    #: Which observation the workers encode. A frozen dataclass of plain
+    #: fields, so it pickles. A worker building v1 observations while the
+    #: parent's network expects v2 is a shape error at the first forward
+    #: pass, which is at least loud -- but only because this field exists.
+    observation: Any = None
 
 
 def _build_env(config: VecEnvConfig, data, levels, registry, index: int,
@@ -116,6 +139,8 @@ def _build_env(config: VecEnvConfig, data, levels, registry, index: int,
         reward_weights=config.reward_weights,
         max_ticks=config.max_ticks,
         opponent_policy=opponent,
+        **({} if config.observation is None
+           else {"observation": config.observation}),
     )
 
 
@@ -124,7 +149,9 @@ def _worker(config: VecEnvConfig, conn) -> None:
 
     Everything is rebuilt from ``config`` rather than received pre-built; see
     the module docstring. The loop is a minimal RPC server over the pipe:
-    ``("reset", seeds)``, ``("step", actions)`` and ``("close", None)``.
+    ``("reset", seeds)``, ``("step", actions)``,
+    ``("set_opponent", state_dict)``, ``("set_reward_weights", (weights,
+    shaping))`` and ``("close", None)``.
 
     A worker owns ``config.shard`` environments and steps all of them per
     message, because the round trip costs about as much as a decision does and
@@ -162,6 +189,12 @@ def _worker(config: VecEnvConfig, conn) -> None:
         _build_env(config, data, levels, registry, i, network_opponent=_current)
         for i in range(config.shard)
     ]
+    # The self-play opponent's own sampling stream, built once per worker and
+    # carried across every refresh, so what the opponent plays is a function
+    # of (run seed, worker) and of how far this worker has got -- never of
+    # where a global generator happened to be. Rebuilding it per refresh would
+    # instead replay one fixed sequence after every generation change.
+    opponent_stream: list = []
     rng = np.random.default_rng(config.opponent_seed or 0)
     nvec = [int(v) for v in envs[0].action_space.nvec]
     try:
@@ -197,9 +230,28 @@ def _worker(config: VecEnvConfig, conn) -> None:
                 from ..train.nets import ActorCritic, NetConfig
                 from ..train.selfplay import FrozenOpponent
 
+                import torch as _torch
+
+                if not opponent_stream:
+                    opponent_stream.append(_torch.Generator().manual_seed(
+                        int(config.seed) % (2 ** 31 - 1)))
                 net = ActorCritic(NetConfig(**config.net_config))
                 net.load_state_dict(payload)
-                holder[:] = [FrozenOpponent(net, nvec, seed=config.opponent_seed or 0)]
+                holder[:] = [FrozenOpponent(net, nvec,
+                                            seed=config.opponent_seed or 0,
+                                            generator=opponent_stream[0])]
+                conn.send(True)
+            elif command == "set_reward_weights":
+                # Pending on every env this worker owns, adopted at that
+                # env's own next reset. A frozen VecEnvConfig is pickled once
+                # per worker, so without this RPC there is no way to move a
+                # worker's reward at all -- and a field the parent's _env()
+                # sets while the workers do not is exactly the shape of the
+                # --tower-level bug, which trained every rollout at level 11
+                # while config.json recorded 5.
+                weights, shaping = payload
+                for env in envs:
+                    env.set_reward_weights(weights, shaping_weight=shaping)
                 conn.send(True)
             elif command == "close":
                 return
@@ -269,10 +321,15 @@ class CRSimVecEnv:
             # Each worker gets a distinct opponent seed, or eight parallel
             # battles would face an identical sequence of placements and
             # report a smoother result than the policy has earned.
-            per = shard_config
+            # And its own opponent stream, derived arithmetically from the
+            # run's seed, so eight workers do not sample the identical
+            # sequence of opponent moves and two runs of one --seed do.
+            per = dataclasses.replace(
+                shard_config,
+                seed=(int(config.seed) * 1_000_003 + worker) % (2 ** 31 - 1))
             if config.opponent_seed is not None:
                 per = dataclasses.replace(
-                    shard_config, opponent_seed=config.opponent_seed + worker * 1000
+                    per, opponent_seed=config.opponent_seed + worker * 1000
                 )
             proc = self._ctx.Process(target=_worker, args=(per, child_conn), daemon=True)
             proc.start()
@@ -356,6 +413,28 @@ class CRSimVecEnv:
         payload = {k: v.detach().cpu().clone() for k, v in state_dict.items()}
         for conn in self._conns:
             conn.send(("set_opponent", payload))
+        for conn, proc in zip(self._conns, self._procs):
+            self._recv(conn, proc)
+
+    def set_reward_weights(self, weights, *,
+                           shaping_weight: float | None = None) -> None:
+        """Push new reward weights to every worker's environments.
+
+        Adopted at each environment's own next reset, never mid-episode --
+        see :meth:`cr_sim.api.env.CRSimEnv.set_reward_weights` for why that
+        boundary is a correctness requirement and not a nicety.
+
+        **A rollout that spans a schedule step therefore contains two
+        weights**, because the workers reset inside ``step`` when an episode
+        ends and each env adopts at its own next one. At horizon 256 across 8
+        envs an update is 2048 steps, roughly 25 episodes, so a linear
+        schedule moves a fraction of a percent across the boundary. Avoiding
+        it entirely would mean discarding every episode in flight. Recorded
+        rather than hidden: a metrics row carries the weight *pushed* at that
+        update, which is a target, not a per-battle fact.
+        """
+        for conn in self._conns:
+            conn.send(("set_reward_weights", (weights, shaping_weight)))
         for conn, proc in zip(self._conns, self._procs):
             self._recv(conn, proc)
 

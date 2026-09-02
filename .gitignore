@@ -38,3 +38,6 @@ demo-*.err
 data_cache/demos/
 scratch_*.js
 progress.json
+
+# Rescued .pt files -- weights, not source.
+checkpoints/

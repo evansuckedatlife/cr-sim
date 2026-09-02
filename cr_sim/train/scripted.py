@@ -37,7 +37,7 @@ its sophistication suggests:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import numpy as np
 
@@ -96,6 +96,59 @@ class SearchBotConfig:
     #: wins 100%.
     elixir_weight: float = 0.0
     seed: int = 0
+    #: How many of ``candidates`` come from the proposer rather than the
+    #: random draw. 0 -- the default -- is exactly the bot that produced every
+    #: result on this machine, down to the order it consumes its generator in.
+    #:
+    #: The reason to want more than zero: ``_sample_actions`` draws about
+    #: fourteen placements from a mean of 104 legal ones, which is 13.5%
+    #: coverage, measured. The other 86.5% are never scored at all, and the
+    #: only object in the system with an opinion about *which* fourteen are
+    #: worth an exact engine branch -- the policy -- has never been asked.
+    #: Measured here at the shipped ``candidates=14, horizon_seconds=15``,
+    #: one torch thread: a decision costs 511 ms and a ``policy_logits``
+    #: forward costs 1.34 ms, so asking is **0.26% of a decision**. At an
+    #: equal candidate budget guiding the proposal is free, and the budget is
+    #: held equal in code -- see :meth:`SearchBot._candidates`.
+    policy_candidates: int = 0
+    #: Candidates that must come from the random draw no matter what the
+    #: proposer wants, and it is not optional.
+    #:
+    #: A proposer nominates placements the policy already rates highly, so its
+    #: candidates are more alike than a stratified draw, so their engine-scored
+    #: values are more alike, so the target's spread falls and more rows
+    #: collapse onto the single chosen action. The policy then trains on its
+    #: own preference wearing the search's clothes. That is the same shape as
+    #: the measured disaster in :func:`cr_sim.train.clone.collect` -- 86% of
+    #: wait-states carrying an exactly uniform target, the pass action never
+    #: the argmax in 10,940 decisions, and a clone that played a card at every
+    #: single decision.
+    #:
+    #: 0 means the default floor, ``max(2, candidates // 3)``; see
+    #: :attr:`random_floor`. A floor is what keeps the target's support
+    #: spanning placements the policy did not choose.
+    min_random_candidates: int = 0
+
+    @property
+    def random_floor(self) -> int:
+        """How many candidates the random draw keeps, whatever is proposed."""
+        if self.min_random_candidates > 0:
+            return min(int(self.min_random_candidates), int(self.candidates))
+        return max(2, int(self.candidates) // 3)
+
+    @property
+    def effective_policy_candidates(self) -> int:
+        """:attr:`policy_candidates` after the floor is taken out of it.
+
+        One implementation, because two would drift. :class:`SearchBot`
+        applies this clamp when it is built, and anything stamping the
+        configuration onto a file has to record what the bot will actually do
+        rather than what the flag asked for -- a shard saying ``p12`` over a
+        bot that took ten is the "declared rather than read" mistake that
+        ``Demonstrations.observation`` exists to stop.
+        """
+        return min(int(self.policy_candidates),
+                   max(0, int(self.candidates) - self.random_floor))
 
 
 class SearchBot:
@@ -107,11 +160,47 @@ class SearchBot:
     """
 
     __slots__ = ("config", "team", "_rng", "_evaluated", "_encoding",
-                 "last_scores")
+                 "last_scores", "_proposer", "_decisions", "requested_policy_candidates")
 
-    def __init__(self, team: Team, config: SearchBotConfig | None = None) -> None:
+    def __init__(self, team: Team, config: SearchBotConfig | None = None,
+                 proposer: "Callable[[Any, np.ndarray, int], Sequence[int]] | None" = None
+                 ) -> None:
+        """``proposer`` ranks the legal actions; ``None`` is today's bot.
+
+        The callable is opaque on purpose. This module imports numpy and
+        nothing else, and a torch import here would pull torch into every
+        engine-only test path that touches the search. The policy proposer
+        lives in :mod:`cr_sim.train.proposal`, which is the only file in the
+        package that imports torch for this.
+
+        It is handed ``(observation, flat mask, decision index)`` and returns
+        flat action indices, most-preferred first. Anything it returns that is
+        illegal, duplicated, or the no-op is dropped; if nothing survives, the
+        bot falls back to the full random draw, which is the default rather
+        than a degraded one.
+        """
         self.team = team
-        self.config = config or SearchBotConfig()
+        config = config or SearchBotConfig()
+        #: What the caller asked for, kept beside what it got. The clamp
+        #: below is recorded rather than applied silently: a bot that quietly
+        #: took fewer policy candidates than it was told to would make an
+        #: equal-budget comparison a comparison of something else.
+        self.requested_policy_candidates = int(config.policy_candidates)
+        allowed = config.effective_policy_candidates
+        if config.policy_candidates > allowed:
+            from dataclasses import replace as _replace
+
+            config = _replace(config, policy_candidates=allowed,
+                              min_random_candidates=config.random_floor)
+        self.config = config
+        self._proposer = proposer
+        #: Decisions this bot has been asked for, and the only thing the
+        #: proposer's random stream varies with besides the seeds. The bot is
+        #: rebuilt per battle everywhere it is used -- ``search_opponent``,
+        #: ``ladder._search_driver``, ``collect`` -- so this is a function of
+        #: (battle seed, decision number) and never of how many episodes came
+        #: before, which is the flaw ``_random_opponent`` still has.
+        self._decisions = 0
         self._rng = np.random.default_rng(self.config.seed)
         #: Built once on first use. It depends only on the arena and the card
         #: pool, neither of which changes during a battle, and rebuilding it
@@ -133,6 +222,15 @@ class SearchBot:
     @property
     def evaluated(self) -> int:
         return self._evaluated
+
+    @property
+    def decisions(self) -> int:
+        return self._decisions
+
+    @property
+    def clamped(self) -> bool:
+        """Whether ``policy_candidates`` was cut to keep the random floor."""
+        return self.requested_policy_candidates != self.config.policy_candidates
 
     def _encoding_for(self, battle):
         if self._encoding is None:
@@ -156,6 +254,14 @@ class SearchBot:
         draw over the mask is dominated by whichever card has the most legal
         tiles, so an expensive card with a small deploy zone would rarely be
         considered at all.
+
+        Called at the full configured budget whether or not a proposer is in
+        use, and that is deliberate. ``per_slot`` is ``max(1, candidates //
+        slots)``, so asking for fewer does not reliably draw fewer -- a budget
+        of two across four legal cards still returns four placements, and a
+        guided bot filling the remainder that way took 63 branches where the
+        unguided one took 32. The proposal *replaces* part of this draw
+        instead; see :meth:`_candidates`.
         """
         config = self.config
         legal = np.argwhere(mask)
@@ -175,6 +281,95 @@ class SearchBot:
             chosen.extend(tuple(int(v) for v in cells[i]) for i in picked)
         return chosen
 
+    def _candidates(self, observation, mask: np.ndarray, decision: int
+                    ) -> list[tuple[int, int, int]]:
+        """The placements this decision will actually branch on.
+
+        Three cases and no others:
+
+        1.  **No proposer** -- ``_sample_actions``, from the unmodified
+            generator, in the unmodified loop order. Byte-for-byte the bot
+            that produced every demonstration set, clone and verdict on this
+            machine, which is why an unflagged run still reproduces exactly.
+        2.  **A proposer naming at least one legal placement** -- its
+            suggestions *replace* the front of that same draw. Different bot;
+            it is named differently everywhere it is recorded.
+        3.  **A proposer naming nothing usable** -- empty, all illegal, or no
+            network at all -- straight through to the draw, whole. The
+            fallback is the default rather than a degraded default: a decision
+            the network had no opinion about must cost the same branches as
+            one where it was never asked.
+
+        **Replace, never append, and the budget is the draw's own length.**
+        The random draw is taken first and in full, so the guided bot spends
+        exactly the branches the unguided bot would have spent on this board
+        and consumes exactly the same random numbers doing it. That is the
+        whole equal-budget claim, and it is a property of this arithmetic
+        rather than of a promise: a bot that appended nine proposals to
+        fourteen draws would win a head-to-head on the extra branches alone,
+        which is the least interesting way to win there is.
+        """
+        drawn = self._sample_actions(mask)
+        if self._proposer is None or not drawn:
+            return drawn
+        slots, width, height = mask.shape
+        flat = mask.reshape(-1)
+
+        def index_of(action) -> int:
+            return action[0] * width * height + action[1] * height + action[2]
+
+        wanted = int(self.config.policy_candidates)
+        proposed: list[tuple[int, int, int]] = []
+        offered: set[int] = set()
+        if wanted > 0:
+            for raw in self._proposer(observation, flat, decision):
+                index = int(raw)
+                if index in offered or not (0 <= index < flat.size):
+                    continue
+                if not bool(flat[index]):
+                    continue
+                slot, rest = divmod(index, width * height)
+                # The no-op is seeded into the scores unconditionally below.
+                # It is not a candidate, and no proposer may spend a branch on
+                # it or displace a placement with it.
+                if slot == NOOP_SLOT:
+                    continue
+                offered.add(index)
+                proposed.append((slot, *divmod(rest, height)))
+                if len(proposed) >= wanted:
+                    break
+        budget = len(drawn)
+        # The floor is measured against what was actually drawn, not against
+        # the configured candidate count: per_slot rounding means a decision
+        # with more legal cards than budget draws fewer than `candidates`, and
+        # a floor computed from the config would then be no floor at all.
+        take = min(len(proposed), max(0, budget - self.config.random_floor))
+
+        merged: list[tuple[int, int, int]] = []
+        seen: set[int] = set()
+
+        def push(action) -> None:
+            index = index_of(action)
+            if index not in seen:
+                seen.add(index)
+                merged.append(action)
+
+        for action in proposed[:take]:
+            push(action)
+        for action in drawn:
+            if len(merged) >= budget:
+                break
+            push(action)
+        # A proposal the draw happened to make as well costs a slot that
+        # belongs to nobody. Give it back to the proposer rather than to the
+        # branch count: the two agreed on that placement, so it was never one
+        # of the random candidates the floor exists to guarantee.
+        for action in proposed[take:]:
+            if len(merged) >= budget:
+                break
+            push(action)
+        return merged
+
     def __call__(self, observation: dict, mask: np.ndarray, battle=None):
         """Choose an action. ``battle`` is required -- this bot reads the board.
 
@@ -183,10 +378,24 @@ class SearchBot:
         indistinguishable from the control it is meant to beat.
         """
         if battle is None:
+            self.last_scores = []
             return (NOOP_SLOT, 0, 0)
+
+        # Counted before the elixir gate, so the index is the decision number
+        # in this battle rather than the number of decisions that happened to
+        # reach the search. A decision skipped for want of elixir is still a
+        # decision, and a counter that skipped it would make the proposer's
+        # stream depend on the elixir curve.
+        decision = self._decisions
+        self._decisions += 1
 
         player = battle.players[self.team]
         if player.elixir.exact < self.config.reserve_elixir:
+            # Cleared, not left as it was. These early returns used to leave
+            # ``last_scores`` holding the *previous* decision's numbers, and
+            # anything reading them afterwards would be told what the search
+            # believed about a board that no longer exists.
+            self.last_scores = []
             return (NOOP_SLOT, 0, 0)
 
         horizon = int(self.config.horizon_seconds * battle.config.ticks_per_second)
@@ -201,7 +410,7 @@ class SearchBot:
             (NOOP_SLOT * width * height, waiting)
         ]
 
-        for action in self._sample_actions(mask):
+        for action in self._candidates(observation, mask, decision):
             branch = battle.clone()
             if not _play(branch, self.team, action, self._encoding_for(battle)):
                 continue
@@ -227,7 +436,8 @@ def _play(branch, team: Team, action: tuple[int, int, int], encoding) -> bool:
     return bool(_apply_action(branch, team, action, encoding))
 
 
-def scripted_opponent(team: Team, config: SearchBotConfig | None = None):
+def scripted_opponent(team: Team, config: SearchBotConfig | None = None,
+                      proposer=None):
     """A bot in the shape the environment's ``opponent_policy`` expects.
 
     The environment hands an opponent an observation and a mask, not the
@@ -235,11 +445,16 @@ def scripted_opponent(team: Team, config: SearchBotConfig | None = None):
     the real game. This bot genuinely needs the board, so the environment
     passes it when the callable declares it wants one.
     """
-    bot = SearchBot(team, config)
+    bot = SearchBot(team, config, proposer)
 
     def policy(observation, mask, battle=None):
         return bot(observation, mask, battle)
 
     policy.wants_battle = True  # type: ignore[attr-defined]
     policy.bot = bot  # type: ignore[attr-defined]
+    # Named, the way cr_sim.train.evaluate.search_opponent already names its
+    # own. Without it an environment built from here reported "unknown" and
+    # any lift measured in it could not be written down at all -- the bot is
+    # not weaker for being built through a different helper.
+    policy.opponent_name = "search"  # type: ignore[attr-defined]
     return policy

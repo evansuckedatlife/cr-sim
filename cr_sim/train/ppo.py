@@ -40,7 +40,7 @@ import torch.nn as nn
 
 from ..api.encoding import NOOP_SLOT
 from ..api.env import CRSimEnv
-from .nets import ActorCritic, NetConfig
+from .nets import ActorCritic, NetConfig, net_config_for
 
 __all__ = ["PPOConfig", "Rollout", "train", "compute_gae"]
 
@@ -75,6 +75,21 @@ class PPOConfig:
     #: not pushed to keep exploring where to put things.
     entropy_coefficient: float = 0.02
     max_grad_norm: float = 0.5
+    #: Which policy head to build; see :class:`~cr_sim.train.nets.NetConfig`.
+    head: str = "flat"
+    #: Weight on ``KL(reference || policy)``, the standard trust region for
+    #: fine-tuning a policy that already plays.
+    #:
+    #: Zero is plain PPO. Above zero the loss carries a pull back toward a
+    #: frozen anchor -- in practice the behavioural clone the run started
+    #: from. The direction is deliberate: ``KL(reference || policy)`` is the
+    #: one that punishes *dropping* what the reference does, because its
+    #: expectation is taken under the reference. The reverse direction is
+    #: mode-seeking and happily lets the policy collapse onto one action, and
+    #: collapsing onto one action -- passing -- is precisely this
+    #: environment's failure mode. It is also the direction AlphaStar used
+    #: against its supervised agent for the whole of its league training.
+    kl_coefficient: float = 0.0
     seed: int = 0
     log_every: int = 1
 
@@ -161,6 +176,7 @@ def train(
     on_refresh: "Callable[[ActorCritic, int], None] | None" = None,
     resume: "dict | None" = None,
     parallel: "Any | None" = None,
+    reference: "ActorCritic | None" = None,
 ) -> ActorCritic:
     """Run PPO and return the trained network.
 
@@ -194,6 +210,16 @@ def train(
     """
     torch.manual_seed(config.seed)
     rng = np.random.default_rng(config.seed)
+    # The minibatch shuffle's own stream, created once and carried across
+    # every update. It used to be ``np.random.shuffle``, which draws from
+    # numpy's *global legacy* RandomState -- seeded from OS entropy at import
+    # and by nothing here -- so two runs of one command with one --seed
+    # produced identical rollouts and different updates: measured at
+    # --workers 0 with byte-identical config.json, update 1 came out with
+    # policy_loss -0.080 against -0.121 and value_loss 0.056 against 0.092,
+    # and by update 2 the entropy and the explained variance had parted
+    # company entirely.
+    shuffler = np.random.default_rng(config.seed + 1)
 
     # One local environment either way: its spaces define the network's
     # shapes, and building it is cheap next to a rollout.
@@ -214,16 +240,7 @@ def train(
             observations.append(obs)
         masks = [env.legal_action_mask() for env in envs]
 
-    sample_grid = observations[0]["grid"]
-    net = ActorCritic(
-        NetConfig(
-            grid_channels=sample_grid.shape[0],
-            grid_height=sample_grid.shape[1],
-            grid_width=sample_grid.shape[2],
-            vector_size=observations[0]["vector"].shape[0],
-            num_actions=num_actions,
-        )
-    ).to(device)
+    net = ActorCritic(net_config_for(probe, head=config.head)).to(device)
     if config.value_learning_rate is None:
         # foreach batches the per-parameter updates into a handful of fused
         # kernels rather than four to six per tensor. On CPU it is a modest
@@ -254,6 +271,22 @@ def train(
             optimiser.load_state_dict(resume["optimiser"])
         resumed_steps = int(resume.get("steps", 0))
         resumed_updates = int(resume.get("updates", 0))
+
+    # The anchor for the trust region, taken *after* the resumed weights are
+    # loaded so it is the policy the run actually starts from rather than the
+    # random initialisation that briefly preceded it. Frozen and on the CPU:
+    # it is only ever read.
+    anchor = None
+    if config.kl_coefficient > 0.0:
+        anchor = reference
+        if anchor is None:
+            import copy as _copy
+
+            anchor = _copy.deepcopy(net)
+        anchor = anchor.to(device)
+        anchor.eval()
+        for parameter in anchor.parameters():
+            parameter.requires_grad_(False)
 
     if on_net is not None:
         on_net(net)
@@ -330,7 +363,8 @@ def train(
             last_value.cpu(), config.gamma, config.gae_lambda,
         )
 
-        stats = _update(net, optimiser, rollout, config, device)
+        stats = _update(net, optimiser, rollout, config, device, anchor,
+                        shuffler=shuffler)
         update_index += 1
 
         # The non-finite check lives in _update, on the gradient norm that
@@ -433,8 +467,22 @@ def _update(
     rollout: Rollout,
     config: PPOConfig,
     device: str,
+    anchor: "ActorCritic | None" = None,
+    *,
+    shuffler: "np.random.Generator",
 ) -> dict:
-    """One PPO update over the collected rollout."""
+    """One PPO update over the collected rollout.
+
+    ``anchor`` is the frozen reference the trust region pulls back toward; see
+    :attr:`PPOConfig.kl_coefficient`. ``None`` is plain PPO.
+
+    ``shuffler`` is the stream the minibatch permutation is drawn from, and
+    it is required rather than defaulted. A default here would be a second
+    mechanism guarding one behaviour: :func:`train` could stop passing its
+    own and every run would stay reproducible while quietly replaying one
+    permutation on every update, which no single-line mutation could then be
+    held to account for.
+    """
     flat = {
         "grid": rollout.grid.reshape(-1, *rollout.grid.shape[2:]),
         "vector": rollout.vector.reshape(-1, rollout.vector.shape[-1]),
@@ -448,9 +496,9 @@ def _update(
     batch_size = max(1, total // config.minibatches)
     indices = np.arange(total)
 
-    policy_loss = value_loss = entropy_value = 0.0
+    policy_loss = value_loss = entropy_value = divergence_value = 0.0
     for _ in range(config.epochs):
-        np.random.shuffle(indices)
+        shuffler.shuffle(indices)
         for start in range(0, total, batch_size):
             batch = torch.from_numpy(indices[start : start + batch_size])
             advantage = flat["advantage"][batch].to(device)
@@ -475,6 +523,22 @@ def _update(
                 + config.value_coefficient * v_loss
                 - config.entropy_coefficient * entropy.mean()
             )
+            divergence = torch.zeros((), device=loss.device)
+            if anchor is not None:
+                grid_b = flat["grid"][batch].to(device)
+                vector_b = flat["vector"][batch].to(device)
+                mask_b = flat["mask"][batch].to(device)
+                with torch.no_grad():
+                    reference_logits, _ = anchor(grid_b, vector_b, mask_b)
+                    reference_log = nn.functional.log_softmax(reference_logits, dim=-1)
+                    reference_prob = reference_log.exp()
+                current_logits, _ = net(grid_b, vector_b, mask_b)
+                current_log = nn.functional.log_softmax(current_logits, dim=-1)
+                # KL(reference || policy). Illegal actions carry exactly zero
+                # reference probability, so they contribute nothing however
+                # large the logit difference on them is.
+                divergence = (reference_prob * (reference_log - current_log)).sum(-1).mean()
+                loss = loss + config.kl_coefficient * divergence
 
             optimiser.zero_grad(set_to_none=True)
             loss.backward()
@@ -492,12 +556,17 @@ def _update(
                 )
             optimiser.step()
 
-            policy_loss, value_loss, entropy_value = (
-                p_loss.item(), v_loss.item(), entropy.mean().item()
+            policy_loss, value_loss, entropy_value, divergence_value = (
+                p_loss.item(), v_loss.item(), entropy.mean().item(),
+                float(divergence.detach()),
             )
 
     return {
         "policy_loss": policy_loss,
         "value_loss": value_loss,
         "entropy": entropy_value,
+        # How far the policy has walked from the thing it started as. Worth
+        # logging even at coefficient zero: a fine-tune that has drifted a
+        # long way from a competent clone has usually not improved on it.
+        "reference_kl": divergence_value,
     }

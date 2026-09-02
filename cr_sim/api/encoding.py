@@ -59,7 +59,7 @@ permanent zero the network has to learn to ignore.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from functools import lru_cache
 from typing import Sequence
 
@@ -80,11 +80,19 @@ __all__ = [
     "HP_NORM",
     "GRID_CHANNELS",
     "N_GRID_CHANNELS",
+    "ObservationFeatures",
+    "OBSERVATION_V1",
+    "OBSERVATION_V2",
+    "OBSERVATION_V3",
+    "grid_channels",
+    "GRID_FEATURE_CHANNELS",
+    "parse_observation",
     "EncodingConfig",
     "build_encoding_config",
     "cell_to_world",
     "action_grid_shape",
     "observation_shapes",
+    "hand_onehot_layout",
     "decode_action",
     "legal_action_mask",
     "encode_observation",
@@ -113,9 +121,30 @@ PLACEMENT_TILE_SPAN = 2
 #: reference/card_stats.json and build_tower_spec at level 11.
 HP_NORM = 6000.0
 
-#: Order is fixed and index-addressed by _encode_grid; do not reorder without
-#: updating the slicing below.
-GRID_CHANNELS = (
+#: Bodies in one cell that saturate a count channel. Four is the Skeletons
+#: card's own summon count, so a single cheap swarm card reads at 1.0 and
+#: anything larger is a genuine pile-up rather than one card.
+COUNT_NORM = 4.0
+
+#: Damage in flight or sitting in a cloud that saturates a spell channel.
+#: Above the deck's own worst single hit (Fireball, 688 at tournament
+#: standard) and below a Rocket, so an ordinary spell reads high without
+#: everything saturating.
+SPELL_NORM = 1000.0
+
+#: Damage per real second that saturates a threat channel. Chosen the way
+#: HP_NORM was: the hardest hitter in the build measures 715 damage per second
+#: (Battle Ram, at tournament standard), so one unit on its own reads below
+#: saturation and only a genuine stack pushes a cell to 1.0.
+DPS_NORM = 800.0
+
+#: Reach in tiles that saturates a threat channel. The longest reach in the
+#: build is 11.5 tiles (X-Bow and Mortar), so even a siege building stays just
+#: under 1.0 and the channel keeps its ordering across the whole range.
+REACH_NORM = 12.0
+
+#: The hitpoint-mass channels, in fixed order.
+_HP_CHANNELS = (
     "own_ground_hp",
     "own_air_hp",
     "own_building_hp",
@@ -124,12 +153,167 @@ GRID_CHANNELS = (
     "enemy_air_hp",
     "enemy_building_hp",
     "enemy_tower_hp",
-    "terrain",
 )
+#: Bodies per cell, which hitpoint mass alone cannot express: three Skeletons
+#: at 81 each and one Knight at 243 produce an identical hitpoint cell, and
+#: swarm-versus-tank is the read that decides whether a Log or a Knight is the
+#: answer.
+_COUNT_CHANNELS = ("own_body_count", "enemy_body_count")
+#: Damage in flight and damage sitting on the board. Projectiles and area
+#: effects were excluded from the grid entirely, which left the agent unable
+#: to see an incoming Fireball or a Poison cloud standing on its own troops --
+#: both of which are things a player reacts to rather than remembers.
+_SPELL_CHANNELS = ("own_spell_damage", "enemy_spell_damage")
+#: What a cell can *do*, as opposed to how much of it there is. A Musketeer
+#: and a Knight land in a cell as roughly the same hitpoint number, and the
+#: entire difference between them -- she reaches 6.0 tiles to his 1.2 and
+#: kills him without being touched -- is invisible to a policy reading mass
+#: alone. Damage and reach accumulate differently over a stack, which is why
+#: they are two pairs and not one: see :func:`_encode_grid`.
+_THREAT_CHANNELS = ("own_dps", "enemy_dps", "own_reach", "enemy_reach")
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationFeatures:
+    """Which observation an environment encodes.
+
+    Versioned rather than switched, because changing the observation
+    invalidates every checkpoint trained on the old one: the network's first
+    convolution has one filter bank per input channel, and weights for nine
+    channels cannot be loaded into a network expecting thirteen. A run records
+    its ``version`` so a checkpoint can be refused loudly instead of failing
+    on a shape mismatch nobody can place.
+
+    The two vector flags deliberately do *not* change the vector's length --
+    they zero a span that stays where it was -- so hiding information is not
+    also a shape change, and an ablation over them compares networks of
+    identical size.
+    """
+
+    version: int = 1
+    #: Projectile and area-effect damage as two more grid channels.
+    spells: bool = False
+    #: Bodies per cell alongside hitpoint mass.
+    swarm: bool = False
+    #: Damage per second and attack reach per cell, alongside hitpoint mass.
+    threat: bool = False
+    #: Zero the opponent's four hand slots and next card.
+    #:
+    #: This is the genuinely private information in Clash Royale. Enemy
+    #: *elixir* is not: the regeneration schedule is public and every card
+    #: played is visible, so a player who counts can reconstruct the bar
+    #: exactly -- which ``tests/test_api_encoding.py`` demonstrates rather
+    #: than asserts. The hand cannot be reconstructed at all.
+    hide_enemy_hand: bool = False
+    #: Zero the opponent's elixir scalar. Kept separate from the hand because
+    #: it is a different claim: not "the agent should not know this" but "the
+    #: agent should have to keep count of it".
+    hide_enemy_elixir: bool = False
+
+
+#: What every checkpoint before this existed was trained on.
+OBSERVATION_V1 = ObservationFeatures(version=1)
+#: Everything the reference spec called for at once. Each flag is separately
+#: switchable so the ablation can say which of them paid.
+#:
+#: Listed explicitly, and frozen. This was once built by turning every flag on,
+#: so that a feature added later would be in "v2" automatically -- which reads
+#: as the safer choice and is the opposite. A version number is a promise about
+#: a *shape*: checkpoints record it, and ``check_observation`` refuses a
+#: checkpoint whose recorded observation differs from the environment's. Adding
+#: ``threat`` to a self-updating "v2" silently redefined it from 13 channels to
+#: 17, so a checkpoint recorded as "v2" parsed equal to the new "v2", sailed
+#: past the guard, and died on a raw ``conv.0.weight`` size mismatch -- exactly
+#: the failure the guard exists to replace. A named version has to mean the
+#: same thing forever; "everything at once" is what moves, and that is
+#: :data:`OBSERVATION_V3`.
+OBSERVATION_V2 = ObservationFeatures(
+    version=2,
+    spells=True,
+    swarm=True,
+    hide_enemy_hand=True,
+    hide_enemy_elixir=True,
+)
+
+#: Every flag this build knows, v2 plus :attr:`ObservationFeatures.threat`.
+#:
+#: Still derived rather than listed, because "all of it" genuinely should
+#: acquire a new feature automatically -- but a *new* number, so nothing
+#: already recorded changes meaning. When the next feature lands, this becomes
+#: v4 and v3 gets frozen the way v2 just was.
+OBSERVATION_V3 = ObservationFeatures(
+    version=3,
+    **{field.name: True for field in fields(ObservationFeatures)
+       if field.name != "version"},
+)
+
+
+def parse_observation(spec: str) -> ObservationFeatures:
+    """``"v1"``, ``"v2"``, ``"v3"``/``"all"``, or a comma-separated flag list.
+
+    Individual flags are what an ablation needs: "v2" turns on four changes at
+    once and a single lift number over it cannot say which of them paid, or
+    whether one of them is quietly costing.
+    """
+    text = (spec or "v1").strip().lower()
+    if text in ("v1", "1", ""):
+        return OBSERVATION_V1
+    if text in ("v2", "2"):
+        return OBSERVATION_V2
+    if text in ("v3", "3", "all"):
+        return OBSERVATION_V3
+    # Derived from the dataclass, not listed here, so a feature added to
+    # ObservationFeatures is selectable by name without anyone remembering to
+    # update a second copy of the list.
+    known = {field.name for field in fields(ObservationFeatures)} - {"version"}
+    flags = {name.strip() for name in text.split(",") if name.strip()}
+    unknown = flags - known
+    if unknown:
+        raise ValueError(
+            f"unknown observation flag(s) {sorted(unknown)}; "
+            f"expected 'v1', 'v2', 'v3', or any of {sorted(known)}")
+    return ObservationFeatures(version=2, **{name: True for name in flags})
+
+
+#: Which grid flag contributes which channels, in the order they are added.
+#:
+#: A registry rather than a chain of ``if``s, so adding a feature set is one
+#: entry here plus one field on :class:`ObservationFeatures` plus the lines
+#: that fill it in ``_encode_grid`` -- and :func:`parse_observation` picks it
+#: up on its own. That matters because more than one person adds channels:
+#: two independent observation changes landing as one undifferentiated "v2"
+#: makes it impossible to attribute which of them moved a number, which is
+#: the mistake that already cost this project a round of invalid
+#: comparisons.
+GRID_FEATURE_CHANNELS: dict[str, tuple[str, ...]] = {
+    "swarm": _COUNT_CHANNELS,
+    "spells": _SPELL_CHANNELS,
+    "threat": _THREAT_CHANNELS,
+}
+
+
+def grid_channels(features: ObservationFeatures = OBSERVATION_V1) -> tuple[str, ...]:
+    """The grid's channels, in the order :func:`_encode_grid` writes them.
+
+    Terrain stays last whatever is switched on, so the normalisation slices
+    below stay expressible as leading ranges rather than as a scatter of
+    indices.
+    """
+    channels = list(_HP_CHANNELS)
+    for flag, added in GRID_FEATURE_CHANNELS.items():
+        if getattr(features, flag, False):
+            channels.extend(added)
+    channels.append("terrain")
+    return tuple(channels)
+
+
+#: The v1 channel list, kept under its old name because callers outside this
+#: module read it.
+GRID_CHANNELS = grid_channels(OBSERVATION_V1)
 N_GRID_CHANNELS = len(GRID_CHANNELS)
 #: All channels except the last (terrain) carry hitpoint mass and share one
 #: normalisation; terrain is already scaled at the point it is written.
-_HP_CHANNEL_COUNT = N_GRID_CHANNELS - 1
+_HP_CHANNEL_COUNT = len(_HP_CHANNELS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,10 +335,16 @@ class EncodingConfig:
     #: This episode's card vocabulary: the union of both decks, sorted for a
     #: stable index assignment independent of dict/set iteration order.
     vocab: tuple[str, ...]
+    #: Which observation this config encodes; see :class:`ObservationFeatures`.
+    features: ObservationFeatures = OBSERVATION_V1
 
     @property
     def vocab_size(self) -> int:
         return len(self.vocab)
+
+    @property
+    def channels(self) -> tuple[str, ...]:
+        return grid_channels(self.features)
 
 
 def _grid_shape(arena: Arena, span: int) -> tuple[int, int]:
@@ -173,7 +363,10 @@ def _grid_shape(arena: Arena, span: int) -> tuple[int, int]:
 
 
 def build_encoding_config(
-    arena: Arena, blue_deck: Sequence[str], red_deck: Sequence[str]
+    arena: Arena,
+    blue_deck: Sequence[str],
+    red_deck: Sequence[str],
+    features: ObservationFeatures = OBSERVATION_V1,
 ) -> EncodingConfig:
     grid_width, grid_height = _grid_shape(arena, OBS_TILE_SPAN)
     action_width, action_height = _grid_shape(arena, PLACEMENT_TILE_SPAN)
@@ -184,6 +377,7 @@ def build_encoding_config(
         action_width=action_width,
         action_height=action_height,
         vocab=vocab,
+        features=features,
     )
 
 
@@ -200,8 +394,26 @@ def observation_shapes(config: EncodingConfig) -> dict[str, tuple[int, ...]]:
     it, term for term, rather than a memorised constant -- see the comment
     there for what each term is.
     """
-    grid_shape = (N_GRID_CHANNELS, config.grid_height, config.grid_width)
+    grid_shape = (len(config.channels), config.grid_height, config.grid_width)
     return {"grid": grid_shape, "vector": (_vector_length(config),)}
+
+
+def hand_onehot_layout(config: EncodingConfig) -> tuple[int, int, int, int]:
+    """Where the acting team's hand identities sit in the observation vector.
+
+    Returns ``(start, stride, count, width)``: the acting team's slot ``i``
+    one-hot is ``vector[start + i * stride : start + i * stride + width]``.
+
+    Exposed because a card-conditioned policy head has to read *which card* a
+    slot holds, and the alternative -- a network hard-coding the offsets it
+    believes the encoder uses -- silently reads the wrong span the moment a
+    field is added ahead of the hand. Derived here from the same terms
+    :func:`_encode_vector` builds, so the two cannot drift apart without a
+    test noticing.
+    """
+    stride = 1 + config.vocab_size   # cost, then the identity one-hot
+    start = 2 + 1                    # two elixir scalars, then past slot 0's cost
+    return start, stride, NUM_CARD_SLOTS - 1, config.vocab_size
 
 
 def _vector_length(config: EncodingConfig) -> int:
@@ -499,37 +711,120 @@ def _terrain_channel(arena: Arena, team: Team, width: int, height: int) -> np.nd
     return out
 
 
+def _spell_damage(entity: Entity) -> tuple[int, int]:
+    """``(damage, radius)`` a projectile or area effect threatens with.
+
+    Read off the spec rather than recomputed: a projectile's damage is what it
+    will deal when it lands, and an area effect's is what it deals per
+    application, which is the right scale for "how much is about to happen
+    here" in both cases. A shot with no damage of its own -- Goblin Barrel,
+    which is pure delivery -- contributes nothing here and shows up as troops
+    when it lands, which is when it becomes board presence.
+    """
+    # ``pspec`` on a Projectile, ``aspec`` on an AreaEffect. Neither is
+    # ``Entity.spec``, which stays None on both -- reading that instead is how
+    # a spell channel ends up permanently zero while everything else about it
+    # looks right.
+    spec = (getattr(entity, "pspec", None) or getattr(entity, "aspec", None)
+            or entity.spec)
+    if spec is None:
+        return 0, 0
+    return int(getattr(spec, "damage", 0) or 0), int(getattr(spec, "radius", 0) or 0)
+
+
 def _encode_grid(battle: Battle, team: Team, config: EncodingConfig) -> np.ndarray:
-    """Multi-channel hitpoint-mass map. See the module docstring for the
-    channel list and why projectiles and area effects are left out of it:
-    neither carries hitpoints that mean "board presence" the way a troop's
-    or a building's do, and where a spell is about to land is already known
-    from the action that just cast it, not from parsing entities after the
-    fact.
+    """Multi-channel map of the board, from ``team``'s point of view.
+
+    Hitpoint mass per cell is the base layer. Two optional layers sit beside
+    it, both added because the base layer cannot express what they carry:
+
+    *   **Bodies per cell.** Three Skeletons at 81 hitpoints each and one
+        Knight at 243 write an identical hitpoint cell, and which of the two
+        it is decides whether the answer is a Log or a Knight. Swarm-versus-
+        tank is a core read and hitpoint mass alone is blind to it.
+    *   **Spell damage.** Projectiles and area effects used to be excluded
+        from the grid entirely, on the reasoning that neither carries
+        hitpoints and that a spell's landing point is known from the action
+        that cast it. That reasoning only holds for the agent's *own* spells.
+        It cannot see an incoming Fireball, or a Poison cloud standing on its
+        own troops, and both are things a player reacts to.
+    *   **Threat.** Mass says how much of something is in a cell, never what
+        it does there. A Musketeer and a Knight write roughly the same
+        hitpoint number, and she reaches 6.0 tiles to his 1.2 and kills him
+        without being touched; damage per second and reach are that
+        difference, made visible.
     """
     width, height = config.grid_width, config.grid_height
-    grid = np.zeros((N_GRID_CHANNELS, height, width), dtype=np.float32)
+    channels = config.channels
+    grid = np.zeros((len(channels), height, width), dtype=np.float32)
+    features = config.features
+    counts = channels.index("own_body_count") if features.swarm else -1
+    spells = channels.index("own_spell_damage") if features.spells else -1
+    threat = channels.index("own_dps") if features.threat else -1
+
     for entity in battle.entities:
-        if entity.dead or entity.kind not in (
-            EntityKind.TROOP, EntityKind.BUILDING, EntityKind.TOWER
-        ):
+        if entity.dead:
             continue
         cell = _world_to_cell(entity.x, entity.y, team, battle.arena, width, height, OBS_TILE_SPAN)
         if cell is None:
             continue
         gx, gy = cell
-        side = "own" if entity.team is team else "enemy"
-        if entity.kind is EntityKind.TROOP:
-            role = "air" if entity.flying else "ground"
-        elif entity.kind is EntityKind.BUILDING:
-            role = "building"
-        else:
-            role = "tower"
-        channel = GRID_CHANNELS.index(f"{side}_{role}_hp")
-        grid[channel, gy, gx] += entity.hitpoints
+        own = entity.team is team
+        side = "own" if own else "enemy"
+        if entity.kind in (EntityKind.TROOP, EntityKind.BUILDING, EntityKind.TOWER):
+            if entity.kind is EntityKind.TROOP:
+                role = "air" if entity.flying else "ground"
+            elif entity.kind is EntityKind.BUILDING:
+                role = "building"
+            else:
+                role = "tower"
+            grid[channels.index(f"{side}_{role}_hp"), gy, gx] += entity.hitpoints
+            # Towers are permanent scenery, not a swarm; counting them would
+            # put a constant three in the same channel a Skeleton army has to
+            # be read out of.
+            if counts >= 0 and entity.kind is not EntityKind.TOWER:
+                grid[counts + (0 if own else 1), gy, gx] += 1.0
+            # Towers *are* written here, unlike the body count above: a
+            # Princess Tower is 115 damage per second out to 7.5 tiles and
+            # never leaves the board, so a cell in its reach is the least safe
+            # ground on the map, and channels that skipped it would say the
+            # opposite of that.
+            if threat >= 0 and entity.spec is not None:
+                side_offset = 0 if own else 1
+                # Damage sums over a stack: two Musketeers really do put out
+                # twice the damage, the same way they put out twice the mass.
+                grid[threat + side_offset, gy, gx] += entity.spec.damage_per_second
+                # Reach does not sum -- two Musketeers do not shoot any
+                # further than one -- so the cell takes the longest reach
+                # standing in it, not the total.
+                reach = threat + 2 + side_offset
+                grid[reach, gy, gx] = max(
+                    grid[reach, gy, gx], to_tiles(entity.spec.attack_range))
+        elif spells >= 0 and entity.kind in (EntityKind.PROJECTILE, EntityKind.AREA_EFFECT):
+            damage, radius = _spell_damage(entity)
+            if damage <= 0:
+                continue
+            channel = spells + (0 if own else 1)
+            # Painted over the footprint, because a spell's threat is an area
+            # and a single cell would tell the agent a Fireball is somewhere
+            # without saying what it covers.
+            span = max(0, int(to_tiles(radius)))
+            for dy in range(-span, span + 1):
+                for dx in range(-span, span + 1):
+                    x, y = gx + dx, gy + dy
+                    if 0 <= x < width and 0 <= y < height and dx * dx + dy * dy <= span * span:
+                        grid[channel, y, x] += damage
 
     grid[:_HP_CHANNEL_COUNT] = np.minimum(1.0, grid[:_HP_CHANNEL_COUNT] / HP_NORM)
-    grid[_HP_CHANNEL_COUNT] = _terrain_channel(battle.arena, team, width, height)
+    if counts >= 0:
+        grid[counts:counts + 2] = np.minimum(1.0, grid[counts:counts + 2] / COUNT_NORM)
+    if spells >= 0:
+        grid[spells:spells + 2] = np.minimum(1.0, grid[spells:spells + 2] / SPELL_NORM)
+    if threat >= 0:
+        grid[threat:threat + 2] = np.minimum(1.0, grid[threat:threat + 2] / DPS_NORM)
+        grid[threat + 2:threat + 4] = np.minimum(
+            1.0, grid[threat + 2:threat + 4] / REACH_NORM)
+    grid[len(channels) - 1] = _terrain_channel(battle.arena, team, width, height)
     return grid
 
 
@@ -559,16 +854,21 @@ def _encode_vector(
     battle: Battle, team: Team, registry: CardRegistry, config: EncodingConfig
 ) -> np.ndarray:
     opponent = team.opponent
+    features = config.features
     parts: list[np.ndarray] = [
         _scalar(battle.players[team].elixir.units / MAX_ELIXIR),
-        _scalar(battle.players[opponent].elixir.units / MAX_ELIXIR),
+        # Zeroed rather than dropped, so hiding it is not also a shape change
+        # and an ablation compares networks of identical size.
+        _scalar(0.0 if features.hide_enemy_elixir
+                else battle.players[opponent].elixir.units / MAX_ELIXIR),
     ]
 
     for side in (team, opponent):
         player = battle.players[side]
+        hidden = features.hide_enemy_hand and side is opponent
         for card_name in player.hand:
-            parts.append(_card_features(card_name, registry, config))
-        parts.append(_card_features(player.next_card, registry, config))
+            parts.append(_card_features(None if hidden else card_name, registry, config))
+        parts.append(_card_features(None if hidden else player.next_card, registry, config))
 
     for side in (team, opponent):
         towers = _team_towers(battle, side)

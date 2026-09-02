@@ -17,6 +17,7 @@ from cr_sim.data.leveling import build_level_table
 from cr_sim.data.source import LogicData
 from cr_sim.engine.battle import KING_ACTIVATION_MS, Battle, BattleConfig
 from cr_sim.engine.combat import AttackState
+from cr_sim.engine.constants import TickClock
 from cr_sim.engine.entity import Entity, EntityKind, Team
 from cr_sim.engine.fixed import milli_tiles, tiles, to_tiles
 from cr_sim.engine.specs import build_unit_spec
@@ -29,6 +30,8 @@ RARITY = {
     "Giant": "Rare", "Valkyrie": "Rare", "Barbarian": "Common", "Skeleton": "Common",
     "Archer": "Common", "Minion": "Common", "Bomber": "Common", "Golem": "Epic",
     "HogRider": "Rare", "BabyDragon": "Epic",
+    "Monk": "Champion", "Firecracker": "Common", "RamRider": "Legendary",
+    "Cannon": "Common",
 }
 
 
@@ -911,3 +914,151 @@ def test_a_knight_routes_around_a_friendly_cannon_rather_than_through_it(world):
     assert closest_approach >= knight.collision_radius + cannon.collision_radius, (
         "clipped into the Cannon's own hitbox while routing around it"
     )
+
+
+# ------------------------------------------- attack sequences and recoil
+
+
+def _swings(battle, attacker, limit=900):
+    """Damage of each hit ``attacker`` lands, in order."""
+    out = []
+    for _ in range(limit):
+        seen = len(battle.damage_log)
+        battle.step()
+        out.extend(
+            event.amount for event in battle.damage_log[seen:]
+            if event.attacker_id == attacker.id
+        )
+        if len(out) >= 7:
+            break
+    return out
+
+
+def test_monks_third_swing_is_the_one_that_hurts(world):
+    """``AttackSequence`` drives ``VariableDamage``, not a timer.
+
+    Two ladders share the ``VariableDamage2``/``VariableDamage3`` columns.
+    Inferno Tower's advances on ``VariableDamageTime1``/``2``; Monk carries
+    neither of those and an ``AttackSequence`` of ``[0, 1, 2]`` instead --
+    55 / 55 / 165, repeating. Walked as a timed ladder those steps never
+    advance and Monk swings for the base figure forever, which deletes the
+    card's entire mechanic.
+
+    A Golem is the target because it survives long enough to show the cycle
+    repeat.
+    """
+    battle = _empty_battle(world)
+    monk = _spawn(battle, world, "Monk", Team.BLUE, 9, 11.0)
+    _spawn(battle, world, "Golem", Team.RED, 9, 12.0)
+
+    ladder = monk.spec.variable_damage
+    assert len(ladder) == 3, ladder
+    # 55 / 55 / 165 at level 1: the third step is triple, and stays triple
+    # through the level ladder up to each step's own truncation.
+    assert 3 * ladder[0] - 3 <= ladder[2] <= 3 * ladder[0] + 3, ladder
+
+    hits = _swings(battle, monk)
+    assert len(hits) >= 6, f"only {len(hits)} swings"
+    # And it cycles rather than topping out, which is what makes it "every
+    # third hit" rather than "from the third hit on".
+    assert hits[:6] == [ladder[0], ladder[1], ladder[2]] * 2, hits[:6]
+
+
+def test_monks_third_swing_shoves_what_it_hits(world):
+    """``MeleePushback3`` is 1800 with ``IsMeleePushbackAll3``.
+
+    The same swing that lands triple damage also clears space around him. The
+    field was parsed nowhere, so Monk's knockback did not exist.
+    """
+    battle = _empty_battle(world)
+    monk = _spawn(battle, world, "Monk", Team.BLUE, 9, 11.0)
+    barbarian = _spawn(battle, world, "Barbarian", Team.RED, 9, 12.0)
+
+    jumps = []
+    previous = barbarian.y
+    for _ in range(400):
+        battle.step()
+        if abs(barbarian.y - previous) > milli_tiles(500):
+            jumps.append(to_tiles(barbarian.y - previous))
+        previous = barbarian.y
+        if barbarian.dead:
+            break
+
+    assert jumps, "Monk never knocked the Barbarian back"
+    # 1800 milli-tiles, away from the Monk (who is at the lower y).
+    assert jumps[0] > 1.5, f"knocked back {jumps[0]:.2f} tiles, expected ~1.8"
+
+
+def test_a_pushback_immune_unit_shrugs_monk_off(world):
+    """``IgnorePushback`` still wins. A Golem is not moved by anything."""
+    battle = _empty_battle(world)
+    _spawn(battle, world, "Monk", Team.BLUE, 9, 11.0)
+    golem = _spawn(battle, world, "Golem", Team.RED, 9, 12.0)
+    start = golem.y
+    for _ in range(400):
+        battle.step()
+    assert golem.y <= start, "a Golem was shoved backwards"
+
+
+def test_firecracker_kicks_herself_backwards_when_she_fires(world):
+    """``AttackPushBack`` moves the *attacker*, not the target.
+
+    Firecracker's is 1000 -- a full tile of recoil per volley, which is why she
+    drifts away from the bridge she is defending and why she outranges what she
+    is shooting at over time. The column was read nowhere, so she stood still.
+
+    It is a separate mechanism from ``PROJECTILE.Pushback``, which shoves the
+    victim; the two are different columns and cards carry one without the other.
+    """
+    battle = _empty_battle(world)
+    firecracker = _spawn(battle, world, "Firecracker", Team.BLUE, 9, 8.0)
+    _spawn(battle, world, "Golem", Team.RED, 9, 14.0)
+
+    jumps = []
+    previous = firecracker.y
+    for _ in range(700):
+        battle.step()
+        moved = firecracker.y - previous
+        if abs(moved) > milli_tiles(400):
+            jumps.append(to_tiles(moved))
+        previous = firecracker.y
+
+    assert jumps, "Firecracker never recoiled"
+    # Backwards, away from the target she is shooting at up-board.
+    assert all(jump < 0 for jump in jumps), jumps
+    assert abs(jumps[0]) > 0.9, f"recoiled {jumps[0]:.2f} tiles, expected ~1.0"
+
+
+def test_the_ram_riders_rider_never_shoots_a_tower(world):
+    """``TargetOnlyTroops`` is the mirror of ``TargetOnlyBuildings``.
+
+    The card summons ``Ram``, which is ``TargetOnlyBuildings`` and charges the
+    tower; the rider it carries is ``TargetOnlyTroops`` and only ever throws
+    her bola at troops. The flag was parsed nowhere, so the rider shot the
+    tower too and the card gained a whole second damage source it does not
+    have.
+    """
+    data, levels, _registry = world
+    scale = levels.get("Legendary")
+    rider = build_unit_spec(
+        data, levels, "RamRider",
+        level=scale.internal_level(11), rarity="Legendary", clock=TickClock(),
+    )
+    assert rider.target_only_troops, "the fixture is not the flag's user"
+
+    battle = _empty_battle(world)
+    shooter = _spawn(battle, world, "RamRider", Team.BLUE, 9, 11.0)
+    building = _spawn(battle, world, "Cannon", Team.RED, 9, 13.0)
+    troop = _spawn(battle, world, "Barbarian", Team.RED, 9, 12.0)
+
+    assert not can_target(shooter.spec, shooter, building), "the rider can see a building"
+    assert can_target(shooter.spec, shooter, troop), "the rider cannot see a troop"
+
+    # And it holds in a running battle, not only at the filter: the Cannon is
+    # inside her range the whole time and never takes a bola.
+    for _ in range(600):
+        battle.step()
+        if troop.dead:
+            break
+    assert building.hitpoints == building.max_hitpoints, "the rider shot a building"
+    assert troop.hitpoints < troop.max_hitpoints, "the rider never shot the troop either"

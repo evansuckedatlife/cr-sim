@@ -19,7 +19,7 @@ That is the question "do I need to respond right now" turns on.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .constants import MAX_ELIXIR
 from .entity import EntityKind, Team, entity_id_cursor, restore_entity_ids
@@ -75,12 +75,19 @@ def _is_quiet(battle) -> bool:
 def _read(battle, ticks: int, decided: bool) -> Projection:
     totals: dict[Team, int] = {Team.BLUE: 0, Team.RED: 0}
     starting: dict[Team, int] = {Team.BLUE: 0, Team.RED: 0}
-    for entity in (*battle.entities, *battle.graveyard):
-        if entity.kind is not EntityKind.TOWER:
-            continue
-        starting[entity.team] += entity.max_hitpoints
-        if not entity.dead:
-            totals[entity.team] += max(entity.hitpoints, 0)
+    # The dead are walked as a second list rather than spread into one tuple
+    # with the living. A destroyed tower has to be counted -- that is the whole
+    # point of looking at the graveyard -- but building a tuple of every corpse
+    # in the match to find it is work proportional to how long the match has
+    # run, on a function that is the entire cost of a projection whenever the
+    # board is quiet enough to skip the simulation.
+    for source in (battle.entities, battle.graveyard):
+        for entity in source:
+            if entity.kind is not EntityKind.TOWER:
+                continue
+            starting[entity.team] += entity.max_hitpoints
+            if not entity.dead:
+                totals[entity.team] += max(entity.hitpoints, 0)
 
     def fraction(team: Team) -> float:
         return totals[team] / starting[team] if starting[team] else 0.0
@@ -113,6 +120,15 @@ def project(battle, horizon_ticks: int | None = None) -> Projection:
         return _read(battle, ticks=0, decided=False)
 
     branch = battle.clone()
+    # A branch has no viewer, so it has no reason to build viewer frames.
+    # ``clone`` empties the frame list for exactly this reason, but the *switch*
+    # lives on the config, which a branch shares with the battle it came from --
+    # so a projection taken while a replay was being recorded went on capturing
+    # a frame every few ticks and then threw the lot away. Replacing the config
+    # with a copy is what makes the intent actually hold; nothing else on it
+    # differs, and nothing the projection reports depends on frames.
+    if branch.config.record_frames:
+        branch.config = replace(branch.config, record_frames=False)
     start = branch.tick
     limit = branch.tick + horizon_ticks if horizon_ticks is not None else None
     # Entity ids come from a module-level counter, so anything the branch
@@ -122,10 +138,15 @@ def project(battle, horizon_ticks: int | None = None) -> Projection:
     # collide with the ids being reissued.
     cursor = entity_id_cursor()
     try:
-        while not branch.finished:
-            if limit is not None and branch.tick >= limit:
-                break
-            branch.step()
+        # The horizon test is hoisted out of the loop rather than re-asked on
+        # every one of up to three hundred ticks.
+        if limit is None:
+            while not branch.finished:
+                branch.step()
+        else:
+            step = branch.step
+            while branch.tick < limit and not branch.finished:
+                step()
         return _read(branch, ticks=branch.tick - start, decided=branch.finished)
     finally:
         restore_entity_ids(cursor)

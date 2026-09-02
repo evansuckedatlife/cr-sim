@@ -206,8 +206,11 @@
       "why_it_matters": "Bridge width sets how many units can cross abreast and how spells cover a crossing push.",
       "evidence": "Every non-event tilemap in build 150535029 has 2-tile bridges (cells x5-8 and x27-30 across all four river rows), and 141 of 158 arena rows point at that one tilemap. Public descriptions say 2 tiles in Arenas 1-6 and 8-9 but 3 tiles in Arenas 7 and 10-23, which this build's data does not reproduce anywhere.",
       "how_to_resolve": "Likely the public figure describes the visual bridge art, or predates a geometry unification. If a future APK extraction shows a 3-tile tilemap, tests/test_arena_and_battle.py::test_bridges_are_two_tiles_wide_in_this_build will fail and flag it.",
-      "status": "open",
-      "priority": "low"
+      "status": "resolved",
+      "priority": "low",
+      "resolution": "2 tiles, in every mode this build ships. Swept ALL 28 files in data_cache/tilemaps, event maps included, not only the default: the widest run of non-water cells anywhere inside a river band is 4 cells. The grid is 2 cells per arena tile (36 cells across an 18-tile arena), so 4 cells is exactly 2.0 tiles and a 3-tile bridge would have to be 6. Nothing is 6. Several event maps are NARROWER -- tilemap_AllRandom and tilemap_AllRandom_Princess pinch their crossings to 2 cells (1.0 tile) in the middle two river rows, and tilemap_untitled has one 1-tile and one 2-tile crossing -- so the format plainly can express a width other than 2 and never expresses 3.",
+      "resolution_evidence": "Arena identity cannot change it either, because arenas carry no geometry: arenas.csv has no tilemap column at all. The tilemap reference lives in locations.csv (TileDataFileName), where 180 of 205 locations point at tilemaps/tilemap.csv (96) or tilemaps/tilemap_2v2.csv (84) -- both 2-tile -- and the remaining 25 are named event modes (Touchdown, Chess, Boat Attack, Bushes, ...). So there is no arena in this build, ordinary or event, whose bridges are 3 tiles wide.",
+      "caveat": "This resolves what the SHIPPED DATA says, which is what the engine must match; it does not explain the public 3-tile claim for Arenas 7 and 10-23. The likeliest explanation remains bridge *art* that is drawn wider than the walkable cells. If a future extraction ships a 6-cell crossing, tests/test_arena_and_battle.py::test_bridges_are_two_tiles_wide_in_this_build fails and reopens this."
     },
     {
       "id": "building-collision-shape",
@@ -255,15 +258,18 @@
       "question": "Heal Spirit's total healing at display level 11. The engine derives 400 (four applications of 100, 250ms apart over a 1000ms buff).",
       "why_it_matters": "Heal is a 1-elixir card whose whole value is the size of the top-up; the mechanism is verified but the magnitude is not.",
       "status": "open",
-      "how_to_resolve": "Damage a Knight in-game, drop a Heal Spirit on it, read the hitpoints back. The per-application rhythm (4 x 250ms) is already confirmed from HealPerSecond/HitFrequency/BuffTime and is not in question -- only the scaled total."
+      "how_to_resolve": "Damage a Knight in-game, drop a Heal Spirit on it, read the hitpoints back. The per-application rhythm (4 x 250ms) is already confirmed from HealPerSecond/HitFrequency/BuffTime and is not in question -- only the scaled total.",
+      "searched": "Not in the shipped data. All 113 STATS blocks in build 150535029 were swept for a literal Value (the trick that closed clone-hitpoints, where STATS.clone writes \"1\" instead of a tag name); the only two literals in the entire build are the clone's own health and shield. There is no STATS block for Heal Spirit at all, so its total is not displayed anywhere in the files and can only come from a live measurement."
     },
     {
       "id": "clone-hitpoints",
       "question": "A Clone's hitpoints. Every other detail of the spell is in the build -- the 0.25 tile offset (CLONE_DISTANCE_Y), that the shield is preserved (CLONE_PRESERVE_SHIELD), that a clone cannot be cloned (CLONE_CLONED_UNITS) -- but the clone's own hitpoint value is in none of them.",
       "why_it_matters": "It is the whole balance of the card: full damage on a body that dies to anything. Getting it wrong in either direction turns a 3-elixir damage multiplier into either a no-op or a second push.",
-      "status": "open",
+      "status": "resolved",
       "how_to_resolve": "Clone a Knight in-game and hit the clone once with anything. The engine uses 1, which is the card's universally documented behaviour, but it is applied as known behaviour rather than read from the files and should be confirmed.",
-      "note": "Searched ACTION.CloneAction, BUFF.Clone and every CLONE_* global in this build; none carries a hitpoint value. Likely hardcoded client-side."
+      "note": "Searched ACTION.CloneAction, BUFF.Clone and every CLONE_* global in this build; none carries a hitpoint value. Likely hardcoded client-side.",
+      "resolution": "1, and it IS in the build -- in the card's own displayed stat sheet rather than in its behaviour rows. STATS.clone (data_cache/csv_logic/characters/clone.toml) carries two entries whose Value is the literal string \"1\" instead of a stats-tag name: TID_SPELL_ATTRIBUTE_CLONE_HEALTH and TID_SPELL_ATTRIBUTE_CLONE_SHIELD_HEALTH, both Unit=INTEGER. Every other row in that table (clone_level, radius) names a tag to look up; these two are written as constants because the numbers are constants. So the panel a player reads in-game says Clone Health 1 and Clone Shield Health 1, and those strings come out of this build.",
+      "second_finding": "The shield figure corrected a live bug. CLONE_PRESERVE_SHIELD=True was being read as 'copy the original's remaining shield', which gave a cloned Dark Prince ~94 effective hitpoints against the card's 1. It means the clone GETS a shield, sized 1 like its body: one hit of anything strips it, the next kills."
     },
     {
       "id": "mirror-extra-elixir",
@@ -271,7 +277,8 @@
       "why_it_matters": "It is the card's entire cost model. Mirror's own ManaCost is 1, which is what it would cost if it deployed nothing, and the globals carry MIRROR_LEVEL_OFFSET but no price.",
       "status": "open",
       "how_to_resolve": "Play a card in-game, then Mirror it, and read the elixir spent. +1 is the universally documented behaviour and is what the engine uses, but it is applied as known behaviour rather than read from the files.",
-      "note": "Searched the Mirror row and every MIRROR_* global in this build; none carries a cost delta. MIRROR_LEVEL_OFFSET (1), MIRROR_CAP_TO_MAX_LEVEL (False) and MIRROR_IGNORE_CHAMPIONS (False) are all present and all implemented."
+      "note": "Searched the Mirror row and every MIRROR_* global in this build; none carries a cost delta. MIRROR_LEVEL_OFFSET (1), MIRROR_CAP_TO_MAX_LEVEL (False) and MIRROR_IGNORE_CHAMPIONS (False) are all present and all implemented.",
+      "searched": "Re-checked against the STATS tables as well, since that is where the clone's missing hitpoint figure turned out to live. There is no STATS block for Mirror, and the only literal values in any of the 113 blocks are the clone's health and shield. The cost delta is not in this build."
     }
   ]
 }

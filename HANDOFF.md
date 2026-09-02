@@ -3,161 +3,309 @@
 Where this is, what worked, and what to distrust. Written for someone picking it
 up cold — including me, later.
 
+**This supersedes an earlier handoff whose headline was wrong.** It said
+reinforcement learning erodes the clone. It does not. That claim came from
+comparing two numbers measured on different arms against different opponents,
+which is this project's signature failure and is documented below so the next
+person recognises it faster than we did.
+
 ## The state in one paragraph
 
-The **simulator** is in good shape: 663 tests, a deterministic integer
-fixed-point engine built from the game's own shipped tables, and the two open
-questions that blocked milestone M3 are closed. The **agent** took much longer
-and only started working at the very end. What finally moved it was not a better
-reward or a bigger network — it was doing the step every successful game agent
-does first, which this project had skipped: learn from a competent
-demonstrator before trying reinforcement learning.
+The **simulator** is in good shape: ~700 tests, a deterministic integer
+fixed-point engine built from the game's own shipped tables, and a battle that
+clones in 0.69 ms — which is the one real advantage here, because it lets the
+engine roll out its own future. The **agent** works, in this order: a searching
+expert beats random 100–0, a supervised clone of that expert reaches +1.623,
+and PPO fine-tuning on top of the clone improves the sampled policy from ≈+0.7
+to +1.239 — though only the clone's own figures have been re-measured;
+see the note under the table. What does *not* work is reinforcement learning
+from random initialisation, which four runs and 868,000 steps established.
 
 ## Results worth trusting
 
-All measured as *lift* against a control over **paired battles** — both arms play
-the same fixed seeds — reported in standard deviations of the control's own
-spread, with a 95% interval. Anything without an interval is a 40-battle reading
-and should be treated as a rumour; see *Numbers that fooled us* below.
+All eight arms below were measured against the **same random opponent** on the
+**same 150 paired seeds** at tower level 5. This is the only table on the
+project whose rows are comparable to each other, and producing it is what
+overturned the previous handoff.
 
-| | lift | wins | losses | battles |
+| arm | win | loss | lift | 95% interval |
 |---|---|---|---|---|
-| search expert | +2.716 [+2.37, +3.06] | 100% | 0% | 40 |
-| **cloned policy, greedy** | **+1.623 [+1.39, +1.86]** | **83%** | **5%** | 150 |
-| cloned policy, sampled | +0.709 [+0.46, +0.96] | 55% | 16% | 150 |
-| random control | — | 26% | 27% | — |
+| search expert (no learning) | 100% | 0% | **+2.716** | [+2.369, +3.063] (n=40) |
+| cloned, greedy | 83% | 5% | **+1.623** | [+1.391, +1.855] ✔ |
+| ppo-from-clone, greedy | 81% | 3% | +1.804 | [+1.552, +2.057] |
+| **ppo-from-clone, sampled** | 63% | 7% | **+1.239** | [+0.999, +1.478] |
+| selfplay-1m latest, greedy | 53% | 13% | +0.775 | [+0.554, +0.995] |
+| selfplay-1m best, greedy | 48% | 13% | +0.731 | [+0.502, +0.961] |
+| cloned, sampled | 45% | 10% | +0.684 | [+0.440, +0.928] ✔ |
+| selfplay-1m best, sampled | 36% | 15% | +0.422 | [+0.197, +0.647] |
+| random control | 26% | 27% | — | — |
 
-The **search expert** does no learning. For each decision it branches the live
-battle for ~18 candidate placements, plays each one 15 seconds forward, and keeps
-whichever leaves the board best. This is only possible because the engine clones
-in 0.69 ms — almost no reinforcement learning environment can afford to roll out
-its own future, and it turned out to be this project's one real advantage.
+✔ = re-measured since, and the figure shown is that re-measurement. Both
+ticked rows were originally published here with different numbers. **The
+unticked rows have not been checked at all.** This table was written as "the
+only table on the project whose rows are comparable", which is exactly what
+made an error in it expensive:
 
-The **cloned policy** is a network trained to imitate that search. It captures
-about 60% of the expert's advantage in a single forward pass.
+- **`cloned, greedy` was published here as +1.813 and is +1.623.** That figure
+  appeared nowhere on disk — not in a verdict, a metric or a source file — and
+  three separate readings (`runs/cloned/verdict.json`, an independent re-run by
+  the ML session, and a 150-battle re-measurement into
+  `runs/_anchor/cloned-recheck.json`) all agree on +1.623 [+1.391, +1.855]. The
+  win and loss rates in the row were right, so the experiment was fine and the
+  lift computation was not. A difference of 0.19 sd is not a rounding slip: it
+  is most of the gap between this clone and a PPO run built on top of it.
+- **`cloned, sampled` was not wrong, and re-running it found the noise floor.**
+  Three 150-battle readings of the *same weights* against the *same* control
+  gave +0.709, +0.725 and +0.684. Greedy, over the same two runs, reproduced
+  bit-identically — 1.6230076626442986 both times. So on this setup **greedy is
+  exactly repeatable and sampled carries roughly ±0.02 sd of run-to-run spread
+  from the policy's own sampling.** Any sampled comparison closer than about
+  0.04 sd is measuring the random number generator.
+- **The `ppo-from-clone` rows are not on disk either.** The only saved verdict
+  for it, `runs/poc-vs-random/verdict.json`, records `control_win: 0.04` with
+  89% draws — a different, draw-saturated regime entirely, not this control.
+  Re-score it before quoting +1.804 or +1.239 again.
 
-## The thing that actually mattered
+The lesson is the one this file already teaches, turned on itself: a number
+that is not written by the thing that measured it is a number nobody can check.
+Point `--out` at a file for every evaluation worth citing.
 
-Four training runs from random initialisation produced nothing. A 300-battle
-evaluation could not distinguish trained checkpoints from freshly initialised
-networks — every encouraging number had been measuring a random network's
-placement prior.
+Three readings, and they are the whole strategy:
 
-That is the expected outcome of the method at this scale, not a bug. AlphaStar
-trained on 971,000 human replays *before* any reinforcement learning, and that
-supervised agent alone outranked 84% of human players. OpenAI Five ran the same
-PPO algorithm on 128,000 CPU cores with batches of one to three million
-timesteps — a single OpenAI Five batch is roughly twenty times this project's
-entire first run. We had neither, so the answer was the third option available in
-the literature: **search**, which needs a fast exact simulator, which we have.
+1. **Imitation beats scale on one laptop.** 868,000 steps of self-play from
+   random initialisation reached +0.775. Twelve epochs of supervised cloning
+   from 420 expert episodes reached +1.623, in minutes.
+2. **PPO fine-tuning looks like it works, but the greedy half is now unclear.**
+   Sampled improved +0.72 → +1.239, and that is the load-bearing claim. The
+   greedy comparison was stated as flat on the strength of +1.804 against
+   +1.813; with the clone's true +1.623 the two are 1.623 against 1.804, which
+   is not flat — but their intervals overlap heavily and the PPO figure has not
+   been re-measured, so **"not distinguishable" is the only honest reading
+   until `ppo-from-clone` is re-scored with a recorded opponent.** Falling
+   entropy was mass concentrating on good actions, not collapse. **Always
+   report greedy and sampled separately.**
+3. **The pass rate was moving the right way.** The search expert passes on
+   **44.3%** of its decisions. `ppo-from-clone` climbed 8% → 27% and never
+   reached it, so it was moving toward the expert, not away from playing.
 
-Order that works: search expert → demonstrations → behavioural clone →
-reinforcement learning. Not reinforcement learning from noise.
+## The order that works
+
+Search expert → demonstrations → behavioural clone → PPO with a KL anchor. Not
+reinforcement learning from noise. AlphaStar trained on 971,000 human replays
+before any RL and that supervised agent alone outranked 84% of humans; OpenAI
+Five ran the same algorithm on 128,000 CPU cores. We have neither, so the third
+option in the literature — search, which needs a fast exact simulator — is the
+one available, and the engine's 0.69 ms clone is what makes it affordable.
 
 ## Numbers that fooled us
 
 Read this before believing any figure in `runs/`.
 
-- **The inline evaluation faced an *idle* opponent; the large paired evaluations
-  faced a *random* one.** Both were reported as "lift" and compared to each
-  other for an entire session. They are not comparable: the control wins 92% of
-  idle matches and 26% of random ones. Fixed, but **every metric written before
-  that fix is against an idle opponent** — including all of `selfplay-1m`.
+- **The in-run probe faced an *idle* opponent; the paired evaluations faced a
+  *random* one.** Both were called "lift" and compared to each other. The
+  control wins **92%** of idle matches and **26%** of random ones. Every
+  metrics row written before the fix is against an idle opponent, including all
+  of `selfplay-1m` and all of `ppo-from-clone`. `write_verdict` now refuses a
+  verdict with no `eval_opponent`, and `report.py`/`bot.py` name the opponent
+  instead of labelling everything "beats random".
+- **`eval_lift_sd` is the SAMPLED arm** (`selfplay.py` calls
+  `evaluate(greedy=False)`). Comparing it against a greedy verdict is comparing
+  two different policies. That, plus the idle/random error, is the entire
+  content of the "PPO degrades the clone" claim that this handoff replaces.
 - **A +0.375 reading over 40 battles measured −0.033 over 300.** Forty battles
-  cannot separate a weak effect from zero here.
-- **Checkpoint selection was picking the luckiest reading, not the best policy.**
-  Keeping the maximum of nineteen noisy evaluations selects for noise. Promotion
-  now needs a rolling mean of three.
-- **92% of matches were draws** at tower level 11, so crowns — the only real
-  objective — almost never fired and everything learned from shaping alone.
-  Training runs use `--tower-level 5`, which halves the draw rate for free.
-  Evaluate at 11 to see what transfers.
+  cannot separate a weak effect from zero here. The in-run probe is a trend
+  line, not a result.
+- **Checkpoint promotion kept the maximum of ~19 noisy readings**, which
+  selects for noise. Now a rolling mean of 3 — but it still replays the same 40
+  seeds, so consecutive readings share seed-level luck. Rotate seed blocks.
+- **92% of matches were draws at tower level 11**, so crowns almost never fired
+  and everything learned from shaping alone. Train at `--tower-level 5`.
+
+## Two defects worth knowing about
+
+**The reward pays for passing.** At the default `--elixir-weight 0.3` a pass
+earns **+0.071 more reward than a placement** — measured twice, once in
+`run.py`'s own help text and again on the clone's rollouts
+(`pass − play immediate reward = +0.071 ± 0.036`). The searching bot needed
+`elixir_weight=0.0` for the same reason: at 0.3 it never played a card at all.
+**Use `--elixir-weight 0` for any RL run.**
+
+**The demonstrations could not teach passing.** The soft target was built from
+candidate values scaled by their own spread, and on states where the search
+chose to wait those values are equal to four decimal places — so 86% of them
+carried an exactly uniform distribution over fifteen-odd candidates, of which
+fourteen were placements. **The pass action was the target's argmax in none of
+10,940 recorded decisions.** `pass_weight=0.1` was compensating for that.
+
+The recording is fixed and demonstrations were regenerated, but the fixed set
+is small (**4,494 decisions** against the original's ~10,900) and clones trained
+on it are much worse — greedy +0.445 at `pass_weight=0.1` and +0.240 at 1.0,
+against the original clone's +1.623. **The limiting factor is demonstration
+volume, not the pass weight.** Regenerating a full-size fixed set is the
+cheapest known win available.
 
 ## Bugs that shipped green
 
-Each of these had passing tests while doing nothing. This is the failure mode
-this codebase generates, and the reason so many tests here run the real thing
-rather than inspecting source.
+Each had passing tests while doing nothing. This is the failure mode this
+codebase generates, and why so many tests here run the real thing.
 
-- `push_away` was a **no-op for every knockback in the game**. It called
-  `point_along` with `travelled = span + amount`, which returns the endpoint
-  whenever `travelled >= segment_length` — always true. The death-pushback test
-  passed the whole time, on retargeting movement rather than the push.
-- **Projectiles never applied the buff they carry.** Ice Spirits dealt damage and
-  never froze, which is the entire card, and it is one of the eight the agent
-  trains on. Lightning did not stun; Snowball did not slow.
-- **The deploy zone never expanded** when a Princess Tower fell, and the
-  placement cache meant *no battle in the process* would ever see it.
-- **`RelativeX`/`RelativeY` were read as milli-tiles**, a factor of a thousand,
-  so Furnace's Fire Spirits spawned inside the building.
-- **The progress page claimed "no evaluations yet"** over a real evaluation, and
-  its test passed because that string is in the page's source regardless of data.
+- `push_away` was a **no-op for every knockback in the game**.
+- **Projectiles never applied the buff they carry.** Ice Spirits dealt damage
+  and never froze — the entire card, and one of the eight the agent trains on.
+- **The deploy zone never expanded** when a Princess Tower fell.
+- **`RelativeX`/`RelativeY` were read as milli-tiles**, a factor of a thousand.
+- **The progress page claimed "no evaluations yet"** over a real evaluation,
+  and its test passed because that string is in the page source regardless.
+- **`UnitSpec.damage_per_second` returned damage per *thousand ticks*** —
+  16.67× too large at 60 TPS and a different wrong number at 20. Dead code, so
+  nothing broke, but the observation encoder was about to consume it.
 
 ## Running it
 
+A run is a file. The best-measured recipe is checked in, and a launch is one
+command plus the name:
+
 ```bash
-python -m pytest                          # 663 tests
+python -m cr_sim.train.run --config recipes/selfplay-ladder.yaml --name my-run --doctor   # preflight, writes nothing
+python -m cr_sim.train.run --config recipes/selfplay-ladder.yaml --name my-run            # launch
+python -m cr_sim.train.run --config runs/my-run/config.json --name my-run-s1 --seed 1     # relaunch a run, one flag changed
+python scripts/ship.py runs/my-run/best.pt --baseline runs/clone-v1-paired/cloned.pt      # gate: exit 0 SHIP, 2 DON'T
+```
+
+Flags typed on the command line override the file. A key the parser does not
+know is refused, not skipped. `--doctor` runs the checks that have each caught
+this project out once -- envs not dividing by workers, a borrowed checkpoint
+with the wrong head, a ladder anchor absent from the ratings table, the search
+expert named as an anchor (one probe cost 33,055 s), the run directory guard,
+free disk -- and prints the resolved recipe, without creating anything.
+
+```bash
+python -m pytest                          # ~1100 tests, ~10 min
 python -m cr_sim.cli validate             # stat gate + open questions
-python -m cr_sim.cli battle --html r.html # a match you can watch
-
-# training. --tower-level 5 is what makes matches resolve; --workers is most
-# of the throughput; --init-from is the order that works.
-python -m cr_sim.train.run --steps 400000 --envs 8 --workers 4 \
-    --tower-level 5 --reward projected --opponent self \
-    --init-from runs/cloned/cloned.pt --lr 1e-4 --entropy 0.005 --name my-run
-
-python -m cr_sim.train.watch --every 15 --serve 8899   # live page, phone-friendly
-python -m cr_sim.train.report                          # one page per run
-python -m cr_sim.play.server --policy runs/cloned/cloned.pt --tower-level 5
+python scripts/make_demos.py --episodes 105 --shard 0 --observations v1,v3 --reward projected --elixir-weight 0 --tower-level 5
+python scripts/clone_policy.py --demos data_cache/demos_v1v3/v1 --observation v1 --head factored --targets soft --out runs/my-clone
+python -m cr_sim.train.watch --every 15 --serve 8899     # phone-friendly page; restart after editing watch.py
+python scripts/evaluate_checkpoints.py a.pt b.pt --episodes 150 --out runs/_anchor/x_verdict.json
 ```
 
-Rebuilding the expert and the clone from scratch, about an hour:
+Data is not in the repo: supply a Clash Royale APK and run
+`python scripts/extract_apk.py <apk>`.
 
-```bash
-python scripts/make_demos.py --episodes 70 --shard 0   # run several shards
-python scripts/clone_policy.py --demos data_cache/demos --out runs/cloned
-python scripts/measure_expert.py --episodes 40
-```
+## What is running now
 
-Data is not in the repo. Supply a Clash Royale APK and run
-`python scripts/extract_apk.py <apk-or-directory>`.
+- **`runs/learn-lvl5-kl01`** -- 1M steps, factored head, self-play, clone
+  initialised, **at tower level 5 for the first time** (see the trap below),
+  with the KL anchor dropped 0.5 -> 0.1. Four updates in, its statistics moved
+  into the level-5 band exactly as predicted, and rollout win rate went
+  **4% -> 28%**.
+- **`data_cache/demos_v1v3`** -- 420 episodes over four shards, recording v1
+  (9 channels) and v3 (17) off the *same* playthroughs under the projected
+  reward. This is the corpus the observation question has been blocked on.
+- **`runs/learn-1m-factored-lvl11`** -- dead, kept for the evidence. 557,056
+  steps entirely at level 11. The policy never moved: entropy 3.5489 -> 3.5500
+  and `reference_kl` pinned at 0.021-0.023 across 244 updates. Its one real
+  gain came early and then stopped -- sampled eval lift ~+0.70 to ~+1.20, first
+  half +1.171, second half +1.229. **No number in it may be differenced against
+  a post-fix run:** level 5 and level 11 are different games.
+- **`runs/learn-1m-flat`** -- stopped at update 24, a partial arm of the head
+  A/B, also at level 11.
 
-## Open threads
+## Recently landed
 
-**Reinforcement learning erodes the clone.** `ppo-from-clone` started from the
-+0.709 policy and fell to +0.115 within 33 updates, with explained variance
-collapsing 0.551 → 0.011 and entropy 3.65 → 2.45. Even at `lr 1e-4`. AlphaStar
-hit the same problem and solved it with a **KL penalty toward the supervised
-policy** — that is the obvious next fix and it is not implemented here.
+- **`--tower-level` now reaches the workers** (`eabf733`). It never had. See
+  the traps.
+- **A demonstration set states what it is** (`7ecf3a1`). Shards record the
+  encoding and reward they were written under, `clone_policy` verifies
+  `--observation` against that instead of trusting it, and shards that disagree
+  are refused rather than merged. `make_demos` gained `--reward`,
+  `--elixir-weight` and `--reward-horizon-seconds`: it had built its
+  environment with *no* reward at all, so every demonstration set this project
+  ever collected carried value targets from the simple shaped reward while
+  every fine-tune ran `projected`.
+- **A run records its own opponent and origin** (`c654151`): `pool_size`,
+  `refresh_every`, `opponent_temperature`, `init_from`, `resumed`. Confirming
+  that `learn-1m-factored` was really self-play previously meant reading the
+  source.
+- **The all-time page grew five graphs** (`7711ef9`, `505b830`), each built to
+  refuse rather than mislead when two numbers do not share a control.
+- **`CLAUDE.md` exists** (`4966a92`): every living python process belongs on
+  the progress page, and the rules that had been living only in conversation.
+- **The anchor number was corrected** (`e8f0464`): the clone's greedy lift is
+  +1.623, not the +1.813 this file used to carry.
 
-**Let the policy propose the search's candidates.** The expert currently samples
-18 placements at random. Sampling from the cloned policy instead would evaluate
-plausible moves rather than arbitrary ones — better search, better targets,
-better policy, better search. This closes a loop that does not exist today: the
-expert never benefits from anything the policy learns. Cheapest change with the
-largest expected effect.
+Suite is **900 passed, 1 skipped**.
 
-**Correct the policy on its own states (DAgger).** Cloning trained on states the
-*expert* visits; the deployed policy visits its own, including ones the expert
-never reaches. Label those.
+## Open threads, in the order the numbers point
 
-**Put the expert in the opponent pool.** The ladder currently measures a policy
-against its own past, which is movement rather than skill — two weak policies
-trade wins forever. A fixed opponent that beats random 100–0 is a real wall.
+1. **Clone from `demos_v1v3` and compare v3 against v1.** The corpus is being
+   collected now and the two encodings are paired off one playthrough, so this
+   is a single experiment rather than two. It is the measurement everything
+   else waits on: ridge over all 754 v1 features gives out-of-fold R-squared at
+   or below zero at every penalty, so the critic cannot reach the signal from
+   hitpoint mass, while 0.290 of return variance is knowable at level 5.
+2. **Re-score `ppo-from-clone` with a recorded opponent**, so the table above
+   can be trusted in the rows that carry no tick.
+3. **Watch `reference_kl` and `noop_fraction` on `learn-lvl5-kl01`.** At 0.5
+   the anchor pinned the policy outright. 0.1 should let it move; if
+   `noop_fraction` climbs toward the expert's 44.2% and past it, the anchor was
+   load-bearing and 0.1 is too loose.
+4. **DAgger, not more episodes.** Behavioural cloning fails on states the
+   expert never visits, and the cloned policy visits different ones. The expert
+   is a search over a deterministic engine that clones in 0.69 ms, so it can
+   label any state at any time with no human in the loop.
+5. **Let the policy propose the search's candidates.** The expert samples ~14
+   placements uniformly at random and never benefits from anything the policy
+   learns. Sampling from the clone closes that loop and denoises the labels.
+6. **Evaluate against the expert, not random.** The control is beaten 100-0, so
+   the metric is saturated and a better policy cannot register.
+7. **Clip the actor and critic gradient norms separately.** `ppo.py:528` clips
+   over all parameters, and the actor's norm is 30-100x the critic's, so the
+   actor sets the critic's step size. Measured upside is small (~+0.05 on a
+   synthetic 25%-signal target) and it is *not* why explained variance is zero.
 
-**Search inside self-play (full AlphaZero).** The real answer and the expensive
-one: ~20× slower per step, far more sample-efficient per step.
+## Traps
 
-**The GPU does not work here.** `--device xpu` on an Intel Arc reports available,
-runs a gradient step 6.6× faster than eight CPU threads, and then fails a real
-training loop three ways — unimplemented convolution, out of device memory, and
-out of Level Zero resources inside Adam's state allocation. The rollout's
-hundreds of small forward passes, each with a blocking host readback, exhaust the
-driver before the first update. `--device auto` deliberately will not choose it.
-
-**Colab is probably slower, not faster.** `notebooks/cr_sim_colab.ipynb` measures
-it rather than assuming: this workload is ~90% Python simulation, and free Colab
-gives 2 vCPUs against a laptop's 8. Its real use is parallel sessions.
+- **A flag that reaches one code path may not reach the other.**
+  `--tower-level` was passed to the evaluation probe and dropped from the
+  `VecEnvConfig`, which defaults it to 11 -- so every run with `--workers`
+  trained at level 11 while recording and evaluating at 5, for the entire
+  history of this project. Nothing in `tests/` mentioned `tower_level`, and the
+  one `main()` test runs without `--workers`, so it took the in-process path.
+  Fixed, with a test that asserts the worker config agrees with the probe env
+  field for field. When adding a knob, check *both* environments receive it.
+- **Do not name a parameter after something a loop already binds.**
+  `collect`'s step loop does `observation, reward, terminated, truncated, _ =
+  env.step(choice)`, so parameters called `observation` and `reward` are
+  overwritten before they are read. A provenance field shipped storing `0.0`
+  and an observation dict; the dict became a numpy object array that would not
+  load without `allow_pickle`, breaking a round-trip test that had passed for
+  months.
+- **The watcher runs stale code.** Python does not reload an edited module in a
+  running process — restart it after every `watch.py` change. This has already
+  bitten once for real: two watchers from before the all-time page landed kept
+  rewriting `progress.html` every 15 seconds with pre-all-time-page code, so
+  the served dashboard silently had none of it. Check the page for a string
+  only the new code emits, not just that the file's timestamp is fresh.
+- **194 MB of results live only inside a worktree.** Every checkpoint behind
+  the head and observation comparisons is under
+  `.claude/worktrees/agent-acff606c02b4824d0/runs/` and nowhere else. The three
+  head clones are copied to `checkpoints/`; the rest is not. Get it out before
+  cleaning up worktrees, and see the `--force` trap below.
+- **Interrupted commands leave processes running.** Every `python` call goes
+  through a 0-byte Microsoft Store alias that spawns the real interpreter and
+  lingers, so the process count is double what the work justifies. Disable the
+  aliases in Settings → Apps → Advanced app settings.
+- **Never `git worktree remove --force`.** It followed directory junctions once
+  and deleted the real `data_cache`.
+- **Two sessions work in this repo.** Check `Get-CimInstance Win32_Process`
+  before starting anything long, and do not kill another session's run. A
+  background agent started a 1M-step run here without telling anyone, and a
+  restart of it passed `--resume` together with `--init-from`, which the CLI
+  correctly refuses — so the run was simply gone, with the reason sitting only
+  in `runs/<name>/train.log`. Read that file before assuming a run is alive.
+- **The GPU does not work here.** `--device xpu` on an Intel Arc reports
+  available, runs a gradient step 6.6× faster, then fails three ways. `--device
+  auto` deliberately will not choose it.
 
 ## Layout
 
@@ -165,16 +313,12 @@ gives 2 vCPUs against a laptop's 8. Its real use is parallel sessions.
 cr_sim/
   data/     Supercell decoder, csv_logic dialect, EXT inheritance, level scaling
   engine/   arena, entities, targeting, combat, spells, buffs, the ACTION
-            interpreter, the 17-phase tick loop, and lookahead.py — which
-            branches a battle to ask what the board is already worth
-  api/      Gymnasium-style env, observation/action encoding, rewards, vec env
+            interpreter, the 17-phase tick loop, and lookahead.py
+  api/      Gymnasium env, observation/action encoding, rewards, vec env
   train/    PPO, self-play pool, the search expert, behavioural cloning,
             the live page, the multi-run report, Discord reporting
   play/     browser game against a checkpoint
-reference/  anchors.json + hits_to_kill.csv are external truth, never generated;
-            card_stats.json is a generated baseline whose only job is to make a
-            new APK's balance changes visible instead of silent
+reference/  anchors.json, hits_to_kill.csv and engagement.md are external truth
+            or generated analysis; card_stats.json is a generated baseline whose
+            only job is to make a new APK's balance changes visible
 ```
-
-The README has the simulator's own story — what the data pipeline established,
-what the arena turned out to be, and which questions are still open.
