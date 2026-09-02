@@ -187,11 +187,11 @@ def evaluate(
                 choice = int(legal[rng.integers(len(legal))])
             else:
                 with torch.no_grad():
-                    # The actor only; an evaluation never reads the value.
-                    logits = net.policy_logits(
-                        torch.from_numpy(observation["grid"]).unsqueeze(0),
-                        torch.from_numpy(observation["vector"]).unsqueeze(0),
-                        torch.from_numpy(flat).unsqueeze(0),
+                    device = next(net.parameters()).device
+                    logits, _ = net(
+                        torch.from_numpy(observation["grid"]).unsqueeze(0).to(device),
+                        torch.from_numpy(observation["vector"]).unsqueeze(0).to(device),
+                        torch.from_numpy(flat).unsqueeze(0).to(device),
                     )
                 if greedy:
                     choice = int(logits.argmax(dim=-1))
