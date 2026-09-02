@@ -162,27 +162,34 @@ codebase generates, and why so many tests here run the real thing.
 
 ## Running it
 
+A run is a file. The best-measured recipe is checked in, and a launch is one
+command plus the name:
+
 ```bash
-python -m pytest                          # ~700 tests
-python -m cr_sim.cli validate             # stat gate + open questions
-python -m cr_sim.cli engagement --write   # reach + tower-support matrices
-
-# the order that works. --elixir-weight 0 and --tower-level 5 are not optional.
-python scripts/make_demos.py --episodes 70 --shard 0     # several shards
-python scripts/clone_policy.py --demos data_cache/demos --out runs/cloned
-python -m cr_sim.train.run --steps 1000000 --envs 8 --workers 4 \
-    --tower-level 5 --reward projected --elixir-weight 0 \
-    --init-from runs/cloned/cloned.pt \
-    --kl 0.5 --kl-reference runs/cloned/cloned.pt \
-    --opponent self --pool-size 8 --eval-every 3 --name my-run
-
-python -m cr_sim.train.watch --every 20 --serve 8899     # phone-friendly page
-python scripts/evaluate_checkpoints.py a.pt b.pt --episodes 150   # comparable arms
-python scripts/evaluate_vs_expert.py                     # the unsaturated yardstick
+python -m cr_sim.train.run --config recipes/selfplay-ladder.yaml --name my-run --doctor   # preflight, writes nothing
+python -m cr_sim.train.run --config recipes/selfplay-ladder.yaml --name my-run            # launch
+python -m cr_sim.train.run --config runs/my-run/config.json --name my-run-s1 --seed 1     # relaunch a run, one flag changed
+python scripts/ship.py runs/my-run/best.pt --baseline runs/clone-v1-paired/cloned.pt      # gate: exit 0 SHIP, 2 DON'T
 ```
 
-`--envs` must divide evenly by `--workers`. Data is not in the repo: supply a
-Clash Royale APK and run `python scripts/extract_apk.py <apk>`.
+Flags typed on the command line override the file. A key the parser does not
+know is refused, not skipped. `--doctor` runs the checks that have each caught
+this project out once -- envs not dividing by workers, a borrowed checkpoint
+with the wrong head, a ladder anchor absent from the ratings table, the search
+expert named as an anchor (one probe cost 33,055 s), the run directory guard,
+free disk -- and prints the resolved recipe, without creating anything.
+
+```bash
+python -m pytest                          # ~1100 tests, ~10 min
+python -m cr_sim.cli validate             # stat gate + open questions
+python scripts/make_demos.py --episodes 105 --shard 0 --observations v1,v3 --reward projected --elixir-weight 0 --tower-level 5
+python scripts/clone_policy.py --demos data_cache/demos_v1v3/v1 --observation v1 --head factored --targets soft --out runs/my-clone
+python -m cr_sim.train.watch --every 15 --serve 8899     # phone-friendly page; restart after editing watch.py
+python scripts/evaluate_checkpoints.py a.pt b.pt --episodes 150 --out runs/_anchor/x_verdict.json
+```
+
+Data is not in the repo: supply a Clash Royale APK and run
+`python scripts/extract_apk.py <apk>`.
 
 ## What is running now
 

@@ -1,0 +1,59 @@
+# The best-measured recipe on this project, as a file.
+#
+#   python -m cr_sim.train.run --config recipes/selfplay-ladder.yaml --name my-run
+#
+# Every key is a flag name with underscores. Anything you pass on the command
+# line overrides the file, so a variant is this file plus the flags that differ.
+# Check it before it costs anything:
+#
+#   python -m cr_sim.train.run --config recipes/selfplay-ladder.yaml --name my-run --doctor
+#
+# This is learn-v1-flat, which reached -123 Elo below the search expert over its
+# final 200k steps and beat the annealed variant by 29 +/- 8 Elo overall.
+
+steps: 1000000
+horizon: 256
+envs: 8
+workers: 4              # envs must divide by workers
+tps: 20
+frame_skip: 30
+match_seconds: 120
+
+# Not optional. At level 11 the towers outlast a 120s match, ~90% of battles
+# draw, crowns almost never fire, and the agent learns from shaping alone.
+tower_level: 5
+
+reward: projected
+elixir_weight: 0.0      # at 0.3 a pass out-earns a placement by +0.071
+tower_weight: 1.0
+anneal: false           # measured: annealing to zero LOST by 29 +/- 8 Elo
+shaping: 0.01           # inert under 'projected'; recorded as such
+
+observation: v1
+head: factored          # +2.167 vs flat +1.705 at cloning, non-overlapping
+init_from: runs/clone-v1-paired/cloned.pt
+kl: 0.1                 # 0.5 pinned the policy: entropy moved 0.001 in 244 updates
+kl_reference: runs/clone-v1-paired/cloned.pt
+
+opponent: self
+pool_size: 8
+refresh_every: 20
+opponent_temperature: 1.0
+ancestor_episodes: 20
+
+# The un-saturated metric. Anchor on RANDOM ONLY and let the ratings table
+# supply the expert's rung: the table is why ladder_elo_vs_expert can be
+# reported without a single expert battle. Naming search-c18h15 as an anchor
+# makes the probe PLAY it at ~30s/match -- one such probe measured 33,055s.
+probe: ladder
+ladder_anchor: [random]
+ladder_ratings: runs/agent-expert-rating/ladder.json
+eval_every: 3
+eval_episodes: 40
+
+save_every: 10
+lr: 0.0001
+entropy: 0.005
+device: cpu             # --device xpu on this machine's Arc fails three ways
+seed: 0
+out: runs

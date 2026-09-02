@@ -1136,3 +1136,177 @@ def test_a_run_records_whether_it_measured_a_ladder_at_all(tmp_path,
 
     written = json.loads((tmp_path / "ladder" / "config.json").read_text())
     assert written["ancestor_episodes"] == 7
+
+
+# ------------------------------------------ a run is a file, checked before it runs
+
+
+def _recipe_args(**over):
+    from cr_sim.train.run import build_parser, _parse_with_recipe
+    argv = ["--steps", "64", "--envs", "4", "--workers", "2", "--head",
+            "factored", "--tower-level", "5", "--seed", "3", "--name", "r"]
+    for k, v in over.items():
+        argv += [f"--{k.replace('_', '-')}", str(v)]
+    return _parse_with_recipe(build_parser(), argv)
+
+
+def test_a_runs_own_config_json_relaunches_it(tmp_path):
+    """Nineteen of forty-one flags were recorded nowhere.
+
+    steps, workers, envs, lr, entropy, device, the whole anneal and both
+    ladder flags were absent from config.json, so the file this project
+    treats as a run's record could describe the run and could not relaunch
+    it. The recipe key closes that: what recipe_of writes, --config reads
+    back to the same namespace.
+    """
+    from cr_sim.train.run import build_parser, recipe_of, _parse_with_recipe
+
+    original = _recipe_args(ladder_anchor="random", lr="0.0001")
+    # Shaped like the real file: the recipe beside twenty derived keys.
+    record = {"recipe": recipe_of(original), "eval_opponent": "random",
+              "observation_channels": ["own_ground_hp"]}
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps(record), encoding="utf-8")
+
+    back = _parse_with_recipe(build_parser(), ["--config", str(cfg)])
+    for key, value in recipe_of(original).items():
+        assert recipe_of(back)[key] == value, key
+    # And the flags that were previously lost are among what came back.
+    for key in ("steps", "workers", "envs", "lr", "ladder_anchor", "seed"):
+        assert recipe_of(back)[key] == recipe_of(original)[key], key
+
+
+def test_a_recipe_key_the_parser_does_not_know_is_refused(tmp_path):
+    """A misspelt key that is silently skipped trains on the default."""
+    from cr_sim.train.run import build_parser, _parse_with_recipe
+
+    bad = tmp_path / "r.yaml"
+    bad.write_text("tower_level: 5\ntower_levle: 11\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as caught:
+        _parse_with_recipe(build_parser(), ["--config", str(bad)])
+    assert "tower_levle" in str(caught.value)
+
+
+def test_command_line_flags_beat_the_recipe(tmp_path):
+    """Relaunching a run with one flag changed must be a one-flag command."""
+    from cr_sim.train.run import build_parser, _parse_with_recipe
+
+    r = tmp_path / "r.yaml"
+    r.write_text("seed: 3\nhead: factored\ntower_level: 5\n", encoding="utf-8")
+    args = _parse_with_recipe(build_parser(),
+                              ["--config", str(r), "--seed", "7"])
+    assert args.seed == 7, "the command line must override the file"
+    assert args.head == "factored", "the file must still supply what was not typed"
+
+
+def test_the_recipe_is_written_into_config_json(tmp_path):
+    """The record must be able to relaunch the run it records."""
+    from cr_sim.train.run import main
+
+    code = main([
+        "--steps", "64", "--horizon", "8", "--envs", "2", "--workers", "0",
+        "--match-seconds", "20", "--eval-every", "1000", "--device", "cpu",
+        "--save-every", "1000", "--opponent", "idle",
+        "--out", str(tmp_path), "--name", "rec",
+    ])
+    assert code == 0
+    written = json.loads((tmp_path / "rec" / "config.json").read_text())
+    assert "recipe" in written, "config.json must carry the launch recipe"
+    recipe = written["recipe"]
+    assert recipe["steps"] == 64
+    assert recipe["match_seconds"] == 20
+    # The previously-unrecorded ones, spot-checked.
+    for key in ("workers", "envs", "device", "eval_every", "save_every"):
+        assert key in recipe, f"{key} was one of the nineteen flags nobody recorded"
+    # Invocation-only flags must not be carried into the next launch.
+    for key in ("config", "doctor", "resume", "replace"):
+        assert key not in recipe, f"{key} describes this invocation, not the run"
+
+
+def test_doctor_refuses_envs_that_do_not_divide_by_workers(tmp_path, capsys):
+    from cr_sim.train.run import main
+
+    code = main(["--doctor", "--envs", "8", "--workers", "3",
+                 "--out", str(tmp_path), "--name", "d"])
+    assert code == 2
+    out = capsys.readouterr().out
+    assert "FAIL" in out and "does not divide" in out
+
+
+def test_doctor_refuses_a_head_the_borrowed_weights_do_not_have(tmp_path, capsys):
+    """main() refuses this too, but only after loading the whole build."""
+    import torch
+    from cr_sim.train.run import main
+
+    ck = tmp_path / "clone.pt"
+    torch.save({"head": "factored", "observation": "v1", "state_dict": {}}, ck)
+    code = main(["--doctor", "--head", "flat", "--init-from", str(ck),
+                 "--out", str(tmp_path), "--name", "d"])
+    assert code == 2
+    assert "factored" in capsys.readouterr().out
+
+
+def test_doctor_warns_when_the_search_expert_is_a_ladder_anchor(tmp_path, capsys):
+    """Naming the expert as an anchor made one probe cost 33,055 seconds.
+
+    A warning and not a failure: playing the expert is sometimes what you
+    mean. But it must say the cost, because the flag looked harmless.
+    """
+    from cr_sim.train.run import main
+
+    code = main(["--doctor", "--probe", "ladder",
+                 "--ladder-anchor", "random", "--ladder-anchor", "search-c18h15",
+                 "--out", str(tmp_path), "--name", "d"])
+    out = capsys.readouterr().out
+    assert "search-c18h15" in out and "33,055" in out
+    assert code == 0, "a warning must not fail the preflight"
+
+
+def test_doctor_refuses_an_anchor_the_ratings_table_does_not_hold(tmp_path, capsys):
+    """An unrated anchor is pinned at 0 Elo and shifts every reading silently."""
+    from cr_sim.train.run import main
+
+    table = pathlib.Path("runs/agent-expert-rating/ladder.json")
+    if not table.is_file():
+        pytest.skip("the offline ratings table is not on this machine")
+    code = main(["--doctor", "--probe", "ladder",
+                 "--ladder-anchor", "no-such-player",
+                 "--ladder-ratings", str(table),
+                 "--observation", "v1", "--tower-level", "5",
+                 "--out", str(tmp_path), "--name", "d"])
+    assert code == 2
+    assert "no-such-player" in capsys.readouterr().out
+
+
+def test_doctor_writes_nothing(tmp_path):
+    """A preflight that creates the run directory is not a preflight."""
+    from cr_sim.train.run import main
+
+    main(["--doctor", "--out", str(tmp_path), "--name", "never-made"])
+    assert not (tmp_path / "never-made").exists()
+
+
+def test_ship_gates_on_a_demonstrated_regression_only():
+    """SHIP unless the candidate's greedy interval sits wholly below the baseline's.
+
+    Overlap is the honest reading of most real comparisons here and must
+    ship; only a separated, lower interval is a regression a gate can know.
+    """
+    import scripts.ship as ship
+
+    def row(path, mode, lift, lo, hi):
+        return {"checkpoint": path, "mode": mode, "lift": lift,
+                "ci_low": lo, "ci_high": hi, "eval_opponent": "random"}
+    c, b = pathlib.Path("c.pt"), pathlib.Path("b.pt")
+
+    overlapping = [row("c.pt", "greedy", 2.10, 1.90, 2.30),
+                   row("b.pt", "greedy", 2.17, 1.96, 2.37)]
+    assert ship.verdict(overlapping, c, b)[0] is True
+
+    regressed = [row("c.pt", "greedy", 1.40, 1.20, 1.60),
+                 row("b.pt", "greedy", 2.17, 1.96, 2.37)]
+    assert ship.verdict(regressed, c, b)[0] is False
+
+    better = [row("c.pt", "greedy", 2.60, 2.40, 2.80),
+              row("b.pt", "greedy", 2.17, 1.96, 2.37)]
+    assert ship.verdict(better, c, b)[0] is True

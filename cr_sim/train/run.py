@@ -536,6 +536,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="'idle' never plays a card, which leaves the kite and trade terms with "
              "nothing to measure. 'random' spends its elixir on legal placements.",
     )
+    # A recipe, and a preflight. The port of the two ideas from Soup that
+    # survive contact with this project: a run is a FILE, not 45 flags typed
+    # by hand, and it is checked before it costs anything. Every mistake that
+    # cost real time here was a flag: --tower-level reached one construction
+    # path and not the other, supervise.ps1 defaulted two flags to the values
+    # the handoff argues against, and naming the search expert as a ladder
+    # anchor -- one keystroke -- made a probe cost 33,055 seconds.
+    parser.add_argument(
+        "--config", type=Path, default=None,
+        help="a YAML or JSON recipe of flag values, keyed by flag name with "
+             "underscores (tower_level: 5). Flags given on the command line "
+             "override it. A run's own config.json is a valid recipe: pass "
+             "runs/<name>/config.json to relaunch it, or to make a variant "
+             "that differs in exactly the flags you type. Unknown keys are "
+             "refused rather than ignored, because a typo that is silently "
+             "ignored is a run that trains on the default.")
+    parser.add_argument(
+        "--doctor", action="store_true",
+        help="resolve every flag exactly as a launch would, run the "
+             "preflight checks, print the resolved recipe, and exit without "
+             "writing anything. Exit 0 when every check passes, 2 when one "
+             "fails. Warnings do not fail it. The checks are the ones that "
+             "have already caught this project out once each.")
     return parser
 
 
@@ -725,8 +748,245 @@ def _ladder_anchors(specs, env):
     return [parse_player(spec).load(env) for spec in (specs or ["random"])]
 
 
+#: Flags that describe THIS invocation rather than the run, and so must not
+#: be carried from one launch into the next through a recipe: --config names
+#: the file being read, --doctor is a mode, --resume and --replace are
+#: decisions about the directory in front of you.
+_NOT_RECIPE = frozenset({"config", "doctor", "resume", "replace"})
+
+
+def recipe_of(args: argparse.Namespace) -> dict[str, Any]:
+    """Every flag the parser knows, resolved, JSON-clean, keyed by dest.
+
+    Paths become strings and the append-action list stays a list, so the
+    result round-trips through json.dumps and back through --config to the
+    same namespace. Nothing derived is in here -- observation_channels,
+    eval_opponent and the PPOConfig internals live beside it in config.json
+    and are computed from these, never the other way round.
+    """
+    out: dict[str, Any] = {}
+    for key, value in sorted(vars(args).items()):
+        if key in _NOT_RECIPE:
+            continue
+        if isinstance(value, Path):
+            value = str(value)
+        elif isinstance(value, (list, tuple)):
+            value = [str(v) if isinstance(v, Path) else v for v in value]
+        out[key] = value
+    return out
+
+
+def load_recipe(path: Path) -> dict[str, Any]:
+    """A recipe mapping from a YAML or JSON file, or from a run's config.json.
+
+    A config.json carries the recipe under its ``recipe`` key beside twenty
+    derived fields; a hand-written recipe is the mapping itself. Both shapes
+    are accepted so ``--config runs/<name>/config.json`` relaunches a run and
+    ``--config recipes/x.yaml`` launches a template, with no third format.
+    """
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() in (".yaml", ".yml"):
+        import yaml  # PyYAML 6, present in this environment
+        data = yaml.safe_load(text)
+    else:
+        data = json.loads(text)
+    if not isinstance(data, dict):
+        raise SystemExit(f"{path} does not hold a mapping at its top level")
+    if "recipe" in data and isinstance(data["recipe"], dict):
+        data = data["recipe"]
+    return data
+
+
+def _parse_with_recipe(parser: argparse.ArgumentParser,
+                       argv: list[str] | None) -> argparse.Namespace:
+    """Parse, with a --config file supplying defaults the command line beats.
+
+    Two passes: the first finds --config alone, the second parses everything
+    with the recipe installed as defaults. Explicit flags therefore override
+    the file, which is what makes "relaunch this run but with --seed 1" a
+    one-flag command. A key the parser does not know is refused: a typo in a
+    recipe that is silently ignored trains on the default with no message,
+    which is the failure this flag exists to prevent.
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=Path, default=None)
+    found, _ = pre.parse_known_args(argv)
+    if found.config is not None:
+        if not found.config.is_file():
+            raise SystemExit(f"--config {found.config}: no such file")
+        recipe = load_recipe(found.config)
+        known = {a.dest for a in parser._actions}
+        unknown = sorted(k for k in recipe if k not in known)
+        if unknown:
+            raise SystemExit(
+                f"--config {found.config} names flags this parser does not "
+                f"have: {unknown}. Refused rather than ignored: a misspelt "
+                "key that is skipped silently trains on the default.")
+        typed: dict[str, Any] = {}
+        for action in parser._actions:
+            if action.dest not in recipe:
+                continue
+            value = recipe[action.dest]
+            if action.type is Path or isinstance(action.default, Path):
+                value = None if value is None else Path(value)
+            typed[action.dest] = value
+        parser.set_defaults(**typed)
+    args = parser.parse_args(argv)
+    args.config = found.config
+    return args
+
+
+def _doctor(args: argparse.Namespace) -> int:
+    """Preflight. Every check here is one that has already failed for real.
+
+    Prints one line per check, then the resolved recipe, and writes nothing.
+    A failing check exits 2; a warning is printed and does not fail the run,
+    because a warning that fails the run is a check nobody can get past when
+    the situation is deliberate.
+    """
+    import shutil
+    failures = 0
+    lines: list[str] = []
+
+    def ok(msg):
+        lines.append(f"  ok   {msg}")
+
+    def warn(msg):
+        lines.append(f"  !    {msg}")
+
+    def fail(msg):
+        nonlocal failures
+        failures += 1
+        lines.append(f"  FAIL {msg}")
+
+    # --envs must divide by --workers, or the vec env cannot split them.
+    if args.workers and args.envs % args.workers:
+        fail(f"--envs {args.envs} does not divide by --workers {args.workers}")
+    else:
+        ok(f"envs {args.envs} across workers {args.workers}")
+
+    # Oversubscription: one evaluation once took 615% of 8 cores because
+    # torch spawns a thread per core per process, and eight workers each did.
+    cpus = os.cpu_count() or 1
+    threads = torch.get_num_threads()
+    procs = (args.workers or 0) + 1
+    if threads * procs > cpus * 2:
+        warn(f"torch uses {threads} threads x {procs} processes on {cpus} "
+             f"cores; set OMP_NUM_THREADS/TORCH_NUM_THREADS to cap it")
+    else:
+        ok(f"torch {threads} threads x {procs} processes on {cpus} cores")
+
+    # --init-from and --resume are different things; --kl needs an anchor.
+    if args.init_from and args.resume:
+        fail("--init-from and --resume cannot be combined")
+    if args.kl > 0.0 and not (args.kl_reference or args.init_from):
+        fail("--kl > 0 with neither --init-from nor --kl-reference anchors "
+             "the policy to random noise")
+    else:
+        anchor = args.kl_reference or args.init_from
+        ok(f"kl {args.kl}" + (f" anchored to {anchor}" if args.kl > 0 else ""))
+
+    # The borrowed weights must be the head and observation this run builds.
+    # main() refuses this too, but only after loading the whole build.
+    if args.init_from:
+        if not Path(args.init_from).is_file():
+            fail(f"--init-from {args.init_from}: no such file")
+        else:
+            try:
+                ck = torch.load(args.init_from, map_location="cpu",
+                                weights_only=False)
+                head = ck.get("head")
+                obs = ck.get("observation")
+                if head and head != args.head:
+                    fail(f"--init-from holds a {head!r} head; --head is "
+                         f"{args.head!r}")
+                elif obs and obs != args.observation:
+                    fail(f"--init-from was trained on observation {obs!r}; "
+                         f"--observation is {args.observation!r}")
+                else:
+                    ok(f"init-from {args.init_from} ({head or '?'} head, "
+                       f"observation {obs or 'unrecorded'})")
+            except Exception as exc:  # a corrupt file is a failure too
+                fail(f"--init-from {args.init_from} did not load: {exc}")
+
+    # The ladder. Two things cost real time: an anchor absent from the
+    # ratings table is pinned at 0 Elo and shifts every reading silently;
+    # and naming the search expert as an anchor makes the probe PLAY it, at
+    # ~30s a match -- one probe measured 33,055s. The table exists so the
+    # expert's rung is reported without a single expert battle.
+    if args.probe == "ladder":
+        anchors = list(args.ladder_anchor) or ["random"]
+        searchy = [a for a in anchors if str(a).startswith("search")]
+        if searchy:
+            warn(f"ladder anchor {searchy} is a search bot: the probe will "
+                 f"play it at ~30s/match every --eval-every. One such probe "
+                 f"measured 33,055s. Put it in --ladder-ratings instead.")
+        if args.ladder_ratings is not None:
+            if not Path(args.ladder_ratings).is_file():
+                fail(f"--ladder-ratings {args.ladder_ratings}: no such file")
+            else:
+                try:
+                    table = _ladder_ratings(
+                        args.ladder_ratings, mode=_LADDER_PROBE_MODE,
+                        observation=args.observation,
+                        tower_level=args.tower_level)
+                    missing = [a for a in anchors if a not in table]
+                    if missing:
+                        fail(f"anchors {missing} are not in "
+                             f"{args.ladder_ratings}, which holds "
+                             f"{sorted(table)}; an absent anchor pins at 0 Elo")
+                    else:
+                        rung = ("; expert rung available"
+                                if "search-c18h15" in table
+                                else "; NO expert rung in this table")
+                        ok(f"ladder anchors {anchors} all rated in "
+                           f"{Path(args.ladder_ratings).name}{rung}")
+                except SystemExit as exc:
+                    fail(f"--ladder-ratings refused: {exc}")
+        else:
+            warn("ladder probe with no --ladder-ratings: every anchor sits "
+                 "at 0 Elo and ladder_elo_vs_expert is never reported")
+
+    # The directory, exactly as main() would judge it, before it costs
+    # anything. _guard_run_directory writes nothing.
+    out = args.out / args.name
+    try:
+        _guard_run_directory(out, args)
+        ok(f"run directory {out}" + (" (resuming)" if args.resume else ""))
+    except SystemExit as exc:
+        fail(str(exc).splitlines()[0])
+
+    # Disk. A checkpoint is ~20 MB and is written every --save-every; a
+    # metrics file grows a few KB an update; a full run leaves ~100 MB.
+    try:
+        probe_dir = args.out if args.out.exists() else Path.cwd()
+        free = shutil.disk_usage(probe_dir).free
+        if free < 500 * 1024 * 1024:
+            fail(f"only {free // 2**20} MB free under {args.out}")
+        else:
+            ok(f"{free // 2**30} GB free under {args.out}")
+    except OSError as exc:
+        warn(f"could not read free space: {exc}")
+
+    print("doctor:", flush=True)
+    for line in lines:
+        print(line, flush=True)
+    print("\nresolved recipe:", flush=True)
+    try:
+        import yaml
+        print(yaml.safe_dump(recipe_of(args), sort_keys=True,
+                             default_flow_style=False), flush=True)
+    except ImportError:
+        print(json.dumps(recipe_of(args), indent=2), flush=True)
+    verdict = "PASS" if failures == 0 else f"FAIL ({failures})"
+    print(f"doctor: {verdict}", flush=True)
+    return 0 if failures == 0 else 2
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    args = _parse_with_recipe(build_parser(), argv)
+    if args.doctor:
+        return _doctor(args)
     # Resolved before anything is written, because config.json records it.
     anchor_path = args.kl_reference or args.init_from
 
@@ -878,7 +1138,15 @@ def main(argv: list[str] | None = None) -> int:
               # The scale the in-run lift is measured on, which is now a
               # constant rather than whatever --reward happened to be.
               "eval_reward": {"kind": "projected", **EVAL_REWARD.as_dict()},
-              "eval_episodes": args.eval_episodes}
+              "eval_episodes": args.eval_episodes,
+              # The complete launch, nested under one key. Nineteen of the
+              # forty-one flags -- steps, workers, envs, lr, entropy, device,
+              # the whole anneal, both ladder flags -- were recorded nowhere,
+              # so this file could describe a run and could not relaunch it.
+              # Nested rather than spread, because watch.py pairs two runs
+              # for A/B only while their top-level key sets differ by at
+              # most four, and this is one key. --config reads it back.
+              "recipe": recipe_of(args)}
     # Written from the CLI every start, resume included -- so on a resume the
     # arena-defining half of it is whatever `_check_resume_arena` settled at
     # the top of this function, which is a key short wherever the recorded

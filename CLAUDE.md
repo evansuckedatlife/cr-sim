@@ -45,6 +45,23 @@ Two sessions work in this repo. **Never kill another session's run.** Worker
 processes appear as `multiprocessing.spawn` children — attribute them to their
 parent pid before concluding anything is orphaned.
 
+## A run is a file, and it is checked before it runs
+
+Launch from a recipe, not from 45 flags typed by hand:
+
+```bash
+python -m cr_sim.train.run --config recipes/selfplay-ladder.yaml --name my-run --doctor
+python -m cr_sim.train.run --config recipes/selfplay-ladder.yaml --name my-run
+```
+
+Flags on the command line override the file; a key the parser does not know is
+refused. Every run's `config.json` carries its full recipe under `recipe`, so
+`--config runs/<name>/config.json` relaunches it. Run `--doctor` first: it
+checks envs/workers, the borrowed checkpoint's head and observation, ladder
+anchors against the ratings table, free disk, and the directory guard, and
+writes nothing. **Never name the search expert as a `--ladder-anchor`** -- the
+ratings table supplies its rung, and playing it cost one probe 33,055 s.
+
 ## The watcher runs stale code
 
 Python does not reload an edited module in a running process. After any change
